@@ -1,4 +1,12 @@
 {
-  "airtable_pat": "pat_REPLACE_WITH_YOUR_TOKEN",
-  "db_path": "migration.db"
+  "token": "PASTE_WRITE_TOKEN_HERE",
+  "scopes": ["data.records:read", "schema.bases:read"],
+  "bases": [
+    {
+      "name":"PASTE_BASE_NAME_HERE",
+      "baseId": "appXXXXXXXXXXXXXX"
+    }
+  ],
+  "db_path": "migration.db",
+  "requests_per_second": 4.5
 }

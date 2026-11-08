@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.3"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.4"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -65,6 +65,8 @@ async function loadStatus() {
   tb.textContent = "Token: " + (s.token_configured ? "configured" : "not configured");
   tb.className = "badge " + (s.token_configured ? "ok" : "bad");
   $("tokenYesNo").textContent = s.token_configured ? "yes" : "no";
+  baseChoices = s.bases || [];
+  if (baseChoices.length === 1 && !$("baseId").value) $("baseId").value = baseChoices[0].baseId;
   const sb = $("setupBanner");
   sb.hidden = s.token_configured;
   sb.textContent = s.token_configured ? "" : ("Setup needed: " + (s.config_problem || "No token configured."));
@@ -196,18 +198,18 @@ async function loadSchema() {
 }
 
 function fillScopeSelectors() {
-  const sb = $("scopeBase"), st = $("scopeTable"), rb = $("resBase"), rt = $("resTable");
-  const keepB = [sb.value, rb.value], keepT = [st.value, rt.value];
-  for (const n of [sb, rb]) { clear(n); if (n === rb) n.appendChild(el("option", { value: "", text: "All bases" })); }
+  const sb = $("scopeBase"), st = $("scopeTable"), rb = $("resBase"), rt = $("resTable"), cb = $("csvBase");
+  const keepB = [sb.value, rb.value, cb.value], keepT = [st.value, rt.value];
+  for (const n of [sb, rb, cb]) { clear(n); if (n !== sb) n.appendChild(el("option", { value: "", text: "All bases" })); }
   for (const n of [st, rt]) { clear(n); if (n === rt) n.appendChild(el("option", { value: "", text: "All tables" })); }
   for (const b of state.schema) {
-    for (const n of [sb, rb]) n.appendChild(el("option", { value: b.base_id, text: b.base_id }));
+    for (const n of [sb, rb, cb]) n.appendChild(el("option", { value: b.base_id, text: b.base_id }));
     for (const t of b.tables) {
       if (t.stale) continue;
       for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: b.base_id + " / " + t.table_name }));
     }
   }
-  sb.value = keepB[0]; rb.value = keepB[1]; st.value = keepT[0]; rt.value = keepT[1];
+  sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; st.value = keepT[0]; rt.value = keepT[1];
   updateScopeVisibility();
 }
 function updateScopeVisibility() {
@@ -246,7 +248,7 @@ async function loadDepgraph() {
   }
   if (g.inverse_pairs.length) {
     const lines = g.inverse_pairs.map((p) => p.table_a + "." + p.field_a + " ⇄ " + p.table_b + "." + p.field_b + " — " +
-      (p.child_table ? p.child_table + " is the child of " + p.parent_table + " (single-record link)" : "direction unknown (many-to-many, or the hint was not reported)"));
+      (p.child_table ? p.child_table + " is the child of " + p.parent_table + " (single-record link)" : "direction unknown (many-to-many, or the hint was not reported): load together as a cycle"));
     if (g.mode === "literal") notes.appendChild(note("warn", g.inverse_pairs.length + " two-way link pair(s) found (a link field and its inverse). Literal mode counts each pair as a 2-table cycle. If these are just Airtable's automatic inverse fields, switch to \"Resolve two-way link pairs\".", lines));
     else notes.appendChild(note("info", g.inverse_pairs.length + " two-way link pair(s). Where exactly one side is a single-record link, that side's table is ordered as the child. The rest add no ordering; populate their links in a second pass, after both tables' records exist.", lines));
   }
@@ -327,6 +329,65 @@ function drawGraph(g, selfTables) {
   box.appendChild(svg);
 }
 
+/* ---------- base picker: dropdown from config.json, typing still allowed ---------- */
+let baseChoices = [];
+let baseActive = -1;
+function baseMatches(filter) {
+  const f = (filter || "").trim().toLowerCase();
+  return f ? baseChoices.filter((b) => b.baseId.toLowerCase().includes(f) || (b.name || "").toLowerCase().includes(f)) : baseChoices;
+}
+function openBaseMenu(filter) {
+  const menu = $("baseMenu"), list = baseMatches(filter);
+  clear(menu);
+  baseActive = -1;
+  if (!baseChoices.length) {
+    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json. Type a base ID instead." }));
+  } else if (!list.length) {
+    menu.appendChild(el("li", { class: "combo-empty", text: "No configured base matches. The text you typed will be used as the base ID." }));
+  }
+  list.forEach((b, i) => {
+    const li = el("li", { role: "option", "data-id": b.baseId },
+      el("span", { class: "combo-name", text: b.name || "(no name)" }), el("code", { text: b.baseId }));
+    li.addEventListener("mousedown", (ev) => { ev.preventDefault(); chooseBase(b.baseId); });
+    menu.appendChild(li);
+  });
+  menu.hidden = false;
+  $("baseId").setAttribute("aria-expanded", "true");
+}
+function closeBaseMenu() {
+  $("baseMenu").hidden = true;
+  $("baseId").setAttribute("aria-expanded", "false");
+  baseActive = -1;
+}
+function chooseBase(id) {
+  $("baseId").value = id;
+  closeBaseMenu();
+  $("baseId").dispatchEvent(new Event("input", { bubbles: true }));
+}
+function moveBaseActive(step) {
+  const items = Array.from($("baseMenu").querySelectorAll("li[data-id]"));
+  if (!items.length) return;
+  baseActive = (baseActive + step + items.length) % items.length;
+  items.forEach((li, i) => li.classList.toggle("active", i === baseActive));
+  items[baseActive].scrollIntoView({ block: "nearest" });
+}
+function initBaseCombo() {
+  const inp = $("baseId");
+  $("baseToggle").addEventListener("click", () => { if ($("baseMenu").hidden) { openBaseMenu(""); inp.focus(); } else closeBaseMenu(); });
+  inp.addEventListener("focus", () => { if (!inp.value) openBaseMenu(""); });
+  inp.addEventListener("input", () => openBaseMenu(inp.value));
+  inp.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowDown") { ev.preventDefault(); if ($("baseMenu").hidden) openBaseMenu(""); moveBaseActive(1); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); moveBaseActive(-1); }
+    else if (ev.key === "Enter" && !$("baseMenu").hidden && baseActive >= 0) {
+      ev.preventDefault();
+      const li = $("baseMenu").querySelectorAll("li[data-id]")[baseActive];
+      if (li) chooseBase(li.getAttribute("data-id"));
+    } else if (ev.key === "Escape") closeBaseMenu();
+  });
+  document.addEventListener("mousedown", (ev) => { if (!$("baseCombo").contains(ev.target)) closeBaseMenu(); });
+}
+
 /* ---------- step 4: report ---------- */
 function reportUrl(kind, extra) {
   return "/api/report." + kind + "?mode=" + encodeURIComponent($("depMode").value) + (extra || "");
@@ -334,7 +395,13 @@ function reportUrl(kind, extra) {
 function syncReportLinks() {
   $("lnkMhtml").setAttribute("href", reportUrl("mhtml"));
   $("lnkHtml").setAttribute("href", reportUrl("html", "&download=1"));
+  $("lnkOrderCsv").setAttribute("href", "/api/export/load_order.csv?mode=" + encodeURIComponent($("depMode").value) +
+    "&base_id=" + encodeURIComponent($("csvBase").value));
+  $("lnkProfileCsv").setAttribute("href", "/api/export/profile.csv?base_id=" + encodeURIComponent($("resBase").value) +
+    "&table_id=" + encodeURIComponent($("resTable").value));
   const off = !state.ready || !state.schema.length;
+  $("lnkOrderCsv").classList.toggle("disabled", off);
+  $("lnkProfileCsv").classList.toggle("disabled", off);
   $("lnkMhtml").classList.toggle("disabled", off);
   $("lnkHtml").classList.toggle("disabled", off);
   $("btnReportPreview").disabled = off;
@@ -478,6 +545,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btnProfile").addEventListener("click", startProfile);
   $("btnCancel").addEventListener("click", cancelProfile);
   $("btnResults").addEventListener("click", guard(loadResults));
+  initBaseCombo();
+  $("resBase").addEventListener("change", syncReportLinks);
+  $("csvBase").addEventListener("change", syncReportLinks);
+  $("resTable").addEventListener("change", syncReportLinks);
   $("btnLog").addEventListener("click", guard(loadLog));
   for (const id of ["logFail", "logTable", "logPurpose"]) $(id).addEventListener("change", guard(loadLog));
   applyReady();

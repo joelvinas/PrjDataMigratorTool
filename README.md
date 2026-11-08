@@ -1,6 +1,6 @@
 # Airtable → Workfront Planning Migration Control Plane (Stage 1)
 
-A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to another tool.
+A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to Adobe Workfront Planning.
 
 Python standard library only. Nothing to install. Runs on `127.0.0.1` only.
 
@@ -58,7 +58,8 @@ airtable-migration-control/
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
-    └── mock_airtable.py             fake Airtable so you can test with no real data
+    ├── mock_airtable.py             fake Airtable so you can test with no real data
+    └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
 ```
 
 ## Run it
@@ -69,9 +70,19 @@ airtable-migration-control/
 
 1. Copy `config.example.json` to `config.json`, then edit it:
    ```json
-   { "airtable_pat": "pat...your token...", "db_path": "migration.db" }
+   {
+     "token": "PASTE_WRITE_TOKEN_HERE",
+     "scopes": ["data.records:read", "schema.bases:read"],
+     "bases": [ { "name": "PASTE_BASE_NAME_HERE", "baseId": "appXXXXXXXXXXXXXX" } ],
+     "db_path": "migration.db",
+     "requests_per_second": 4.5
+   }
    ```
-   The token needs the scopes `schema.bases:read` and `data.records:read`, with access to the bases you will migrate.
+   - `token`: your Airtable personal access token. It needs `schema.bases:read` and `data.records:read`, with access to the bases you will migrate. (The older key name `airtable_pat` is still accepted.)
+   - `scopes`: a note of what the token was granted. It is shown for reference and is not sent anywhere.
+   - `bases`: the bases you plan to migrate. They appear in the Step 2 picker; a single entry fills in the Base ID for you. Placeholder entries (`appXXXX...`) are ignored.
+   - `db_path`: the SQLite file offered in Step 1.
+   - `requests_per_second`: pacing per base, between 0.5 and 5 (Airtable's limit). 4.5 leaves a small margin.
 2. In a terminal in this folder: `python server.py` (on Mac you may need `python3 server.py`).
 3. Open **http://127.0.0.1:8765**. For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
 4. Stop with Ctrl+C.
@@ -153,6 +164,25 @@ Step 4 can produce a self-contained report for two audiences: people **auditing*
 
 The report is built from the database each time, using the link handling selected in step 4, so regenerating it from the same database gives the same content (only the generated time changes). If the load order saved in `dependency_matrix` differs from the freshly computed one, the report says so. The source and date in section 2 come from the audit entry written with each ingest; a schema ingested before this feature shows "Not recorded" for the source but still shows its date.
 
+### CSV exports
+
+Two metadata-only CSV downloads let you check a run against an answer key or hand the numbers to the next stage.
+
+- **Load order .csv** (step 4, with a base picker): `base_id, table, table_id, load_no, depth, parent_tables, in_cycle`. `load_no` counts within the base. It uses the link handling selected in step 4.
+- **Results .csv** (step 5, uses the base and table pickers above the results grid): `base_id, table, field, field_type, row_count, null_count, cardinality, cardinality_capped`. Fields no longer in the source are left out. A capped field shows the cap and `cardinality_capped = yes`; raise the cap if you need an exact value.
+
+The headers are accepted by the reference `compare.py`. Export one base at a time and name its label, for example `python src/compare.py --profile profile.csv --load-order load-order.csv --mode resolve --base ff_main` (use `--mode literal` for a Literal-mode export).
+
+### Checking against an answer key
+
+`test/answer_key_check.py` is optional and needs no Airtable access. Point it at an answer-key folder (`expected_profile.csv`, `expected_link_treatment.csv`, `expected_load_order.csv`, `expected_load_order_literal.csv`):
+
+```
+python test/answer_key_check.py path/to/out/answer_key
+```
+
+It rebuilds the schema from the key, loads it into a scratch database, and compares load number, depth and second-pass treatment for every table and link field in both modes. Against the Fictional Fashionwear key (39 tables, 130 link fields) it reports `checked=416 fail=0`. This checks the ordering logic only; profile counts have to be checked against a real run.
+
 ## Test plan (no real data, about 5 minutes)
 
 **A. Logic only (no Airtable, no token needed)**
@@ -165,9 +195,9 @@ The report is built from the database each time, using the link handling selecte
    - Customers and Products load before Orders; Orders before OrderItems (depth 2).
    - **Three cycles**: Departments ↔ Employees, Articles ↔ Tags, Projects ↔ Tasks. Three OPEN `dependency_graph` rows in the runbook panel. Recomputing again adds no duplicates.
 5. Switch to "Resolve two-way link pairs", Recompute. Expect:
-   - **One cycle** remains: Departments ↔ Employees (a true loop with no inverse fields).
+   - Departments ↔ Employees remains a cycle (a true loop with no inverse fields).
    - **Projects ↔ Tasks** is ordered: Tasks is the child of Projects (the `Tasks.Project` field is a single-record link), so Projects loads first and Tasks has depth 1.
-   - **Articles ↔ Tags** is listed as "direction unknown" (many-to-many) and adds no ordering; populate those links in a second pass.
+   - **Articles ↔ Tags** is listed as "direction unknown" (many-to-many), so both tables stay in a cycle, load together, and have their links set in a second pass. That makes **two cycles** in this mode: Articles ↔ Tags and Departments ↔ Employees.
 6. Edit a copy of the JSON to delete the `Price` field from Products and ingest it. Expect "1 previously known field no longer in source"; the field stays in the schema view with a flag.
 7. Ingest the original JSON under a different base ID. Expect a refusal ("already belong to base ...") and nothing saved.
 8. In step 4, click **Preview report**, then download the **.mhtml** and open it in Chrome or Edge. Expect: section 2 shows `appSampleBase001` as "Provided as a JSON document" with the time you ingested it; section 3 lists all 26 fields; section 4 has 10 rows in the order from step 4 above; section 5 highlights the second-pass links (Customers.Referred By, the Departments/Employees links, Articles.Tags and Tags.Articles); section 6 draws the graph with the Departments/Employees cycle in red and a self-link mark on Customers.
@@ -199,7 +229,7 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 **Two-way link pairs.** Airtable normally creates a reverse (inverse) link field on the linked table. Read literally, every such pair is a two-table cycle, so there are two link-handling modes:
 
 - **Literal** (default): every link field is a dependency, exactly as stated above.
-- **Resolve two-way link pairs:** a pair is detected from `inverse_link_field_id`. If exactly one side has `prefers_single_record_link = 1`, that side's table is the child and only that field orders the load. If both sides or neither side are single-record links (many-to-many, or the hint was not reported), the pair adds no ordering and is listed for a second-pass load.
+- **Resolve two-way link pairs:** a pair is detected from `inverse_link_field_id`. If exactly one side has `prefers_single_record_link = 1`, that side's table is the child and only that field orders the load. If both sides or neither side are single-record links (many-to-many, or the hint was not reported), the direction is unknown, so both fields stay as dependencies and the two tables form a cycle: they load together and their links are set in a second pass. (This follows the rule in the reference answer key: such pairs "stay a cycle".)
 
 **Ingest audit entries.** Each schema ingest writes one informational entry to `runbook_logs` (status `RESOLVED`, component `schema_ingest:<base id>`) in the same transaction and with the same timestamp as the field rows. This is how the report states exactly where a schema came from and when, without adding a column. These entries do not appear in the "Open runbook items" list.
 
@@ -212,7 +242,7 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 - **Capped fields.** Once a field has more distinct values than the cap, tracking stops. The database stores the cap in `cardinality` and sets `cardinality_is_capped = 1`; the UI shows "capped (more than N)". A capped number is never presented as exact. `row_count` and `null_count` are always exact.
 - A table's statistics are saved only after all its pages are read. A table that fails partway keeps its previous statistics.
 
-**API calls.** One function makes every outbound call and logs every attempt (timestamp in UTC, purpose, method, endpoint path, base and table IDs, attempt number, HTTP status, success, duration, records returned, error). It retries HTTP 429, 5xx, network errors and timeouts, with up to 5 attempts, waits that start at 1 second and double up to 30 seconds, and `Retry-After` honored up to 60 seconds. It does not retry 401, 403, 404 or 422; it fails fast with a plain-language explanation (for example, 403 usually means the token lacks access to the base or scope). Requests to the same base are spaced at least 0.2 seconds apart (5 per second). A table that still fails after its retries is logged to `runbook_logs` and the run continues with the next table.
+**API calls.** One function makes every outbound call and logs every attempt (timestamp in UTC, purpose, method, endpoint path, base and table IDs, attempt number, HTTP status, success, duration, records returned, error). It retries HTTP 429, 5xx, network errors and timeouts, with up to 5 attempts, waits that start at 1 second and double up to 30 seconds, and `Retry-After` honored up to 60 seconds. It does not retry 401, 403, 404 or 422; it fails fast with a plain-language explanation (for example, 403 usually means the token lacks access to the base or scope). Requests to the same base are paced by `requests_per_second` in `config.json` (default 5, and never above Airtable's limit of 5 per second per base). A table that still fails after its retries is logged to `runbook_logs` and the run continues with the next table.
 
 **Security.** The server binds to `127.0.0.1` only, rejects requests with a non-localhost `Host` header or a cross-site `Origin`, and requires JSON for all writes. Strings are scrubbed of anything that looks like a token before being logged or returned. The page inserts all data with `textContent`, never `innerHTML`.
 

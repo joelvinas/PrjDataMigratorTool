@@ -16,7 +16,9 @@ The server binds to 127.0.0.1 only. It owns every database and Airtable call.
 The Airtable token is read from config.json and is never stored, logged, or
 sent to the browser.
 """
+import csv
 import hashlib
+import io
 import heapq
 import html as _html
 import quopri
@@ -54,14 +56,15 @@ MAX_ATTEMPTS = int(os.environ.get("AT_MAX_ATTEMPTS", "5"))
 BACKOFF_BASE = float(os.environ.get("AT_BACKOFF_BASE", "1.0"))  # seconds; doubles each retry
 BACKOFF_CAP = 30.0
 RETRY_AFTER_CAP = 60.0
-MIN_INTERVAL = 0.2  # seconds between request starts per base  (= 5 requests/second)
+MAX_RPS = 5.0   # Airtable limit per base; config "requests_per_second" may lower it
+_EMPTY_CFG = {"airtable_pat": "", "db_path": "", "scopes": [], "bases": [], "requests_per_second": MAX_RPS}
 HTTP_TIMEOUT = 30
 MAX_BODY_BYTES = 25 * 1024 * 1024
 DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -287,7 +290,7 @@ def load_config():
             mtime = None
         if _cfg_cache["cfg"] is not None and _cfg_cache["mtime"] == mtime:
             return _cfg_cache["cfg"], _cfg_cache["err"]
-        cfg = {"airtable_pat": "", "db_path": ""}
+        cfg = dict(_EMPTY_CFG)
         err = None
         if mtime is None:
             err = ("config.json was not found next to server.py. Copy config.example.json to "
@@ -298,15 +301,27 @@ def load_config():
                     data = json.load(f)
                 if not isinstance(data, dict):
                     raise ValueError("not an object")
-                token = str(data.get("airtable_pat") or "").strip()
-                if not token or "REPLACE" in token.upper():
+                token = str(data.get("token") or data.get("airtable_pat") or "").strip()   # old key still accepted
+                if not token or "REPLACE" in token.upper() or "PASTE" in token.upper():
                     err = ("config.json has no Airtable token yet. Paste your personal access token into "
-                           "the \"airtable_pat\" value, save the file, then reload this page.")
+                           "the \"token\" value, save the file, then reload this page.")
                     token = ""
-                cfg = {"airtable_pat": token, "db_path": str(data.get("db_path") or "").strip()}
+                scopes = [str(x) for x in data.get("scopes") or [] if isinstance(x, str)]
+                bases = []
+                for b in data.get("bases") or []:
+                    if isinstance(b, dict) and BASE_ID_RE.match(str(b.get("baseId") or "")) \
+                            and "XXXX" not in str(b.get("baseId")).upper():
+                        bases.append({"name": str(b.get("name") or "")[:80], "baseId": str(b["baseId"])})
+                try:
+                    rps = float(data.get("requests_per_second") or MAX_RPS)
+                except (TypeError, ValueError):
+                    rps = MAX_RPS
+                rps = min(max(rps, 0.5), MAX_RPS)   # Airtable allows 5 per second per base
+                cfg = {"airtable_pat": token, "db_path": str(data.get("db_path") or "").strip(),
+                       "scopes": scopes, "bases": bases, "requests_per_second": rps}
             except (OSError, ValueError):
                 err = ("config.json could not be read. It must be valid JSON like "
-                       "{\"airtable_pat\": \"pat...\", \"db_path\": \"optional path\"}.")
+                       "{\"token\": \"pat...\", \"bases\": [{\"name\": \"...\", \"baseId\": \"app...\"}]}.")
         _cfg_cache.update(mtime=mtime, cfg=cfg, err=err)
         return cfg, err
 
@@ -447,6 +462,9 @@ def api_status(_q=None):
         "token_configured": bool(cfg["airtable_pat"]),
         "config_problem": err,
         "default_db_path": cfg["db_path"],
+        "bases": cfg["bases"],
+        "scopes": cfg["scopes"],
+        "requests_per_second": cfg["requests_per_second"],
         "db_path": STATE["db_path"],
         "expected_tables": EXPECTED_TABLES,
         "custom_api_base": AIRTABLE_API_BASE != "https://api.airtable.com",
@@ -508,7 +526,7 @@ def _throttle(base_id):
     with _rate_lock:
         now = time.monotonic()
         slot = max(now, _next_slot.get(key, 0.0))
-        _next_slot[key] = slot + MIN_INTERVAL
+        _next_slot[key] = slot + 1.0 / load_config()[0]["requests_per_second"]
     wait = slot - now
     if wait > 0:
         time.sleep(wait)
@@ -887,7 +905,8 @@ def compute_graph(conn, mode="literal"):
     mode 'collapse': two-way link pairs (a link field and its inverse) are resolved with Airtable's
         prefersSingleRecordLink hint. If exactly one side is a single-record link, that side's table is the
         child and only that field is an ordering edge. If both or neither side is (many-to-many, or the hint
-        was not reported), the pair adds no ordering edge and is listed for a second-pass load."""
+        was not reported), the direction is unknown, so both fields stay as edges and the two tables form a
+        cycle that loads together, with the links set in a second pass."""
     if mode not in ("literal", "collapse"):
         raise AppError("Unknown dependency mode.")
     rows = [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"]]
@@ -933,8 +952,8 @@ def compute_graph(conn, mode="literal"):
             unresolved.append({"table_name": a["table_name"], "field_name": a["field_name"],
                                "linked_table_id": a["linked_table_id"]})
             continue
-        if mode == "collapse" and a["field_id"] in paired and a["field_id"] not in oriented:
-            continue
+        if mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
+            continue   # reverse side of a pair whose direction is set by the other field
         edges.setdefault((a["table_id"], a["linked_table_id"]), []).append(a["field_name"])
 
     def skey(tid):
@@ -1005,15 +1024,10 @@ def compute_graph(conn, mode="literal"):
         elif tgt not in tables:
             cls, second, why = ("Unresolved", True,
                                 "The linked table is not in the database. Ingest its base, then recompute.")
-        elif mode == "collapse" and a["field_id"] in paired and a["field_id"] not in oriented:
-            if pair_other[a["field_id"]] in oriented:
-                cls, second, why = ("Inverse of an ordered pair", False,
-                                    "Reverse side of a two-way link whose direction is set by the other field. "
-                                    "Adds no ordering.")
-            else:
-                cls, second, why = ("Two-way pair, direction unknown", True,
-                                    "Many-to-many, or the single-link hint was not reported. Load both tables, "
-                                    "then set these links in a second pass.")
+        elif mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
+            cls, second, why = ("Inverse of an ordered pair", False,
+                                "Reverse side of a two-way link whose direction is set by the other field. "
+                                "Adds no ordering.")
         elif comp_of[a["table_id"]] == comp_of[tgt]:
             cls, second, why = ("In a dependency cycle", True,
                                 "Part of a loop between tables. Load the records first, then set these links "
@@ -1625,7 +1639,7 @@ def build_report(mode):
             "<li>%s.%s ⇄ %s.%s: %s</li>" % (
                 esc(p["table_a"]), esc(p["field_a"]), esc(p["table_b"]), esc(p["field_b"]),
                 esc("%s is the child of %s (single-record link)" % (p["child_table"], p["parent_table"])
-                    if p["child_table"] else "direction unknown (many-to-many, or the hint was not reported)"))
+                    if p["child_table"] else "direction unknown (many-to-many, or the hint was not reported): the two tables load together as a cycle"))
             for p in g["inverse_pairs"]))
         if mode == "literal":
             h.append("<p class=\"meta\">In Literal mode each pair counts as a two-table cycle. Regenerate with "
@@ -1716,6 +1730,47 @@ def api_report_mhtml(q):
 
 
 # --------------------------------------------------------------------------
+# CSV exports (metadata only): load order and profile, for checking against an answer key
+# --------------------------------------------------------------------------
+def _csv_bytes(header, rows):
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(header)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def api_export_load_order(q):
+    mode = (q.get("mode") or ["literal"])[0]
+    base = (q.get("base_id") or [""])[0]
+    with db() as conn:
+        g = compute_graph(conn, mode)
+    names = {m["table_id"]: m["table_name"] for m in g["matrix"]}
+    rows, counter = [], {}
+    for m in g["matrix"]:
+        if base and m["base_id"] != base:
+            continue
+        counter[m["base_id"]] = counter.get(m["base_id"], 0) + 1
+        rows.append([m["base_id"], m["table_name"], m["table_id"], counter[m["base_id"]], m["dependency_depth"],
+                     "; ".join(sorted(names.get(p, p) for p in m["parent_table_ids"])),
+                     "yes" if m["in_cycle"] else "no"])
+    body = _csv_bytes(["base_id", "table", "table_id", "load_no", "depth", "parent_tables", "in_cycle"], rows)
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="load-order_%s_%s.csv"' % (mode, _stamp())})
+
+
+def api_export_profile(q):
+    data = api_profile_results(q)["rows"]
+    rows = [[r["base_id"], r["table_name"], r["field_name"], r["data_type"], r["row_count"], r["null_count"],
+             "" if r["cardinality"] is None else r["cardinality"], "yes" if r["cardinality_capped"] else "no"]
+            for r in data if not r["stale"]]
+    body = _csv_bytes(["base_id", "table", "field", "field_type", "row_count", "null_count", "cardinality",
+                       "cardinality_capped"], rows)
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="profile_%s.csv"' % _stamp()})
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -1726,7 +1781,8 @@ STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
               "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
-              "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml}
+              "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
+              "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
                "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel}

@@ -43,7 +43,11 @@
   <p>Airtable token configured in <code>config.json</code>: <strong id="tokenYesNo">...</strong></p>
   <div class="row">
     <label for="baseId">Base ID</label>
-    <input id="baseId" type="text" placeholder="appXXXXXXXXXXXXXX" autocomplete="off">
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
   </div>
   <p class="hint">Run steps 3 to 5 once for each base. The token never appears in this page.</p>
 </section>
@@ -94,6 +98,8 @@
     <button id="btnReportPreview">Preview report</button>
     <a id="lnkMhtml" class="btnlink primary" href="/api/report.mhtml">Download .mhtml</a>
     <a id="lnkHtml" class="btnlink" href="/api/report.html?download=1">Download .html</a>
+    <select id="csvBase" title="Base for the CSV"><option value="">All bases</option></select>
+    <a id="lnkOrderCsv" class="btnlink" href="/api/export/load_order.csv">Download load order .csv</a>
   </div>
   <p class="hint">.mhtml opens in Chrome and Edge (double-click it, or File &gt; Open). In Firefox or Safari, use the .html download instead. Both contain the same report.</p>
   <div id="reportMessage" class="msg"></div>
@@ -132,6 +138,8 @@
     <select id="resTable"><option value="">All tables</option></select>
     <button id="btnResults">Show results</button>
   </div>
+  <div class="row"><a id="lnkProfileCsv" class="btnlink" href="/api/export/profile.csv">Download results .csv</a>
+    <span class="hint">Uses the base and table chosen above. Metadata only (counts, no values).</span></div>
   <p class="hint">Null = missing, empty text or empty list. Zero and unchecked boxes count as real values. A cardinality marked "capped" is a lower bound: the field has more distinct values than the cap.</p>
   <div class="scroll"><table id="resultsTable" class="grid" hidden>
     <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>
