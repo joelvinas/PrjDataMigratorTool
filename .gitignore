@@ -3,6 +3,7 @@
 
 # Secrets and local data: never commit these
 config.json
+data_extract/
 *.db
 *.sqlite
 *.sqlite3

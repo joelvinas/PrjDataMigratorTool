@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Apply the column migrations (001 and 002) to an existing database. Standard library only.
+"""Apply the migrations (001, 002 and 003) to an existing database. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
-Adds only the columns that are missing, so it is safe to run more than once and on a database that is already
+Adds only the columns and tables that are missing, so it is safe to run more than once and on a database that is already
 up to date. It never drops or changes data. Back up the file first if it matters to you."""
 import os, re, sqlite3, sys
 
@@ -25,9 +25,17 @@ def main():
                 conn.execute(line.strip())
                 have.add(m.group(1))
                 added.append(m.group(1))
+    tables_before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.executescript(open(os.path.join(HERE, "migration_003_add_tables_and_views.sql"), encoding="utf-8").read())
+    new_tables = sorted({r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} - tables_before)
     conn.commit()
     conn.close()
-    print("Added %d column(s): %s" % (len(added), ", ".join(added)) if added else "Already up to date.")
+    if added:
+        print("Added %d column(s): %s" % (len(added), ", ".join(added)))
+    if new_tables:
+        print("Added table(s): %s" % ", ".join(new_tables))
+    if not added and not new_tables:
+        print("Already up to date.")
 
 
 if __name__ == "__main__":

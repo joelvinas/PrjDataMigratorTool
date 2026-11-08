@@ -306,6 +306,38 @@
       ]
      }
     }
+   ],
+   "description": "Lab table with one field of nearly every type.",
+   "views": [
+    {
+     "id": "viwOpt000000001",
+     "name": "Grid view",
+     "type": "grid",
+     "visibleFieldIds": [
+      "fldOptName0001",
+      "fldOptNumber001",
+      "fldOptSingleSel"
+     ]
+    },
+    {
+     "id": "viwOpt000000002",
+     "name": "Intake form",
+     "type": "form"
+    },
+    {
+     "id": "viwOpt000000003",
+     "name": "Launch calendar",
+     "type": "calendar",
+     "visibleFieldIds": [
+      "fldOptName0001",
+      "fldOptDate00001"
+     ]
+    },
+    {
+     "id": "viwOpt000000004",
+     "name": "Roadmap",
+     "type": "timeline"
+    }
    ]
   },
   {
@@ -337,6 +369,16 @@
       "prefersSingleRecordLink": false,
       "inverseLinkFieldId": "fldOptLinkItems1"
      }
+    }
+   ],
+   "views": [
+    {
+     "id": "viwOpt000000005",
+     "name": "Gallery",
+     "type": "gallery",
+     "visibleFieldIds": [
+      "fldOptItemName1"
+     ]
     }
    ]
   }

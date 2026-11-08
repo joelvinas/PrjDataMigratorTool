@@ -87,3 +87,5 @@ td.bad { color: var(--err); font-weight: 600; } td.good { color: var(--ok); }
 .combo-menu li.combo-empty:hover { background: transparent; }
 
 td.settings { color: var(--muted); font-size: 12.5px; max-width: 520px; overflow-wrap: anywhere; }
+
+.tablemeta { margin: 6px 10px; overflow-wrap: anywhere; }

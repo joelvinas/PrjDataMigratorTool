@@ -68,7 +68,9 @@
 
   <h3>Schema in database</h3>
   <div class="row"><button id="btnReloadSchema">Refresh</button>
-    <a id="lnkFieldCsv" class="btnlink" href="/api/export/field_options.csv">Download fields and settings .csv</a></div>
+    <a id="lnkFieldCsv" class="btnlink" href="/api/export/field_options.csv">Download fields and settings .csv</a>
+    <a id="lnkTableCsv" class="btnlink" href="/api/export/tables.csv">Download tables .csv</a>
+    <a id="lnkViewCsv" class="btnlink" href="/api/export/views.csv">Download views .csv</a></div>
   <div id="schemaView" class="schema"></div>
 </section>
 
@@ -113,7 +115,7 @@
 <!-- STEP 5 -->
 <section class="card" id="step5">
   <h2><span class="num">5</span> Run profiling</h2>
-  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Records are counted in memory and discarded; raw data is never saved.</p>
+  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them; it never saves values (step 6 is the only step that does).</p>
   <div class="row">
     <label for="scope">Run</label>
     <select id="scope">
@@ -126,6 +128,10 @@
     <label for="cap">Distinct-value cap per field</label>
     <input id="cap" type="number" min="100" value="1000" class="short">
   </div>
+  <div class="row">
+    <label class="toggle"><input type="checkbox" id="saveRecords"> Also save every record to JSON files during this run</label>
+  </div>
+  <div id="saveNote" class="note warn" hidden><strong>Record data will be written to disk.</strong> The same pass that profiles each table also writes every record and every field value to <code class="exFolderRef">...</code> (one JSON file per table), so there is no second set of API calls. The values are never put in the database, the logs or this page. Leave this box unticked for a test run that keeps nothing on disk. See step 6.</div>
   <div class="row">
     <button id="btnProfile" class="primary">Start profiling</button>
     <button id="btnCancel" hidden>Cancel run</button>
@@ -146,6 +152,25 @@
     <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>
     <tbody></tbody>
   </table></div>
+</section>
+
+<!-- STEP 6 -->
+<section class="card" id="step6">
+  <h2><span class="num">6</span> Saved record files</h2>
+  <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files themselves are not downloaded.</p>
+  <div id="exFilesSummary" class="msg"></div>
+  <div class="scroll"><table id="exFilesTable" class="grid compact" hidden>
+    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th>Captured (UTC)</th><th>Check</th><th>SHA-256</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <p class="hint">The page shows counts, sizes and checksums only. "Matches profile" compares the file's record count with the table's latest profile.</p>
+  <div class="row">
+    <label for="exBase">Delete files for</label>
+    <select id="exBase"><option value="">All bases</option></select>
+    <button id="btnExtractDelete">Delete saved record files</button>
+    <button id="btnExtractRefresh">Refresh</button>
+  </div>
+  <div id="exMessage" class="msg"></div>
 </section>
 
 <!-- API LOG -->

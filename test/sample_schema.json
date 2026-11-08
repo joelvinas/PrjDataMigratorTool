@@ -39,6 +39,22 @@
             "prefersSingleRecordLink": true
           }
         }
+      ],
+      "views": [
+        {
+          "id": "viwCust0000001",
+          "name": "All customers",
+          "type": "grid",
+          "visibleFieldIds": [
+            "fldCustName0001",
+            "fldCustEmail001"
+          ]
+        },
+        {
+          "id": "viwCust0000002",
+          "name": "Signup form",
+          "type": "form"
+        }
       ]
     },
     {
@@ -68,6 +84,14 @@
             "isReversed": false,
             "prefersSingleRecordLink": true
           }
+        }
+      ],
+      "views": [
+        {
+          "id": "viwOrd00000001",
+          "name": "Orders by status",
+          "type": "kanban",
+          "visibleFieldIds": []
         }
       ]
     },

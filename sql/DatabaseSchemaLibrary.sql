@@ -40,6 +40,35 @@ CREATE TABLE airtable_fields (
 CREATE INDEX idx_airtable_fields_table ON airtable_fields(table_id);
 CREATE INDEX idx_airtable_fields_linked ON airtable_fields(linked_table_id);
 
+-- 1b. Table-level and view metadata from the Metadata API (no record data)
+CREATE TABLE airtable_tables (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    table_description TEXT,        -- the description typed on the table in Airtable
+    primary_field_id TEXT,         -- the table's primaryFieldId
+    table_json TEXT,               -- the table object as returned, minus its fields and views (lossless for anything else)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_airtable_tables_base ON airtable_tables(base_id);
+
+CREATE TABLE airtable_views (
+    view_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    view_name TEXT NOT NULL,
+    view_type TEXT NOT NULL,       -- grid, form, calendar, gallery, kanban, timeline, block (Gantt), ...
+    view_position INTEGER,         -- 0-based position in the order Airtable listed the table's views
+    visible_field_ids TEXT,        -- JSON array of Airtable field IDs the view shows (requested with include=visibleFieldIds)
+    view_json TEXT,                -- the view object exactly as returned (lossless backup of everything above)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+
+CREATE INDEX idx_airtable_views_table ON airtable_views(table_id);
+CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
+
 -- 2. Workfront Planning Environment Schema (Dev & Prod)
 CREATE TABLE workfront_fields (
     workfront_field_pk TEXT PRIMARY KEY, -- Composite key: environment + field_id
