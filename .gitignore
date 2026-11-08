@@ -1,3 +1,6 @@
+# Output folder
+/out
+
 # Secrets and local data: never commit these
 config.json
 *.db
