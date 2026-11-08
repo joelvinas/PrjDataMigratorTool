@@ -93,7 +93,13 @@ class H(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[:3] == ["v0", "meta", "bases"] and parts[4] == "tables":
             if parts[3] not in SCHEMAS:
                 return self._json(404, {"error": {"type": "NOT_FOUND", "message": "Could not find base"}})
-            return self._json(200, load(parts[3]))
+            doc = load(parts[3])
+            if q.get("include") != ["visibleFieldIds"]:   # like the real API: visible fields only when asked for
+                doc = json.loads(json.dumps(doc))
+                for t in doc["tables"]:
+                    for v in t.get("views", []):
+                        v.pop("visibleFieldIds", None)
+            return self._json(200, doc)
         if len(parts) == 3 and parts[0] == "v0" and parts[1] in SCHEMAS:
             base, tid = parts[1], parts[2]
             table = next((t for t in load(base)["tables"] if t["id"] == tid), None)

@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.3"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.7"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -65,6 +65,8 @@ async function loadStatus() {
   tb.textContent = "Token: " + (s.token_configured ? "configured" : "not configured");
   tb.className = "badge " + (s.token_configured ? "ok" : "bad");
   $("tokenYesNo").textContent = s.token_configured ? "yes" : "no";
+  baseChoices = s.bases || [];
+  if (baseChoices.length === 1 && !$("baseId").value) $("baseId").value = baseChoices[0].baseId;
   const sb = $("setupBanner");
   sb.hidden = s.token_configured;
   sb.textContent = s.token_configured ? "" : ("Setup needed: " + (s.config_problem || "No token configured."));
@@ -80,7 +82,7 @@ function applyReady() {
   const dbBadge = $("dbBadge");
   dbBadge.textContent = "Database: " + (state.ready ? "connected" : "not connected");
   dbBadge.className = "badge " + (state.ready ? "ok" : "");
-  for (const id of ["btnIngest", "btnRecompute", "btnProfile", "btnReloadSchema", "btnResults", "btnLog"]) $(id).disabled = !state.ready;
+  for (const id of ["btnIngest", "btnRecompute", "btnProfile", "btnReloadSchema", "btnResults", "btnLog", "btnExtractDelete", "btnExtractRefresh"]) $(id).disabled = !state.ready;
   if (typeof syncReportLinks === "function") syncReportLinks();
   $("btnIngest").disabled = !state.ready;
 }
@@ -136,7 +138,7 @@ async function createDb() {
   } catch (e) { setMsg("dbMessage", e.message, "err"); }
 }
 async function afterConnect() {
-  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true)]);
+  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true), loadExtractFiles()]);
 }
 
 /* ---------- step 3: ingest + schema view ---------- */
@@ -150,7 +152,7 @@ async function ingest() {
     const r = await api("POST", "/api/schema/ingest", {
       base_id: $("baseId").value, source: src, schema_json: src === "json" ? $("schemaText").value : undefined,
     });
-    let msg = "Ingested base " + r.base_id + ": " + r.tables + " tables, " + r.fields + " fields (" + r.added + " new, " + r.updated + " refreshed).";
+    let msg = "Ingested base " + r.base_id + ": " + r.tables + " tables, " + r.fields + " fields, " + (r.views || 0) + " views (" + r.added + " new fields, " + r.updated + " refreshed).";
     let kind = "ok";
     if (r.no_longer_in_source) { msg += " " + r.no_longer_in_source + " previously known field(s) are no longer in the source (kept, flagged below)."; kind = "warn"; }
     setMsg("ingestMessage", msg, kind);
@@ -183,9 +185,16 @@ async function loadSchema() {
       const sum = el("summary", {}, t.table_name, el("span", { class: "tag", text: t.fields.length + " fields" }),
         t.stale ? el("span", { class: "tag stale", text: "no longer in source" }) : (t.stale_fields ? el("span", { class: "tag stale", text: t.stale_fields + " field(s) no longer in source" }) : null));
       const rows = t.fields.map((f) => el("tr", {}, el("td", { text: f.field_name }), el("td", { text: f.field_id }), el("td", { text: typeLabel(f) }),
+        el("td", { class: "settings", text: f.settings || "" }),
         el("td", {}, f.stale ? el("span", { class: "tag stale", text: "no longer in source" }) : "")));
-      inner.appendChild(el("details", {}, sum, el("table", { class: "grid compact" },
-        el("thead", {}, el("tr", {}, el("th", { text: "Field" }), el("th", { text: "Field ID" }), el("th", { text: "Type / linked table" }), el("th", { text: "" }))),
+      const meta = [];
+      if (t.primary_field_name) meta.push("Primary field: " + t.primary_field_name);
+      if (t.description) meta.push("Description: " + t.description);
+      if (t.views && t.views.length) meta.push("Views (" + t.views.length + "): " + t.views.map((v) =>
+        v.view_name + " [" + v.view_type + (v.visible_field_count === null ? "" : ", " + v.visible_field_count + " fields") + "]" + (v.stale ? " (no longer in source)" : "")).join("; "));
+      else if (t.details_captured) meta.push("No views reported");
+      inner.appendChild(el("details", {}, sum, meta.length ? el("p", { class: "hint tablemeta", text: meta.join("  |  ") }) : null, el("table", { class: "grid compact" },
+        el("thead", {}, el("tr", {}, el("th", { text: "Field" }), el("th", { text: "Field ID" }), el("th", { text: "Type / linked table" }), el("th", { text: "Settings" }), el("th", { text: "" }))),
         el("tbody", {}, rows))));
     }
     d.appendChild(inner);
@@ -196,18 +205,19 @@ async function loadSchema() {
 }
 
 function fillScopeSelectors() {
-  const sb = $("scopeBase"), st = $("scopeTable"), rb = $("resBase"), rt = $("resTable");
-  const keepB = [sb.value, rb.value], keepT = [st.value, rt.value];
-  for (const n of [sb, rb]) { clear(n); if (n === rb) n.appendChild(el("option", { value: "", text: "All bases" })); }
+  const sb = $("scopeBase"), st = $("scopeTable"), rb = $("resBase"), rt = $("resTable"), cb = $("csvBase");
+  const eb = $("exBase");
+  const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [st.value, rt.value];
+  for (const n of [sb, rb, cb, eb]) { clear(n); if (n !== sb) n.appendChild(el("option", { value: "", text: "All bases" })); }
   for (const n of [st, rt]) { clear(n); if (n === rt) n.appendChild(el("option", { value: "", text: "All tables" })); }
   for (const b of state.schema) {
-    for (const n of [sb, rb]) n.appendChild(el("option", { value: b.base_id, text: b.base_id }));
+    for (const n of [sb, rb, cb, eb]) n.appendChild(el("option", { value: b.base_id, text: b.base_id }));
     for (const t of b.tables) {
       if (t.stale) continue;
       for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: b.base_id + " / " + t.table_name }));
     }
   }
-  sb.value = keepB[0]; rb.value = keepB[1]; st.value = keepT[0]; rt.value = keepT[1];
+  sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; st.value = keepT[0]; rt.value = keepT[1];
   updateScopeVisibility();
 }
 function updateScopeVisibility() {
@@ -246,7 +256,7 @@ async function loadDepgraph() {
   }
   if (g.inverse_pairs.length) {
     const lines = g.inverse_pairs.map((p) => p.table_a + "." + p.field_a + " ⇄ " + p.table_b + "." + p.field_b + " — " +
-      (p.child_table ? p.child_table + " is the child of " + p.parent_table + " (single-record link)" : "direction unknown (many-to-many, or the hint was not reported)"));
+      (p.child_table ? p.child_table + " is the child of " + p.parent_table + " (single-record link)" : "direction unknown (many-to-many, or the hint was not reported): load together as a cycle"));
     if (g.mode === "literal") notes.appendChild(note("warn", g.inverse_pairs.length + " two-way link pair(s) found (a link field and its inverse). Literal mode counts each pair as a 2-table cycle. If these are just Airtable's automatic inverse fields, switch to \"Resolve two-way link pairs\".", lines));
     else notes.appendChild(note("info", g.inverse_pairs.length + " two-way link pair(s). Where exactly one side is a single-record link, that side's table is ordered as the child. The rest add no ordering; populate their links in a second pass, after both tables' records exist.", lines));
   }
@@ -327,6 +337,65 @@ function drawGraph(g, selfTables) {
   box.appendChild(svg);
 }
 
+/* ---------- base picker: dropdown from config.json, typing still allowed ---------- */
+let baseChoices = [];
+let baseActive = -1;
+function baseMatches(filter) {
+  const f = (filter || "").trim().toLowerCase();
+  return f ? baseChoices.filter((b) => b.baseId.toLowerCase().includes(f) || (b.name || "").toLowerCase().includes(f)) : baseChoices;
+}
+function openBaseMenu(filter) {
+  const menu = $("baseMenu"), list = baseMatches(filter);
+  clear(menu);
+  baseActive = -1;
+  if (!baseChoices.length) {
+    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json. Type a base ID instead." }));
+  } else if (!list.length) {
+    menu.appendChild(el("li", { class: "combo-empty", text: "No configured base matches. The text you typed will be used as the base ID." }));
+  }
+  list.forEach((b, i) => {
+    const li = el("li", { role: "option", "data-id": b.baseId },
+      el("span", { class: "combo-name", text: b.name || "(no name)" }), el("code", { text: b.baseId }));
+    li.addEventListener("mousedown", (ev) => { ev.preventDefault(); chooseBase(b.baseId); });
+    menu.appendChild(li);
+  });
+  menu.hidden = false;
+  $("baseId").setAttribute("aria-expanded", "true");
+}
+function closeBaseMenu() {
+  $("baseMenu").hidden = true;
+  $("baseId").setAttribute("aria-expanded", "false");
+  baseActive = -1;
+}
+function chooseBase(id) {
+  $("baseId").value = id;
+  closeBaseMenu();
+  $("baseId").dispatchEvent(new Event("input", { bubbles: true }));
+}
+function moveBaseActive(step) {
+  const items = Array.from($("baseMenu").querySelectorAll("li[data-id]"));
+  if (!items.length) return;
+  baseActive = (baseActive + step + items.length) % items.length;
+  items.forEach((li, i) => li.classList.toggle("active", i === baseActive));
+  items[baseActive].scrollIntoView({ block: "nearest" });
+}
+function initBaseCombo() {
+  const inp = $("baseId");
+  $("baseToggle").addEventListener("click", () => { if ($("baseMenu").hidden) { openBaseMenu(""); inp.focus(); } else closeBaseMenu(); });
+  inp.addEventListener("focus", () => { if (!inp.value) openBaseMenu(""); });
+  inp.addEventListener("input", () => openBaseMenu(inp.value));
+  inp.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowDown") { ev.preventDefault(); if ($("baseMenu").hidden) openBaseMenu(""); moveBaseActive(1); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); moveBaseActive(-1); }
+    else if (ev.key === "Enter" && !$("baseMenu").hidden && baseActive >= 0) {
+      ev.preventDefault();
+      const li = $("baseMenu").querySelectorAll("li[data-id]")[baseActive];
+      if (li) chooseBase(li.getAttribute("data-id"));
+    } else if (ev.key === "Escape") closeBaseMenu();
+  });
+  document.addEventListener("mousedown", (ev) => { if (!$("baseCombo").contains(ev.target)) closeBaseMenu(); });
+}
+
 /* ---------- step 4: report ---------- */
 function reportUrl(kind, extra) {
   return "/api/report." + kind + "?mode=" + encodeURIComponent($("depMode").value) + (extra || "");
@@ -334,7 +403,14 @@ function reportUrl(kind, extra) {
 function syncReportLinks() {
   $("lnkMhtml").setAttribute("href", reportUrl("mhtml"));
   $("lnkHtml").setAttribute("href", reportUrl("html", "&download=1"));
+  $("lnkOrderCsv").setAttribute("href", "/api/export/load_order.csv?mode=" + encodeURIComponent($("depMode").value) +
+    "&base_id=" + encodeURIComponent($("csvBase").value));
+  $("lnkProfileCsv").setAttribute("href", "/api/export/profile.csv?base_id=" + encodeURIComponent($("resBase").value) +
+    "&table_id=" + encodeURIComponent($("resTable").value));
   const off = !state.ready || !state.schema.length;
+  $("lnkOrderCsv").classList.toggle("disabled", off);
+  for (const id of ["lnkFieldCsv", "lnkTableCsv", "lnkViewCsv"]) $(id).classList.toggle("disabled", off);
+  $("lnkProfileCsv").classList.toggle("disabled", off);
   $("lnkMhtml").classList.toggle("disabled", off);
   $("lnkHtml").classList.toggle("disabled", off);
   $("btnReportPreview").disabled = off;
@@ -361,7 +437,7 @@ async function startProfile() {
   setMsg("profMessage", "Starting...", "");
   try {
     const scope = $("scope").value;
-    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value });
+    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked });
     setMsg("profMessage", "", "");
     await loadProfileStatus(false);
   } catch (e) { setMsg("profMessage", e.message, "err"); }
@@ -385,7 +461,8 @@ function renderProgress(job) {
   const total = job.tables.length;
   const label = { running: "Running", done: "Finished", cancelled: "Cancelled", error: "Stopped by an error" }[job.status] || job.status;
   box.appendChild(el("p", {}, el("strong", { text: label }), " – " + done + " of " + total + " tables done" + (failed ? ", " + failed + " failed" : "") +
-    ". API calls this run: " + job.api.calls + " (" + job.api.success + " ok, " + job.api.failure + " failed)."));
+    ". API calls this run: " + job.api.calls + " (" + job.api.success + " ok, " + job.api.failure + " failed)." +
+    (job.save_records ? " Saving records to JSON files." : " Not saving records.")));
   box.appendChild(el("div", { class: "bar" }, el("span", { style: "width:" + Math.round((100 * (done + failed)) / total) + "%" })));
   if (job.error) box.appendChild(note("err", job.error));
   const bases = {};
@@ -401,7 +478,7 @@ function renderProgress(job) {
   box.appendChild(el("table", { class: "grid compact prog" },
     el("thead", {}, el("tr", {}, ["Table", "Status", "Pages", "Records", "Detail"].map((h, i) => el("th", { class: i === 2 || i === 3 ? "num" : "", text: h })))),
     el("tbody", {}, job.tables.map((t) => el("tr", {}, el("td", { text: t.table_name }), el("td", {}, statusTag(t.status)), el("td", { class: "num", text: fmt(t.pages) }), el("td", { class: "num", text: fmt(t.records) }),
-      el("td", {}, t.error ? el("span", { class: "tag fail", text: t.error }) : "", t.capped_fields ? el("span", { class: "tag cap", text: t.capped_fields + " field(s) over cap" }) : ""))))));
+      el("td", {}, t.error ? el("span", { class: "tag fail", text: t.error }) : "", t.capped_fields ? el("span", { class: "tag cap", text: t.capped_fields + " field(s) over cap" }) : "", t.saved ? el("span", { class: "tag done", text: "saved to file" }) : ""))))));
 }
 
 async function loadProfileStatus(quiet) {
@@ -413,9 +490,39 @@ async function loadProfileStatus(quiet) {
   if (running && !state.pollTimer) state.pollTimer = setInterval(() => loadProfileStatus(true).catch(() => {}), 1000);
   if (running) loadLog().catch(() => {});
   if (!running && state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook()]); }
+  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook(), loadExtractFiles()]); }
   if (job) { state.lastJobId = job.id; state.lastJobStatus = job.status; }
   if (job && !quiet) loadLog();
+}
+
+/* ---------- step 6: record extraction (values go to files on disk; this page only shows counts) ---------- */
+const fmtBytes = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
+
+async function deleteExtract() {
+  const base = $("exBase").value;
+  const what = base ? "the extracted files for " + base : "ALL extracted record files";
+  if (!window.confirm("Delete " + what + "? The database is not changed. You can extract again later.")) return;
+  try {
+    const r = await api("POST", "/api/extract/delete", base ? { base_id: base } : {});
+    setMsg("exMessage", "Deleted " + r.removed + " file(s).", "ok");
+    await loadExtractFiles();
+  } catch (e) { setMsg("exMessage", e.message, "err"); }
+}
+
+async function loadExtractFiles() {
+  const d = await api("GET", "/api/extract/files");
+  $("exFolder").textContent = d.folder;
+  document.querySelectorAll(".exFolderRef").forEach((n) => { n.textContent = d.folder; });
+  const t = $("exFilesTable"), body = t.querySelector("tbody");
+  clear(body);
+  d.files.forEach((f) => {
+    const bad = f.check.startsWith("differs");
+    body.appendChild(el("tr", {}, el("td", { text: f.base_id + " / " + f.table_name }), el("td", { class: "num", text: fmt(f.record_count) }), el("td", { class: "num", text: fmt(f.fields) }),
+      el("td", { class: "num", text: fmtBytes(f.bytes) }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
+      el("td", {}, el("span", { class: "tag " + (bad ? "cap" : f.check === "matches profile" ? "done" : ""), text: f.check })), el("td", {}, el("code", { text: f.sha256.slice(0, 12) }))));
+  });
+  t.hidden = d.files.length === 0;
+  setMsg("exFilesSummary", d.files.length ? d.files.length + " file(s), " + fmt(d.total_records) + " records, " + fmtBytes(d.total_bytes) + " in total." : "No extracted files yet.", "");
 }
 
 async function loadResults() {
@@ -477,7 +584,14 @@ window.addEventListener("DOMContentLoaded", () => {
   $("scope").addEventListener("change", updateScopeVisibility);
   $("btnProfile").addEventListener("click", startProfile);
   $("btnCancel").addEventListener("click", cancelProfile);
+  $("btnExtractDelete").addEventListener("click", deleteExtract);
+  $("btnExtractRefresh").addEventListener("click", guard(loadExtractFiles));
+  $("saveRecords").addEventListener("change", () => { $("saveNote").hidden = !$("saveRecords").checked; });
   $("btnResults").addEventListener("click", guard(loadResults));
+  initBaseCombo();
+  $("resBase").addEventListener("change", syncReportLinks);
+  $("csvBase").addEventListener("change", syncReportLinks);
+  $("resTable").addEventListener("change", syncReportLinks);
   $("btnLog").addEventListener("click", guard(loadLog));
   for (const id of ["logFail", "logTable", "logPurpose"]) $(id).addEventListener("change", guard(loadLog));
   applyReady();

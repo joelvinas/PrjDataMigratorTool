@@ -16,7 +16,9 @@ The server binds to 127.0.0.1 only. It owns every database and Airtable call.
 The Airtable token is read from config.json and is never stored, logged, or
 sent to the browser.
 """
+import csv
 import hashlib
+import io
 import heapq
 import html as _html
 import quopri
@@ -54,14 +56,16 @@ MAX_ATTEMPTS = int(os.environ.get("AT_MAX_ATTEMPTS", "5"))
 BACKOFF_BASE = float(os.environ.get("AT_BACKOFF_BASE", "1.0"))  # seconds; doubles each retry
 BACKOFF_CAP = 30.0
 RETRY_AFTER_CAP = 60.0
-MIN_INTERVAL = 0.2  # seconds between request starts per base  (= 5 requests/second)
+MAX_RPS = 5.0   # Airtable limit per base; config "requests_per_second" may lower it
+_EMPTY_CFG = {"airtable_pat": "", "db_path": "", "scopes": [], "bases": [], "requests_per_second": MAX_RPS,
+             "extract_dir": ""}
 HTTP_TIMEOUT = 30
 MAX_BODY_BYTES = 25 * 1024 * 1024
 DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.3"
+APP_VERSION = "1.7"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -82,11 +86,61 @@ CREATE TABLE airtable_fields (
     null_count INTEGER DEFAULT 0,
     cardinality INTEGER DEFAULT 0,
     cardinality_is_capped INTEGER DEFAULT 0, -- 1 = cardinality is a lower bound: more distinct values than the cap
+    -- Field settings from the Metadata API (all NULL when not applicable or not reported)
+    field_description TEXT,        -- the description typed on the field in Airtable
+    is_primary_field INTEGER,      -- 1 = the table's primary field, 0 = not, NULL = not reported
+    options_json TEXT,             -- the field's full options object exactly as returned (lossless backup of everything below)
+    choices_json TEXT,             -- singleSelect / multipleSelects: [{"id","name","color"}] in Airtable's order
+    formula_text TEXT,             -- formula fields: options.formula (and a rollup's formula when Airtable returns one)
+    referenced_field_ids TEXT,     -- JSON array: options.referencedFieldIds (formula, rollup, lookup, lastModifiedTime)
+    source_link_field_id TEXT,     -- rollup / lookup / count: options.recordLinkFieldId, the link field it reads through
+    source_field_id TEXT,          -- rollup / lookup: options.fieldIdInLinkedTable, the field read in the linked table
+    is_valid INTEGER,              -- formula / rollup / lookup / count: 1 = valid, 0 = broken (options.isValid)
+    result_type TEXT,              -- computed fields: options.result.type (what the formula, rollup or lookup returns)
+    result_options_json TEXT,      -- computed fields: options.result.options (precision, date format, choices of the result)
+    number_precision INTEGER,      -- number / percent / currency: decimal places (options.precision)
+    currency_symbol TEXT,          -- currency: options.symbol
+    date_format TEXT,              -- date / dateTime: options.dateFormat.name (for example us, european, iso, local, friendly)
+    time_format TEXT,              -- dateTime: options.timeFormat.name (12hour or 24hour)
+    time_zone TEXT,                -- dateTime: options.timeZone
+    duration_format TEXT,          -- duration: options.durationFormat (for example h:mm:ss)
+    rating_max INTEGER,            -- rating: options.max
+    icon TEXT,                     -- rating / checkbox: options.icon
+    option_color TEXT,             -- rating / checkbox: options.color
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_airtable_fields_table ON airtable_fields(table_id);
 CREATE INDEX idx_airtable_fields_linked ON airtable_fields(linked_table_id);
+
+-- 1b. Table-level and view metadata from the Metadata API (no record data)
+CREATE TABLE airtable_tables (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    table_description TEXT,        -- the description typed on the table in Airtable
+    primary_field_id TEXT,         -- the table's primaryFieldId
+    table_json TEXT,               -- the table object as returned, minus its fields and views (lossless for anything else)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_airtable_tables_base ON airtable_tables(base_id);
+
+CREATE TABLE airtable_views (
+    view_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    view_name TEXT NOT NULL,
+    view_type TEXT NOT NULL,       -- grid, form, calendar, gallery, kanban, timeline, block (Gantt), ...
+    view_position INTEGER,         -- 0-based position in the order Airtable listed the table's views
+    visible_field_ids TEXT,        -- JSON array of Airtable field IDs the view shows (requested with include=visibleFieldIds)
+    view_json TEXT,                -- the view object exactly as returned (lossless backup of everything above)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+
+CREATE INDEX idx_airtable_views_table ON airtable_views(table_id);
+CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
 
 -- 2. Workfront Planning Environment Schema (Dev & Prod)
 CREATE TABLE workfront_fields (
@@ -287,7 +341,7 @@ def load_config():
             mtime = None
         if _cfg_cache["cfg"] is not None and _cfg_cache["mtime"] == mtime:
             return _cfg_cache["cfg"], _cfg_cache["err"]
-        cfg = {"airtable_pat": "", "db_path": ""}
+        cfg = dict(_EMPTY_CFG)
         err = None
         if mtime is None:
             err = ("config.json was not found next to server.py. Copy config.example.json to "
@@ -298,15 +352,28 @@ def load_config():
                     data = json.load(f)
                 if not isinstance(data, dict):
                     raise ValueError("not an object")
-                token = str(data.get("airtable_pat") or "").strip()
-                if not token or "REPLACE" in token.upper():
+                token = str(data.get("token") or data.get("airtable_pat") or "").strip()   # old key still accepted
+                if not token or "REPLACE" in token.upper() or "PASTE" in token.upper():
                     err = ("config.json has no Airtable token yet. Paste your personal access token into "
-                           "the \"airtable_pat\" value, save the file, then reload this page.")
+                           "the \"token\" value, save the file, then reload this page.")
                     token = ""
-                cfg = {"airtable_pat": token, "db_path": str(data.get("db_path") or "").strip()}
+                scopes = [str(x) for x in data.get("scopes") or [] if isinstance(x, str)]
+                bases = []
+                for b in data.get("bases") or []:
+                    if isinstance(b, dict) and BASE_ID_RE.match(str(b.get("baseId") or "")) \
+                            and "XXXX" not in str(b.get("baseId")).upper():
+                        bases.append({"name": str(b.get("name") or "")[:80], "baseId": str(b["baseId"])})
+                try:
+                    rps = float(data.get("requests_per_second") or MAX_RPS)
+                except (TypeError, ValueError):
+                    rps = MAX_RPS
+                rps = min(max(rps, 0.5), MAX_RPS)   # Airtable allows 5 per second per base
+                cfg = {"airtable_pat": token, "db_path": str(data.get("db_path") or "").strip(),
+                       "scopes": scopes, "bases": bases, "requests_per_second": rps,
+                       "extract_dir": str(data.get("extract_dir") or "").strip()}
             except (OSError, ValueError):
                 err = ("config.json could not be read. It must be valid JSON like "
-                       "{\"airtable_pat\": \"pat...\", \"db_path\": \"optional path\"}.")
+                       "{\"token\": \"pat...\", \"bases\": [{\"name\": \"...\", \"baseId\": \"app...\"}]}.")
         _cfg_cache.update(mtime=mtime, cfg=cfg, err=err)
         return cfg, err
 
@@ -412,7 +479,7 @@ def api_db_connect(body):
     result = _connect_result(path, info)
     if info["column_problems"]:
         result["message"] = ("Some existing tables do not have the expected columns. This app never alters "
-                             "existing tables. Run sql/migration_001_add_columns.sql on this database "
+                             "existing tables. Run: python sql/apply_migrations.py <this database file> "
                              "(see the README), or choose a new file.")
     return result
 
@@ -447,6 +514,10 @@ def api_status(_q=None):
         "token_configured": bool(cfg["airtable_pat"]),
         "config_problem": err,
         "default_db_path": cfg["db_path"],
+        "bases": cfg["bases"],
+        "scopes": cfg["scopes"],
+        "requests_per_second": cfg["requests_per_second"],
+        "extract_dir": extract_dir(),
         "db_path": STATE["db_path"],
         "expected_tables": EXPECTED_TABLES,
         "custom_api_base": AIRTABLE_API_BASE != "https://api.airtable.com",
@@ -508,7 +579,7 @@ def _throttle(base_id):
     with _rate_lock:
         now = time.monotonic()
         slot = max(now, _next_slot.get(key, 0.0))
-        _next_slot[key] = slot + MIN_INTERVAL
+        _next_slot[key] = slot + 1.0 / load_config()[0]["requests_per_second"]
     wait = slot - now
     if wait > 0:
         time.sleep(wait)
@@ -680,6 +751,73 @@ def check_base_id(raw):
     return b
 
 
+OPTION_COLUMNS = ["field_description", "is_primary_field", "options_json", "choices_json", "formula_text",
+                  "referenced_field_ids", "source_link_field_id", "source_field_id", "is_valid", "result_type",
+                  "result_options_json", "number_precision", "currency_symbol", "date_format", "time_format",
+                  "time_zone", "duration_format", "rating_max", "icon", "option_color"]
+
+
+def _j(v):
+    """Compact, stable JSON for a value taken from the schema (None stays None)."""
+    return None if v is None else json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _s(v):
+    return v if isinstance(v, str) and v != "" else None
+
+
+def _i(v):
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def extract_field_settings(f, primary_id):
+    """Pull the settings that define a field out of one field of the Metadata API response. Anything the
+    Metadata API did not report stays None. options_json keeps the whole options object, so nothing is lost
+    even for a field type or setting this function does not know about."""
+    ftype = f.get("type")
+    opts = f.get("options")
+    opts = opts if isinstance(opts, dict) else {}
+    out = dict.fromkeys(OPTION_COLUMNS)
+    out["field_description"] = _s(f.get("description"))
+    out["is_primary_field"] = None if not primary_id else (1 if f.get("id") == primary_id else 0)
+    out["options_json"] = _j(opts) if opts else None
+    if ftype in ("singleSelect", "multipleSelects") and isinstance(opts.get("choices"), list):
+        out["choices_json"] = json.dumps(
+            [{"id": c.get("id"), "name": c.get("name"), "color": c.get("color")}
+             for c in opts["choices"] if isinstance(c, dict)], separators=(",", ":"), ensure_ascii=False)
+    if isinstance(opts.get("formula"), str):
+        out["formula_text"] = opts["formula"]
+    if isinstance(opts.get("referencedFieldIds"), list):
+        out["referenced_field_ids"] = json.dumps(opts["referencedFieldIds"], separators=(",", ":"))
+    out["source_link_field_id"] = _s(opts.get("recordLinkFieldId"))
+    out["source_field_id"] = _s(opts.get("fieldIdInLinkedTable"))
+    if isinstance(opts.get("isValid"), bool):
+        out["is_valid"] = 1 if opts["isValid"] else 0
+    res = opts.get("result")
+    if isinstance(res, dict):
+        out["result_type"] = _s(res.get("type"))
+        if isinstance(res.get("options"), dict) and res["options"]:
+            out["result_options_json"] = _j(res["options"])
+    if ftype in ("number", "percent", "currency"):
+        out["number_precision"] = _i(opts.get("precision"))
+    if ftype == "currency":
+        out["currency_symbol"] = _s(opts.get("symbol"))
+    if ftype in ("date", "dateTime") and isinstance(opts.get("dateFormat"), dict):
+        out["date_format"] = _s(opts["dateFormat"].get("name"))
+    if ftype == "dateTime":
+        if isinstance(opts.get("timeFormat"), dict):
+            out["time_format"] = _s(opts["timeFormat"].get("name"))
+        out["time_zone"] = _s(opts.get("timeZone"))
+    if ftype == "duration":
+        out["duration_format"] = _s(opts.get("durationFormat"))
+    if ftype == "rating":
+        out["rating_max"] = _i(opts.get("max"))
+    if ftype in ("rating", "checkbox"):
+        out["icon"] = _s(opts.get("icon"))
+        out["option_color"] = _s(opts.get("color"))
+    return out
+
+
 def parse_schema(doc):
     if isinstance(doc, list):
         tables = doc
@@ -711,20 +849,49 @@ def parse_schema(doc):
                 inverse = opts.get("inverseLinkFieldId")
                 p = opts.get("prefersSingleRecordLink")
                 prefers = None if p is None else (1 if p else 0)
-            rows.append({"table_id": t["id"], "table_name": t["name"], "field_id": f["id"],
-                         "field_name": f["name"], "data_type": f["type"],
-                         "linked_table_id": linked, "inverse_link_field_id": inverse,
-                         "prefers_single_record_link": prefers})
+            row = {"table_id": t["id"], "table_name": t["name"], "field_id": f["id"],
+                   "field_name": f["name"], "data_type": f["type"],
+                   "linked_table_id": linked, "inverse_link_field_id": inverse,
+                   "prefers_single_record_link": prefers}
+            row.update(extract_field_settings(f, t.get("primaryFieldId")))
+            rows.append(row)
     if not rows:
         raise AppError("The schema contains no fields, so there is nothing to ingest.")
     return rows
+
+
+def parse_table_meta(doc):
+    """Table-level details and views from the same Metadata API response. Returns (table rows, view rows,
+    whether any table reported a views list). Each view's whole object is kept in view_json."""
+    tables = doc if isinstance(doc, list) else doc.get("tables")
+    trows, vrows, seen_views, reported = [], [], set(), False
+    for t in tables:
+        rest = {k: v for k, v in t.items() if k not in ("fields", "views")}
+        trows.append({"table_id": t["id"], "table_name": t["name"], "table_description": _s(t.get("description")),
+                      "primary_field_id": _s(t.get("primaryFieldId")), "table_json": _j(rest)})
+        views = t.get("views")
+        if not isinstance(views, list):
+            continue
+        reported = True
+        for pos, v in enumerate(views):
+            if not isinstance(v, dict) or not v.get("id"):
+                raise AppError("A view in table \"%s\" has no \"id\"." % t["name"])
+            if v["id"] in seen_views:
+                raise AppError("View ID %s appears twice in the schema." % v["id"])
+            seen_views.add(v["id"])
+            vis = v.get("visibleFieldIds")
+            vrows.append({"view_id": v["id"], "table_id": t["id"], "view_name": _s(v.get("name")) or "(unnamed)",
+                          "view_type": _s(v.get("type")) or "unknown", "view_position": pos,
+                          "visible_field_ids": json.dumps(vis, separators=(",", ":")) if isinstance(vis, list) else None,
+                          "view_json": _j(v)})
+    return trows, vrows, reported
 
 
 SOURCE_LABELS = {"api": "Pulled from the Airtable Metadata API",
                  "json": "Provided as a JSON document (uploaded file or pasted text)"}
 
 
-def upsert_schema(base_id, rows, source):
+def upsert_schema(base_id, rows, source, tables=None, views=None, views_reported=True):
     ts = utc_now()
     try:
         with db() as conn:
@@ -742,23 +909,39 @@ def upsert_schema(base_id, rows, source):
                        "fields": len(rows),
                        "added": len(new_ids - before_in_base),
                        "updated": len(new_ids & before_in_base),
-                       "no_longer_in_source": len(missing)}
+                       "no_longer_in_source": len(missing),
+                       "views": len(views or [])}
             with conn:
+                cols = (["base_id", "table_id", "table_name", "field_id", "field_name", "data_type", "linked_table_id",
+                         "inverse_link_field_id", "prefers_single_record_link"] + OPTION_COLUMNS + ["updated_at"])
+                updates = ", ".join("%s=excluded.%s" % (c, c) for c in cols if c != "field_id")
                 conn.executemany(
-                    """INSERT INTO airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type,
-                                                   linked_table_id, inverse_link_field_id,
-                                                   prefers_single_record_link, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)
-                       ON CONFLICT(field_id) DO UPDATE SET
-                         base_id=excluded.base_id, table_id=excluded.table_id, table_name=excluded.table_name,
-                         field_name=excluded.field_name, data_type=excluded.data_type,
-                         linked_table_id=excluded.linked_table_id,
-                         inverse_link_field_id=excluded.inverse_link_field_id,
-                         prefers_single_record_link=excluded.prefers_single_record_link,
-                         updated_at=excluded.updated_at""",
-                    [(base_id, r["table_id"], r["table_name"], r["field_id"], r["field_name"], r["data_type"],
-                      r["linked_table_id"], r["inverse_link_field_id"], r["prefers_single_record_link"], ts)
+                    "INSERT INTO airtable_fields(%s) VALUES (%s) ON CONFLICT(field_id) DO UPDATE SET %s"
+                    % (", ".join(cols), ",".join("?" * len(cols)), updates),
+                    [tuple([base_id if c == "base_id" else ts if c == "updated_at" else r[c] for c in cols])
                      for r in rows])
+                if tables:
+                    conn.executemany(
+                        "INSERT INTO airtable_tables(table_id, base_id, table_name, table_description, primary_field_id, "
+                        "table_json, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(table_id) DO UPDATE SET "
+                        "base_id=excluded.base_id, table_name=excluded.table_name, "
+                        "table_description=excluded.table_description, primary_field_id=excluded.primary_field_id, "
+                        "table_json=excluded.table_json, updated_at=excluded.updated_at",
+                        [(t["table_id"], base_id, t["table_name"], t["table_description"], t["primary_field_id"],
+                          t["table_json"], ts) for t in tables])
+                if views:
+                    conn.executemany(
+                        "INSERT INTO airtable_views(view_id, base_id, table_id, view_name, view_type, view_position, "
+                        "visible_field_ids, view_json, updated_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(view_id) DO "
+                        "UPDATE SET base_id=excluded.base_id, table_id=excluded.table_id, view_name=excluded.view_name, "
+                        "view_type=excluded.view_type, view_position=excluded.view_position, "
+                        "visible_field_ids=excluded.visible_field_ids, view_json=excluded.view_json, "
+                        "updated_at=excluded.updated_at",
+                        [(v["view_id"], base_id, v["table_id"], v["view_name"], v["view_type"], v["view_position"],
+                          v["visible_field_ids"], v["view_json"], ts) for v in views])
+                elif tables and not views_reported:
+                    # The schema had no views list at all, so nothing was reported as removed: keep existing views current.
+                    conn.execute("UPDATE airtable_views SET updated_at=? WHERE base_id=?", (ts, base_id))
                 # Audit entry, same transaction and same timestamp as the field rows, so the report can say
                 # exactly where this schema came from and when. Informational: status RESOLVED.
                 write_runbook("schema_ingest:%s" % base_id,
@@ -779,8 +962,15 @@ def api_schema_ingest(body):
     if source == "api":
         if not get_token():
             raise AppError("No Airtable token is configured. Edit config.json (see the setup message) and reload.")
-        doc = api_call(purpose="schema_fetch", path="/v0/meta/bases/%s/tables" % quote(base_id, safe=""),
-                       base_id=base_id, records_key="tables")
+        path = "/v0/meta/bases/%s/tables" % quote(base_id, safe="")
+        try:
+            # include=visibleFieldIds also returns the fields each view shows
+            doc = api_call(purpose="schema_fetch", path=path, query={"include": "visibleFieldIds"},
+                           base_id=base_id, records_key="tables")
+        except ApiError as e:
+            if e.http_status not in (400, 422):
+                raise
+            doc = api_call(purpose="schema_fetch", path=path, base_id=base_id, records_key="tables")
     elif source == "json":
         text = body.get("schema_json")
         if isinstance(text, str):
@@ -797,9 +987,75 @@ def api_schema_ingest(body):
     else:
         raise AppError("Choose a schema source: Airtable API or JSON.")
     rows = parse_schema(doc)
-    result = upsert_schema(base_id, rows, source)
+    trows, vrows, reported = parse_table_meta(doc)
+    result = upsert_schema(base_id, rows, source, trows, vrows, reported)
     result["source"] = source
     return result
+
+
+def settings_summary(r):
+    """One short, human-readable line of the settings that define a field (for the schema view and report)."""
+    p = []
+    if r["is_primary_field"] == 1:
+        p.append("primary field")
+    t = r["data_type"]
+    if r["choices_json"]:
+        try:
+            names = [c.get("name") or "(unnamed)" for c in json.loads(r["choices_json"])]
+            p.append("%d choices: %s" % (len(names), ", ".join(names[:8]) + (", ..." if len(names) > 8 else "")))
+        except ValueError:
+            pass
+    if r["formula_text"]:
+        p.append("formula: " + (r["formula_text"] if len(r["formula_text"]) <= 120 else r["formula_text"][:117] + "..."))
+    if r["source_link_field_id"]:
+        p.append("reads %s via link %s" % (r["source_field_id"] or "(count)", r["source_link_field_id"]))
+    if r["result_type"]:
+        p.append("returns " + r["result_type"])
+    if r["currency_symbol"]:
+        p.append("symbol " + r["currency_symbol"])
+    if r["number_precision"] is not None:
+        p.append("%d decimal place(s)" % r["number_precision"])
+    if r["date_format"]:
+        p.append("date " + r["date_format"])
+    if r["time_format"]:
+        p.append("time " + r["time_format"])
+    if r["time_zone"]:
+        p.append("zone " + r["time_zone"])
+    if r["duration_format"]:
+        p.append("duration " + r["duration_format"])
+    if r["rating_max"] is not None:
+        p.append("max %d" % r["rating_max"])
+    if t in ("rating", "checkbox") and r["icon"]:
+        p.append("icon " + r["icon"] + (" (%s)" % r["option_color"] if r["option_color"] else ""))
+    if r["is_valid"] == 0:
+        p.append("INVALID in Airtable")
+    if r["field_description"]:
+        d = r["field_description"]
+        p.append("description: " + (d if len(d) <= 100 else d[:97] + "..."))
+    return "; ".join(p)
+
+
+
+VIEW_STALE_SQL = ("(v.updated_at < (SELECT MAX(x.updated_at) FROM airtable_fields x WHERE x.base_id = v.base_id))")
+
+
+def load_tables_and_views(conn):
+    """(table details by table_id, views by table_id), views in Airtable's order, with a stale flag.
+    A table row whose table has no live fields is simply never looked up, so no stale flag is needed for it."""
+    tinfo = {r["table_id"]: dict(r) for r in conn.execute("SELECT * FROM airtable_tables")}
+    views = {}
+    for r in conn.execute("SELECT v.*, %s AS stale FROM airtable_views v ORDER BY v.table_id, v.view_position, v.view_id"
+                          % VIEW_STALE_SQL):
+        views.setdefault(r["table_id"], []).append(dict(r))
+    return tinfo, views
+
+
+def view_field_ids(v):
+    try:
+        ids = json.loads(v["visible_field_ids"]) if v["visible_field_ids"] else None
+    except ValueError:
+        ids = None
+    return ids if isinstance(ids, list) else None
 
 
 def api_schema_view(_q=None):
@@ -807,6 +1063,8 @@ def api_schema_view(_q=None):
         rows = conn.execute("""SELECT f.*, %s AS stale FROM airtable_fields f
                                ORDER BY f.base_id, lower(f.table_name), f.table_id, lower(f.field_name), f.field_id"""
                             % STALE_SQL).fetchall()
+        tinfo, vmap = load_tables_and_views(conn)
+    fname = {r["field_id"]: r["field_name"] for r in rows}
     names = {r["table_id"]: r["table_name"] for r in rows if not r["stale"]}
     for r in rows:
         names.setdefault(r["table_id"], r["table_name"])
@@ -821,6 +1079,7 @@ def api_schema_view(_q=None):
             "linked_table_id": link, "linked_table_name": names.get(link) if link else None,
             "inverse_link_field_id": r["inverse_link_field_id"],
             "prefers_single_record_link": r["prefers_single_record_link"],
+            "settings": settings_summary(r),
             "self_link": bool(link and link == r["table_id"]),
             "stale": bool(r["stale"])})
         if r["stale"]:
@@ -830,6 +1089,17 @@ def api_schema_view(_q=None):
         tables = []
         for t in sorted(bases[b]["tables"].values(), key=lambda x: (x["table_name"].lower(), x["table_id"])):
             t["stale"] = t["stale_fields"] == len(t["fields"])
+            info = tinfo.get(t["table_id"]) or {}
+            t["description"] = info.get("table_description")
+            t["primary_field_id"] = info.get("primary_field_id")
+            t["primary_field_name"] = fname.get(info.get("primary_field_id"))
+            t["details_captured"] = bool(info)
+            t["views"] = []
+            for v in vmap.get(t["table_id"], []):
+                ids = view_field_ids(v)
+                t["views"].append({"view_id": v["view_id"], "view_name": v["view_name"], "view_type": v["view_type"],
+                                   "visible_field_count": None if ids is None else len(ids),
+                                   "stale": bool(v["stale"])})
             tables.append(t)
         out.append({"base_id": b, "tables": tables})
     return {"bases": out}
@@ -887,7 +1157,8 @@ def compute_graph(conn, mode="literal"):
     mode 'collapse': two-way link pairs (a link field and its inverse) are resolved with Airtable's
         prefersSingleRecordLink hint. If exactly one side is a single-record link, that side's table is the
         child and only that field is an ordering edge. If both or neither side is (many-to-many, or the hint
-        was not reported), the pair adds no ordering edge and is listed for a second-pass load."""
+        was not reported), the direction is unknown, so both fields stay as edges and the two tables form a
+        cycle that loads together, with the links set in a second pass."""
     if mode not in ("literal", "collapse"):
         raise AppError("Unknown dependency mode.")
     rows = [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"]]
@@ -933,8 +1204,8 @@ def compute_graph(conn, mode="literal"):
             unresolved.append({"table_name": a["table_name"], "field_name": a["field_name"],
                                "linked_table_id": a["linked_table_id"]})
             continue
-        if mode == "collapse" and a["field_id"] in paired and a["field_id"] not in oriented:
-            continue
+        if mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
+            continue   # reverse side of a pair whose direction is set by the other field
         edges.setdefault((a["table_id"], a["linked_table_id"]), []).append(a["field_name"])
 
     def skey(tid):
@@ -1005,15 +1276,10 @@ def compute_graph(conn, mode="literal"):
         elif tgt not in tables:
             cls, second, why = ("Unresolved", True,
                                 "The linked table is not in the database. Ingest its base, then recompute.")
-        elif mode == "collapse" and a["field_id"] in paired and a["field_id"] not in oriented:
-            if pair_other[a["field_id"]] in oriented:
-                cls, second, why = ("Inverse of an ordered pair", False,
-                                    "Reverse side of a two-way link whose direction is set by the other field. "
-                                    "Adds no ordering.")
-            else:
-                cls, second, why = ("Two-way pair, direction unknown", True,
-                                    "Many-to-many, or the single-link hint was not reported. Load both tables, "
-                                    "then set these links in a second pass.")
+        elif mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
+            cls, second, why = ("Inverse of an ordered pair", False,
+                                "Reverse side of a two-way link whose direction is set by the other field. "
+                                "Adds no ordering.")
         elif comp_of[a["table_id"]] == comp_of[tgt]:
             cls, second, why = ("In a dependency cycle", True,
                                 "Part of a loop between tables. Load the records first, then set these links "
@@ -1125,6 +1391,9 @@ class Job:
         self.api = RunStats()
         self.tables = tables  # list of dicts (serializable)
         self.fields = {}      # table_id -> [(field_id, type)]
+        self.save_records = False   # True = also write every record to the JSON files (RecordSink)
+        self.names = {}             # field_id -> field name, only used when saving records
+        self.sinks = {}             # table_id -> open RecordSink
 
 
 JOB = {"current": None}
@@ -1160,6 +1429,13 @@ def api_profile_start(body):
         raise AppError("Unknown profiling scope.")
     if not tables:
         raise AppError("There are no tables to profile for that choice. Ingest a schema first (step 3).")
+    save = bool(body.get("save_records"))
+    names = {}
+    if save:
+        for t in tables:
+            _extract_path(t["base_id"], t["table_id"])   # refuse unsafe IDs before starting
+        with db() as conn:
+            names = {r["field_id"]: r["field_name"] for r in conn.execute("SELECT field_id, field_name FROM airtable_fields")}
     if not get_token():
         raise AppError("No Airtable token is configured. Edit config.json (see the setup message) and reload.")
     with _job_lock:
@@ -1168,7 +1444,8 @@ def api_profile_start(body):
             raise AppError("A profiling run is already in progress. Wait for it to finish or cancel it.")
         job = Job(scope, cap, [{"base_id": t["base_id"], "table_id": t["table_id"], "table_name": t["table_name"],
                                 "fields": len(t["fields"]), "status": "pending", "pages": 0, "records": 0,
-                                "error": None, "capped_fields": 0} for t in tables])
+                                "error": None, "capped_fields": 0, "saved": False} for t in tables])
+        job.save_records, job.names = save, names
         for t in tables:
             job.fields[t["table_id"]] = t["fields"]
         JOB["current"] = job
@@ -1183,6 +1460,9 @@ def _profile_table(job, t):
     capped = set()
     row_count, offset = 0, None
     path = "/v0/%s/%s" % (quote(t["base_id"], safe=""), quote(t["table_id"], safe=""))
+    sink = None
+    if job.save_records:
+        sink = job.sinks[t["table_id"]] = RecordSink(job, t)
     while True:
         q = {"pageSize": PAGE_SIZE, "returnFieldsByFieldId": "true"}
         if offset:
@@ -1190,6 +1470,8 @@ def _profile_table(job, t):
         body = api_call(purpose="profile_page", path=path, query=q, base_id=t["base_id"], table_id=t["table_id"],
                         stats=job.api, cancel=job.cancel, records_key="records")
         for rec in body.get("records") or []:
+            if sink:
+                sink.add(rec)
             fv = rec.get("fields") or {}
             row_count += 1
             for fid, ftype in fields:
@@ -1240,6 +1522,10 @@ def _run_job(job):
             try:
                 result = _profile_table(job, t)
                 _save_table(job, t, *result)
+                sink = job.sinks.pop(t["table_id"], None)
+                if sink:   # only after the statistics were saved, so file and statistics describe the same pass
+                    sink.finish()
+                    t["saved"] = True
                 t["status"] = "done"
             except Cancelled:
                 t["status"] = "skipped"
@@ -1253,6 +1539,16 @@ def _run_job(job):
                 job.error = e.message
                 job.status = "error"
                 break
+            except AppError as e:   # for example a duplicate record while saving
+                t["status"] = "failed"
+                t["error"] = e.message
+            except OSError as e:
+                t["status"] = "failed"
+                t["error"] = "Could not write the record file: %s" % scrub(e)
+            finally:
+                leftover = job.sinks.pop(t["table_id"], None)
+                if leftover:
+                    leftover.abort()
         for t in job.tables:
             if t["status"] in ("pending", "running"):
                 t["status"] = "skipped"
@@ -1275,7 +1571,7 @@ def api_profile_status(_q=None):
         return {"job": None}
     return {"job": {"id": job.id, "status": job.status, "error": job.error, "scope": job.scope, "cap": job.cap,
                     "started_at": job.started_at, "finished_at": job.finished_at, "api": job.api.as_dict(),
-                    "tables": [dict(t) for t in job.tables]}}
+                    "save_records": job.save_records, "tables": [dict(t) for t in job.tables]}}
 
 
 def api_profile_cancel(_body=None):
@@ -1312,6 +1608,192 @@ def api_profile_results(q):
                     "cardinality": r["cardinality"], "cardinality_capped": capped,
                     "stale": bool(r["stale"])})
     return {"rows": out}
+
+
+# --------------------------------------------------------------------------
+# Optional record capture: while profiling reads every page, it can also write every record, every field, into
+# temporary JSON files (a toggle on the profiling run, so there is one pass over the data, not two).
+# Record values go ONLY to these files: never to SQLite, the API call log, runbook entries, error messages or the
+# browser. The browser sees counts, sizes and checksums, never values.
+# --------------------------------------------------------------------------
+ID_SAFE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_manifest_lock = threading.Lock()
+EXTRACT_FORMAT = "airtable-table-extract/1"
+
+
+def extract_dir():
+    d = (load_config()[0].get("extract_dir") or "data_extract")
+    return os.path.abspath(d if os.path.isabs(d) else os.path.join(BASE_DIR, d))
+
+
+def _extract_path(base_id, table_id):
+    if not ID_SAFE_RE.match(base_id or "") or not ID_SAFE_RE.match(table_id or ""):
+        raise AppError("A base or table ID contains characters that are not allowed in a file name.")
+    return os.path.join(extract_dir(), base_id, table_id + ".json")
+
+
+def _manifest_path():
+    return os.path.join(extract_dir(), "manifest.json")
+
+
+def _read_manifest():
+    try:
+        with open(_manifest_path(), encoding="utf-8") as f:
+            m = json.load(f)
+        return m if isinstance(m, dict) and isinstance(m.get("tables"), list) else {"tables": []}
+    except (OSError, ValueError):
+        return {"tables": []}
+
+
+def _write_manifest(m):
+    path = _manifest_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(m, f, indent=1)
+    os.replace(tmp, path)
+
+
+def _file_digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _private(path, is_dir=False):
+    try:
+        os.chmod(path, 0o700 if is_dir else 0o600)   # best effort; Windows ignores most of this
+    except OSError:
+        pass
+
+
+class RecordSink:
+    """Streams one table's records into <extract_dir>/<base>/<table>.json while profiling reads the pages.
+    The file is written to a .tmp name and only replaces the previous file in finish(), so a table that fails
+    partway leaves its earlier file untouched."""
+
+    def __init__(self, job, t):
+        self.path = _extract_path(t["base_id"], t["table_id"])
+        self.tmp = self.path + ".tmp"
+        self.t, self.n, self.seen = t, 0, set()
+        self.captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.fields_meta = [{"field_id": fid, "field_name": job.names.get(fid, fid), "data_type": ftype}
+                            for fid, ftype in job.fields[t["table_id"]]]
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        _private(extract_dir(), True)
+        _private(os.path.dirname(self.path), True)
+        self.f = open(self.tmp, "w", encoding="utf-8")
+        _private(self.tmp)
+        self.f.write('{"format":%s,"base_id":%s,"table_id":%s,"table_name":%s,"captured_at":%s,"fields":%s,"records":['
+                     % tuple(json.dumps(x, ensure_ascii=False) for x in
+                             (EXTRACT_FORMAT, t["base_id"], t["table_id"], t["table_name"], self.captured,
+                              self.fields_meta)))
+
+    def add(self, rec):
+        rid = rec.get("id")
+        if not rid or rid in self.seen:
+            raise AppError("Airtable returned a record twice (or without an ID) while paging %s, which can happen "
+                           "when the table is edited during the run. Run it again." % self.t["table_name"])
+        self.seen.add(rid)
+        self.f.write(("," if self.n else "") + json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
+        self.n += 1
+
+    def finish(self):
+        t = self.t
+        self.f.write('],"record_count":%d}' % self.n)
+        self.f.close()
+        os.replace(self.tmp, self.path)
+        entry = {"base_id": t["base_id"], "table_id": t["table_id"], "table_name": t["table_name"],
+                 "file": "%s/%s.json" % (t["base_id"], t["table_id"]), "record_count": self.n,
+                 "bytes": os.path.getsize(self.path), "sha256": _file_digest(self.path),
+                 "captured_at": self.captured, "fields": len(self.fields_meta)}
+        with _manifest_lock:
+            m = _read_manifest()
+            m["tables"] = [x for x in m["tables"] if x.get("table_id") != t["table_id"]] + [entry]
+            m["tables"].sort(key=lambda x: (x["base_id"], x["table_name"].lower(), x["table_id"]))
+            m["note"] = ("Temporary working copy of Airtable record data. Contains record values; keep it out of "
+                         "source control and delete it when the migration no longer needs it. This manifest holds "
+                         "counts and checksums only.")
+            _write_manifest(m)
+
+    def abort(self):
+        try:
+            self.f.close()
+        except OSError:
+            pass
+        try:
+            os.remove(self.tmp)
+        except OSError:
+            pass
+
+
+def _profile_row_counts():
+    with db() as conn:
+        return {r[0]: r[1] for r in conn.execute(
+            "SELECT f.table_id, MAX(f.row_count) FROM airtable_fields f WHERE NOT %s GROUP BY f.table_id" % STALE_SQL)}
+
+
+def api_extract_files(_q=None):
+    """What is on disk, from the manifest: counts, sizes, checksums and a count check against the profile. No values."""
+    counts = _profile_row_counts()
+    out = []
+    with _manifest_lock:
+        m = _read_manifest()
+    for e in m["tables"]:
+        try:
+            path = _extract_path(e["base_id"], e["table_id"])
+            if not os.path.isfile(path):
+                continue
+            size = os.path.getsize(path)
+        except (AppError, OSError):
+            continue
+        prof = counts.get(e["table_id"]) or 0
+        check = "no profile" if not prof and e["record_count"] else ("matches profile" if prof == e["record_count"] else "differs from profile (%s)" % prof)
+        out.append(dict(e, bytes=size, check=check))
+    return {"folder": extract_dir(), "files": out,
+            "total_records": sum(x["record_count"] for x in out), "total_bytes": sum(x["bytes"] for x in out)}
+
+
+def api_extract_delete(body):
+    """Delete the extracted files (all, or one base) and their manifest entries. The database is not touched."""
+    raw = (body or {}).get("base_id")
+    only = check_base_id(raw) if raw else None
+    root, removed = extract_dir(), 0
+    try:
+        subdirs = sorted(d for d in os.listdir(root) if BASE_ID_RE.match(d) and os.path.isdir(os.path.join(root, d)))
+    except OSError:
+        subdirs = []
+    for d in subdirs:
+        if only and d != only:
+            continue
+        p = os.path.join(root, d)
+        for fn in os.listdir(p):
+            if re.match(r"^[A-Za-z0-9_-]+\.json(\.tmp)?$", fn):
+                try:
+                    os.remove(os.path.join(p, fn))
+                    removed += 1
+                except OSError as e:
+                    raise AppError("Could not delete %s/%s: %s" % (d, fn, scrub(e)))
+        try:
+            os.rmdir(p)
+        except OSError:
+            pass
+    with _manifest_lock:
+        m = _read_manifest()
+        m["tables"] = [x for x in m["tables"] if only and x.get("base_id") != only]
+        try:
+            if m["tables"]:
+                _write_manifest(m)
+            elif os.path.exists(_manifest_path()):
+                os.remove(_manifest_path())
+        except OSError as e:
+            raise AppError("Could not update the manifest: %s" % scrub(e))
+    try:
+        os.rmdir(root)
+    except OSError:
+        pass
+    return {"removed": removed}
 
 
 # --------------------------------------------------------------------------
@@ -1575,8 +2057,9 @@ def build_report(mode):
     # 3. Inventory
     h.append("<h2>3. Schema inventory: bases, tables and fields</h2>"
              "<p class=\"meta\">One row per field, as captured. Repeated base and table values are shown in grey so "
-             "the grid can be filtered or copied into a spreadsheet.</p><table>")
-    h.append(_th(["Base", "Table ID", "Table", "Field ID", "Field", "Type"]))
+             "the grid can be filtered or copied into a spreadsheet. The Settings column summarizes the options that define "
+             "each field (choices, formulas, precision, formats); the full options are stored in the database.</p><table>")
+    h.append(_th(["Base", "Table ID", "Table", "Field ID", "Field", "Type", "Settings"]))
     prev_base = prev_table = None
     for r in frows:
         same_base, same_table = r["base_id"] == prev_base, r["table_id"] == prev_table
@@ -1595,9 +2078,39 @@ def build_report(mode):
         h.append(_tr([_td(_code(r["base_id"]), "rep" if same_base else ""),
                       _td(_code(r["table_id"]), "rep" if same_table else ""),
                       _td(esc(r["table_name"]), "rep" if same_table else ""),
-                      _td(_code(r["field_id"])), _td(esc(r["field_name"])), _td(typ)]))
+                      _td(_code(r["field_id"])), _td(esc(r["field_name"])), _td(typ),
+                      _td(esc(settings_summary(r)))]))
         prev_base, prev_table = r["base_id"], r["table_id"]
     h.append("</table>")
+
+    # 3b. Tables and views
+    with db() as conn2:
+        tinfo, vmap = load_tables_and_views(conn2)
+    fnames = {r["field_id"]: r["field_name"] for r in frows}
+    h.append("<h3>3b. Tables and views</h3><p class=\"meta\">Table descriptions, primary fields and every view the "
+             "schema reported. A view's visible fields are Airtable field IDs; use section 3 to look up their names. "
+             "Filters, sorts, grouping and form layouts are not part of the schema response and are not captured.</p>"
+             "<table>")
+    h.append(_th(["Base", "Table", "Description", "Primary field", "View", "Type", "Visible fields"]))
+    seen_t = set()
+    for tid in [t for t in dict.fromkeys(r["table_id"] for r in frows)]:
+        trow = next(r for r in frows if r["table_id"] == tid)
+        info = tinfo.get(tid) or {}
+        prim = info.get("primary_field_id")
+        prim_txt = esc(fnames.get(prim, prim)) if prim else "Not recorded"
+        vs = [v for v in vmap.get(tid, []) if not v["stale"]]
+        if not vs:
+            h.append(_tr([_td(_code(trow["base_id"])), _td(esc(trow["table_name"])),
+                          _td(esc(info.get("table_description") or "")), _td(prim_txt),
+                          _td("No views recorded"), _td(""), _td("")]))
+            continue
+        for k, v in enumerate(vs):
+            ids = view_field_ids(v)
+            vis = "Not reported" if ids is None else ("%d: %s" % (len(ids), ", ".join(esc(fnames.get(i, i)) for i in ids)) if ids else "None")
+            h.append(_tr([_td(_code(trow["base_id"]), "rep" if k else ""), _td(esc(trow["table_name"]), "rep" if k else ""),
+                          _td(esc(info.get("table_description") or ""), "rep" if k else ""),
+                          _td(prim_txt, "rep" if k else ""),
+                          _td(esc(v["view_name"]) + " " + _code(v["view_id"])), _td(esc(v["view_type"])), _td(vis)]))
 
     # 4. Load order
     h.append("<h2>4. Load order</h2><div class=\"box\"><p><strong>How to read this.</strong> Load tables in "
@@ -1625,7 +2138,7 @@ def build_report(mode):
             "<li>%s.%s ⇄ %s.%s: %s</li>" % (
                 esc(p["table_a"]), esc(p["field_a"]), esc(p["table_b"]), esc(p["field_b"]),
                 esc("%s is the child of %s (single-record link)" % (p["child_table"], p["parent_table"])
-                    if p["child_table"] else "direction unknown (many-to-many, or the hint was not reported)"))
+                    if p["child_table"] else "direction unknown (many-to-many, or the hint was not reported): the two tables load together as a cycle"))
             for p in g["inverse_pairs"]))
         if mode == "literal":
             h.append("<p class=\"meta\">In Literal mode each pair counts as a two-table cycle. Regenerate with "
@@ -1716,6 +2229,92 @@ def api_report_mhtml(q):
 
 
 # --------------------------------------------------------------------------
+# CSV exports (metadata only): load order and profile, for checking against an answer key
+# --------------------------------------------------------------------------
+def _csv_bytes(header, rows):
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(header)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def api_export_load_order(q):
+    mode = (q.get("mode") or ["literal"])[0]
+    base = (q.get("base_id") or [""])[0]
+    with db() as conn:
+        g = compute_graph(conn, mode)
+    names = {m["table_id"]: m["table_name"] for m in g["matrix"]}
+    rows, counter = [], {}
+    for m in g["matrix"]:
+        if base and m["base_id"] != base:
+            continue
+        counter[m["base_id"]] = counter.get(m["base_id"], 0) + 1
+        rows.append([m["base_id"], m["table_name"], m["table_id"], counter[m["base_id"]], m["dependency_depth"],
+                     "; ".join(sorted(names.get(p, p) for p in m["parent_table_ids"])),
+                     "yes" if m["in_cycle"] else "no"])
+    body = _csv_bytes(["base_id", "table", "table_id", "load_no", "depth", "parent_tables", "in_cycle"], rows)
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="load-order_%s_%s.csv"' % (mode, _stamp())})
+
+
+def api_export_profile(q):
+    data = api_profile_results(q)["rows"]
+    rows = [[r["base_id"], r["table_name"], r["field_name"], r["data_type"], r["row_count"], r["null_count"],
+             "" if r["cardinality"] is None else r["cardinality"], "yes" if r["cardinality_capped"] else "no"]
+            for r in data if not r["stale"]]
+    body = _csv_bytes(["base_id", "table", "field", "field_type", "row_count", "null_count", "cardinality",
+                       "cardinality_capped"], rows)
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="profile_%s.csv"' % _stamp()})
+
+
+def api_export_views(q):
+    base = (q.get("base_id") or [""])[0]
+    with db() as conn:
+        tinfo, vmap = load_tables_and_views(conn)
+        trows = conn.execute("SELECT table_id, base_id, table_name FROM airtable_tables" +
+                             (" WHERE base_id=?" if base else "") + " ORDER BY base_id, lower(table_name), table_id",
+                             (base,) if base else ()).fetchall()
+    out = []
+    for t in trows:
+        for v in vmap.get(t["table_id"], []):
+            if v["stale"]:
+                continue
+            out.append([t["base_id"], t["table_id"], t["table_name"], v["view_id"], v["view_name"], v["view_type"],
+                        v["view_position"], v["visible_field_ids"] or ""])
+    body = _csv_bytes(["base_id", "table_id", "table_name", "view_id", "view_name", "view_type", "view_position",
+                       "visible_field_ids"], out)
+    return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="views_%s.csv"' % _stamp()})
+
+
+def api_export_tables(q):
+    base = (q.get("base_id") or [""])[0]
+    with db() as conn:
+        trows = conn.execute("SELECT * FROM airtable_tables" + (" WHERE base_id=?" if base else "") +
+                             " ORDER BY base_id, lower(table_name), table_id", (base,) if base else ()).fetchall()
+    body = _csv_bytes(["base_id", "table_id", "table_name", "table_description", "primary_field_id"],
+                      [[t["base_id"], t["table_id"], t["table_name"], t["table_description"] or "",
+                        t["primary_field_id"] or ""] for t in trows])
+    return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="tables_%s.csv"' % _stamp()})
+
+
+FIELD_CSV_COLUMNS = ["base_id", "table_id", "table_name", "field_id", "field_name", "data_type", "linked_table_id",
+                     "inverse_link_field_id", "prefers_single_record_link"] + OPTION_COLUMNS
+
+
+def api_export_field_options(q):
+    base = (q.get("base_id") or [""])[0]
+    sql = ("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) + (" WHERE f.base_id=?" if base else "")
+    sql += " ORDER BY f.base_id, lower(f.table_name), f.table_id, lower(f.field_name), f.field_id"
+    with db() as conn:
+        rows = [r for r in conn.execute(sql, (base,) if base else ()) if not r["stale"]]
+    body = _csv_bytes(FIELD_CSV_COLUMNS, [[r[c] for c in FIELD_CSV_COLUMNS] for r in rows])
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="field-options_%s.csv"' % _stamp()})
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -1725,11 +2324,14 @@ STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
               "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
-              "/api/profile/results": api_profile_results, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
-              "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml}
+              "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
+              "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
+              "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
+              "/api/export/field_options.csv": api_export_field_options,
+              "/api/export/views.csv": api_export_views, "/api/export/tables.csv": api_export_tables}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
-               "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel}
+               "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel}
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -33,7 +33,7 @@ if not exist config.json (
   echo Created config.json. Paste your Airtable token into it, save, and close Notepad.
   notepad config.json
 ) else (
-  findstr /c:"REPLACE" config.json >nul 2>&1 && (
+  findstr /c:"PASTE_WRITE_TOKEN" /c:"REPLACE" config.json >nul 2>&1 && (
     echo config.json still has the placeholder token. Paste your token, save, and close Notepad.
     notepad config.json
   )

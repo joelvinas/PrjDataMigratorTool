@@ -72,3 +72,20 @@ td.bad { color: var(--err); font-weight: 600; } td.good { color: var(--ok); }
 .bar { height: 8px; background: #e6e9f0; border-radius: 4px; overflow: hidden; min-width: 120px; }
 .bar > span { display: block; height: 100%; background: var(--accent); }
 .prog td { vertical-align: middle; }
+
+.combo { position: relative; flex: 1; min-width: 360px; max-width: 640px; display: flex; }
+.combo input { flex: 1; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.combo button { border-left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 6px 10px; }
+.combo-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; margin: 2px 0 0; padding: 4px 0; list-style: none;
+  background: #fff; border: 1px solid #b8bfcc; border-radius: 6px; box-shadow: 0 6px 18px rgba(29,35,48,.15); max-height: 280px; overflow: auto; }
+.combo-menu[hidden] { display: none; }
+.combo-menu li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 6px 12px; cursor: pointer; }
+.combo-menu li:hover, .combo-menu li.active { background: #eef2fb; }
+.combo-menu .combo-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-menu code { white-space: nowrap; }
+.combo-menu li.combo-empty { cursor: default; color: var(--muted); font-size: 13px; display: block; }
+.combo-menu li.combo-empty:hover { background: transparent; }
+
+td.settings { color: var(--muted); font-size: 12.5px; max-width: 520px; overflow-wrap: anywhere; }
+
+.tablemeta { margin: 6px 10px; overflow-wrap: anywhere; }

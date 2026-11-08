@@ -1,0 +1,386 @@
+{
+ "tables": [
+  {
+   "id": "tblOptions00001",
+   "name": "Options Lab",
+   "primaryFieldId": "fldOptName0001",
+   "fields": [
+    {
+     "id": "fldOptName0001",
+     "name": "Name",
+     "type": "singleLineText",
+     "description": "The record title"
+    },
+    {
+     "id": "fldOptNumber001",
+     "name": "Quantity",
+     "type": "number",
+     "options": {
+      "precision": 2
+     }
+    },
+    {
+     "id": "fldOptPercent01",
+     "name": "Share",
+     "type": "percent",
+     "options": {
+      "precision": 1
+     }
+    },
+    {
+     "id": "fldOptCurrency1",
+     "name": "Price",
+     "type": "currency",
+     "options": {
+      "precision": 2,
+      "symbol": "$"
+     }
+    },
+    {
+     "id": "fldOptSingleSel",
+     "name": "Status",
+     "type": "singleSelect",
+     "options": {
+      "choices": [
+       {
+        "id": "selA",
+        "name": "Draft",
+        "color": "grayLight2"
+       },
+       {
+        "id": "selB",
+        "name": "Live",
+        "color": "greenBright"
+       },
+       {
+        "id": "selC",
+        "name": "Retired"
+       }
+      ]
+     }
+    },
+    {
+     "id": "fldOptMultiSel1",
+     "name": "Tags",
+     "type": "multipleSelects",
+     "options": {
+      "choices": [
+       {
+        "id": "selD",
+        "name": "Wool",
+        "color": "blueLight2"
+       },
+       {
+        "id": "selE",
+        "name": "Silk",
+        "color": "pinkLight2"
+       }
+      ]
+     }
+    },
+    {
+     "id": "fldOptDate00001",
+     "name": "Launch",
+     "type": "date",
+     "options": {
+      "dateFormat": {
+       "name": "us",
+       "format": "M/D/YYYY"
+      }
+     }
+    },
+    {
+     "id": "fldOptDateTime1",
+     "name": "Updated Local",
+     "type": "dateTime",
+     "options": {
+      "dateFormat": {
+       "name": "iso",
+       "format": "YYYY-MM-DD"
+      },
+      "timeFormat": {
+       "name": "24hour",
+       "format": "HH:mm"
+      },
+      "timeZone": "America/Chicago"
+     }
+    },
+    {
+     "id": "fldOptRating001",
+     "name": "Stars",
+     "type": "rating",
+     "options": {
+      "max": 7,
+      "icon": "star",
+      "color": "yellowBright"
+     }
+    },
+    {
+     "id": "fldOptCheckbox1",
+     "name": "Approved",
+     "type": "checkbox",
+     "options": {
+      "icon": "check",
+      "color": "greenBright"
+     }
+    },
+    {
+     "id": "fldOptDuration1",
+     "name": "Length",
+     "type": "duration",
+     "options": {
+      "durationFormat": "h:mm:ss"
+     }
+    },
+    {
+     "id": "fldOptFormulaT1",
+     "name": "Label",
+     "type": "formula",
+     "options": {
+      "formula": "{Name} & \" - \" & {Status}",
+      "isValid": true,
+      "referencedFieldIds": [
+       "fldOptName0001",
+       "fldOptSingleSel"
+      ],
+      "result": {
+       "type": "singleLineText"
+      }
+     }
+    },
+    {
+     "id": "fldOptFormulaN1",
+     "name": "Margin",
+     "type": "formula",
+     "options": {
+      "formula": "{Price} * 0.4",
+      "isValid": true,
+      "referencedFieldIds": [
+       "fldOptCurrency1"
+      ],
+      "result": {
+       "type": "number",
+       "options": {
+        "precision": 1
+       }
+      }
+     }
+    },
+    {
+     "id": "fldOptFormulaBad",
+     "name": "Broken",
+     "type": "formula",
+     "options": {
+      "formula": "{Gone}",
+      "isValid": false,
+      "referencedFieldIds": [],
+      "result": null
+     }
+    },
+    {
+     "id": "fldOptLinkItems1",
+     "name": "Items",
+     "type": "multipleRecordLinks",
+     "options": {
+      "linkedTableId": "tblOptions00002",
+      "isReversed": false,
+      "prefersSingleRecordLink": false,
+      "inverseLinkFieldId": "fldOptItemsBack"
+     }
+    },
+    {
+     "id": "fldOptRollup0001",
+     "name": "Total Price",
+     "type": "rollup",
+     "options": {
+      "fieldIdInLinkedTable": "fldOptItemPrice",
+      "recordLinkFieldId": "fldOptLinkItems1",
+      "isValid": true,
+      "referencedFieldIds": [
+       "fldOptLinkItems1",
+       "fldOptItemPrice"
+      ],
+      "result": {
+       "type": "number",
+       "options": {
+        "precision": 0
+       }
+      }
+     }
+    },
+    {
+     "id": "fldOptLookup0001",
+     "name": "Item Names",
+     "type": "multipleLookupValues",
+     "options": {
+      "isValid": true,
+      "recordLinkFieldId": "fldOptLinkItems1",
+      "fieldIdInLinkedTable": "fldOptItemName1",
+      "result": {
+       "type": "singleLineText"
+      }
+     }
+    },
+    {
+     "id": "fldOptCount00001",
+     "name": "Item Count",
+     "type": "count",
+     "options": {
+      "isValid": true,
+      "recordLinkFieldId": "fldOptLinkItems1"
+     }
+    },
+    {
+     "id": "fldOptCreated001",
+     "name": "Created",
+     "type": "createdTime",
+     "options": {
+      "result": {
+       "type": "dateTime",
+       "options": {
+        "dateFormat": {
+         "name": "iso",
+         "format": "YYYY-MM-DD"
+        },
+        "timeFormat": {
+         "name": "24hour",
+         "format": "HH:mm"
+        },
+        "timeZone": "utc"
+       }
+      }
+     }
+    },
+    {
+     "id": "fldOptModified01",
+     "name": "Modified",
+     "type": "lastModifiedTime",
+     "options": {
+      "referencedFieldIds": [
+       "fldOptName0001"
+      ],
+      "result": {
+       "type": "dateTime",
+       "options": {
+        "dateFormat": {
+         "name": "us",
+         "format": "M/D/YYYY"
+        },
+        "timeFormat": {
+         "name": "12hour",
+         "format": "h:mma"
+        },
+        "timeZone": "utc"
+       }
+      }
+     }
+    },
+    {
+     "id": "fldOptAttach0001",
+     "name": "Photos",
+     "type": "multipleAttachments",
+     "options": {
+      "isReversed": false
+     }
+    },
+    {
+     "id": "fldOptEmail00001",
+     "name": "Contact",
+     "type": "email"
+    },
+    {
+     "id": "fldOptAuto000001",
+     "name": "Number",
+     "type": "autoNumber"
+    },
+    {
+     "id": "fldOptNewType001",
+     "name": "Future Thing",
+     "type": "aiText",
+     "options": {
+      "prompt": [
+       "Summarize"
+      ],
+      "referencedFieldIds": [
+       "fldOptName0001"
+      ]
+     }
+    }
+   ],
+   "description": "Lab table with one field of nearly every type.",
+   "views": [
+    {
+     "id": "viwOpt000000001",
+     "name": "Grid view",
+     "type": "grid",
+     "visibleFieldIds": [
+      "fldOptName0001",
+      "fldOptNumber001",
+      "fldOptSingleSel"
+     ]
+    },
+    {
+     "id": "viwOpt000000002",
+     "name": "Intake form",
+     "type": "form"
+    },
+    {
+     "id": "viwOpt000000003",
+     "name": "Launch calendar",
+     "type": "calendar",
+     "visibleFieldIds": [
+      "fldOptName0001",
+      "fldOptDate00001"
+     ]
+    },
+    {
+     "id": "viwOpt000000004",
+     "name": "Roadmap",
+     "type": "timeline"
+    }
+   ]
+  },
+  {
+   "id": "tblOptions00002",
+   "name": "Option Items",
+   "primaryFieldId": "fldOptItemName1",
+   "fields": [
+    {
+     "id": "fldOptItemName1",
+     "name": "Item",
+     "type": "singleLineText"
+    },
+    {
+     "id": "fldOptItemPrice",
+     "name": "Price",
+     "type": "currency",
+     "options": {
+      "precision": 2,
+      "symbol": "€"
+     }
+    },
+    {
+     "id": "fldOptItemsBack",
+     "name": "Options Lab",
+     "type": "multipleRecordLinks",
+     "options": {
+      "linkedTableId": "tblOptions00001",
+      "isReversed": true,
+      "prefersSingleRecordLink": false,
+      "inverseLinkFieldId": "fldOptLinkItems1"
+     }
+    }
+   ],
+   "views": [
+    {
+     "id": "viwOpt000000005",
+     "name": "Gallery",
+     "type": "gallery",
+     "visibleFieldIds": [
+      "fldOptItemName1"
+     ]
+    }
+   ]
+  }
+ ]
+}

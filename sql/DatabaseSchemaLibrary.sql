@@ -13,11 +13,61 @@ CREATE TABLE airtable_fields (
     null_count INTEGER DEFAULT 0,
     cardinality INTEGER DEFAULT 0,
     cardinality_is_capped INTEGER DEFAULT 0, -- 1 = cardinality is a lower bound: more distinct values than the cap
+    -- Field settings from the Metadata API (all NULL when not applicable or not reported)
+    field_description TEXT,        -- the description typed on the field in Airtable
+    is_primary_field INTEGER,      -- 1 = the table's primary field, 0 = not, NULL = not reported
+    options_json TEXT,             -- the field's full options object exactly as returned (lossless backup of everything below)
+    choices_json TEXT,             -- singleSelect / multipleSelects: [{"id","name","color"}] in Airtable's order
+    formula_text TEXT,             -- formula fields: options.formula (and a rollup's formula when Airtable returns one)
+    referenced_field_ids TEXT,     -- JSON array: options.referencedFieldIds (formula, rollup, lookup, lastModifiedTime)
+    source_link_field_id TEXT,     -- rollup / lookup / count: options.recordLinkFieldId, the link field it reads through
+    source_field_id TEXT,          -- rollup / lookup: options.fieldIdInLinkedTable, the field read in the linked table
+    is_valid INTEGER,              -- formula / rollup / lookup / count: 1 = valid, 0 = broken (options.isValid)
+    result_type TEXT,              -- computed fields: options.result.type (what the formula, rollup or lookup returns)
+    result_options_json TEXT,      -- computed fields: options.result.options (precision, date format, choices of the result)
+    number_precision INTEGER,      -- number / percent / currency: decimal places (options.precision)
+    currency_symbol TEXT,          -- currency: options.symbol
+    date_format TEXT,              -- date / dateTime: options.dateFormat.name (for example us, european, iso, local, friendly)
+    time_format TEXT,              -- dateTime: options.timeFormat.name (12hour or 24hour)
+    time_zone TEXT,                -- dateTime: options.timeZone
+    duration_format TEXT,          -- duration: options.durationFormat (for example h:mm:ss)
+    rating_max INTEGER,            -- rating: options.max
+    icon TEXT,                     -- rating / checkbox: options.icon
+    option_color TEXT,             -- rating / checkbox: options.color
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_airtable_fields_table ON airtable_fields(table_id);
 CREATE INDEX idx_airtable_fields_linked ON airtable_fields(linked_table_id);
+
+-- 1b. Table-level and view metadata from the Metadata API (no record data)
+CREATE TABLE airtable_tables (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    table_description TEXT,        -- the description typed on the table in Airtable
+    primary_field_id TEXT,         -- the table's primaryFieldId
+    table_json TEXT,               -- the table object as returned, minus its fields and views (lossless for anything else)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_airtable_tables_base ON airtable_tables(base_id);
+
+CREATE TABLE airtable_views (
+    view_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    view_name TEXT NOT NULL,
+    view_type TEXT NOT NULL,       -- grid, form, calendar, gallery, kanban, timeline, block (Gantt), ...
+    view_position INTEGER,         -- 0-based position in the order Airtable listed the table's views
+    visible_field_ids TEXT,        -- JSON array of Airtable field IDs the view shows (requested with include=visibleFieldIds)
+    view_json TEXT,                -- the view object exactly as returned (lossless backup of everything above)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+
+CREATE INDEX idx_airtable_views_table ON airtable_views(table_id);
+CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
 
 -- 2. Workfront Planning Environment Schema (Dev & Prod)
 CREATE TABLE workfront_fields (

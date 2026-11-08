@@ -1,6 +1,6 @@
 # Airtable → Workfront Planning Migration Control Plane (Stage 1)
 
-A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to another tool.
+A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to Adobe Workfront Planning.
 
 Python standard library only. Nothing to install. Runs on `127.0.0.1` only.
 
@@ -18,19 +18,20 @@ This is an independent student project. It is not affiliated with or endorsed by
 
 ## What the tool stores (and does not store)
 
-**The tool stores metadata only. It does not store Airtable record data.**
+**The SQLite database holds metadata only. It never holds Airtable record data.** Record values can be saved to separate, temporary JSON files, but only when you tick a box on a profiling run (off by default). See "Saving record data (optional)" below.
 
 Saved in the SQLite file:
 
-- Schema metadata: base, table and field IDs and names, field types, which tables each link field points to.
+- Schema metadata: base, table and field IDs and names, field types, which tables each link field points to, the settings that define each field (select choices, formula text, rollup and lookup definitions, currency symbol and precision, date and time formats, rating scale, number precision, descriptions), 
+- Table-level details (description, primary field) and every view the schema reports (name, type, visible fields).
 - Aggregate statistics per field: `row_count`, `null_count`, `cardinality`, and whether the cardinality is capped.
 - The computed load order (`dependency_matrix`).
 - An API call log: timestamp, endpoint path, HTTP status, duration, record *count*, and error text. Never headers, the token, or response bodies.
 - Runbook entries: plain-language descriptions of failures and cycles, plus one informational audit entry for each schema ingest (which base, whether it came from the API or a JSON file, and when).
 
-Not saved anywhere (not in the database, not on disk, not in logs):
+Not saved in the database, the logs or any response sent to the browser:
 
-- Record values. While profiling, each page of 100 records is read into memory, the running counters are updated, and the page is discarded. For distinct counts the tool keeps short one-way hashes of values in memory for the duration of one table, never the values themselves, and discards them when the table finishes.
+- Record values. While profiling, each page of 100 records is read into memory, the running counters are updated, and the page is discarded. For distinct counts the tool keeps short one-way hashes of values in memory for the duration of one table, never the values themselves, and discards them when the table finishes. The one exception is the optional, off-by-default "save records" toggle described below, which writes values to JSON files on disk and nowhere else.
 - The Airtable token. It is read from `config.json` and used only in the `Authorization` header of outbound requests. It is never written to the database or logs, never included in an error message, and never sent to the browser.
 
 ## Deterministic by design
@@ -49,16 +50,21 @@ airtable-migration-control/
 ├── index.html  style.css  scripts.js
 ├── start.bat                    Windows launcher (finds Python, creates config.json, opens the browser)
 ├── config.example.json          copy to config.json and add your token
-├── .gitignore                   excludes config.json, *.db, *.sqlite
+├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/
 ├── LICENSE                      MIT
 ├── README.md
 ├── sql/
 │   ├── DatabaseSchemaLibrary.sql       the full finalized schema (same DDL the app embeds)
-│   └── migration_001_add_columns.sql   upgrades a database created from the original schema
+│   ├── migration_001_add_columns.sql   link handling and capped cardinality columns
+│   ├── migration_002_add_field_options.sql   field settings columns
+│   ├── migration_003_add_tables_and_views.sql   the airtable_tables and airtable_views tables
+│   └── apply_migrations.py             applies all three to an existing database (safe to repeat)
 └── test/
-    ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs
+    ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
-    └── mock_airtable.py             fake Airtable so you can test with no real data
+    ├── sample_schema_field_options.json   one field of nearly every type, with settings
+    ├── mock_airtable.py             fake Airtable so you can test with no real data
+    └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
 ```
 
 ## Run it
@@ -69,9 +75,19 @@ airtable-migration-control/
 
 1. Copy `config.example.json` to `config.json`, then edit it:
    ```json
-   { "airtable_pat": "pat...your token...", "db_path": "migration.db" }
+   {
+     "token": "PASTE_WRITE_TOKEN_HERE",
+     "scopes": ["data.records:read", "schema.bases:read"],
+     "bases": [ { "name": "PASTE_BASE_NAME_HERE", "baseId": "appXXXXXXXXXXXXXX" } ],
+     "db_path": "migration.db",
+     "requests_per_second": 4.5
+   }
    ```
-   The token needs the scopes `schema.bases:read` and `data.records:read`, with access to the bases you will migrate.
+   - `token`: your Airtable personal access token. It needs `schema.bases:read` and `data.records:read`, with access to the bases you will migrate. (The older key name `airtable_pat` is still accepted.)
+   - `scopes`: a note of what the token was granted. It is shown for reference and is not sent anywhere.
+   - `bases`: the bases you plan to migrate. They appear in the Step 2 picker; a single entry fills in the Base ID for you. Placeholder entries (`appXXXX...`) are ignored.
+   - `db_path`: the SQLite file offered in Step 1.
+   - `requests_per_second`: pacing per base, between 0.5 and 5 (Airtable's limit). 4.5 leaves a small margin.
 2. In a terminal in this folder: `python server.py` (on Mac you may need `python3 server.py`).
 3. Open **http://127.0.0.1:8765**. For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
 4. Stop with Ctrl+C.
@@ -86,12 +102,13 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 2. **Confirm token and enter a base ID.** The page shows only whether a token is configured (yes/no).
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
 4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
-5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field.
-6. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
+5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field. An optional toggle also saves every record to JSON files during the same pass.
+6. **Saved record files.** Lists, checks and deletes the JSON files written by the toggle in step 5.
+7. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
 
 ## SQL schema changes
 
-The schema is the original `DatabaseSchemaLibrary.sql` with **two columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged.
+The schema is the original `DatabaseSchemaLibrary.sql` with **new columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged. There have been three rounds: link handling and capped cardinality (migration 001), field settings (migration 002), and two new tables for table-level details and views (migration 003).
 
 ### Updated `airtable_fields` definition
 
@@ -110,6 +127,27 @@ CREATE TABLE airtable_fields (
     null_count INTEGER DEFAULT 0,
     cardinality INTEGER DEFAULT 0,
     cardinality_is_capped INTEGER DEFAULT 0, -- 1 = cardinality is a lower bound: more distinct values than the cap
+    -- Field settings from the Metadata API (all NULL when not applicable or not reported)
+    field_description TEXT,        -- the description typed on the field in Airtable
+    is_primary_field INTEGER,      -- 1 = the table's primary field, 0 = not, NULL = not reported
+    options_json TEXT,             -- the field's full options object exactly as returned (lossless backup of everything below)
+    choices_json TEXT,             -- singleSelect / multipleSelects: [{"id","name","color"}] in Airtable's order
+    formula_text TEXT,             -- formula fields: options.formula (and a rollup's formula when Airtable returns one)
+    referenced_field_ids TEXT,     -- JSON array: options.referencedFieldIds (formula, rollup, lookup, lastModifiedTime)
+    source_link_field_id TEXT,     -- rollup / lookup / count: options.recordLinkFieldId, the link field it reads through
+    source_field_id TEXT,          -- rollup / lookup: options.fieldIdInLinkedTable, the field read in the linked table
+    is_valid INTEGER,              -- formula / rollup / lookup / count: 1 = valid, 0 = broken (options.isValid)
+    result_type TEXT,              -- computed fields: options.result.type (what the formula, rollup or lookup returns)
+    result_options_json TEXT,      -- computed fields: options.result.options (precision, date format, choices of the result)
+    number_precision INTEGER,      -- number / percent / currency: decimal places (options.precision)
+    currency_symbol TEXT,          -- currency: options.symbol
+    date_format TEXT,              -- date / dateTime: options.dateFormat.name (for example us, european, iso, local, friendly)
+    time_format TEXT,              -- dateTime: options.timeFormat.name (12hour or 24hour)
+    time_zone TEXT,                -- dateTime: options.timeZone
+    duration_format TEXT,          -- duration: options.durationFormat (for example h:mm:ss)
+    rating_max INTEGER,            -- rating: options.max
+    icon TEXT,                     -- rating / checkbox: options.icon
+    option_color TEXT,             -- rating / checkbox: options.color
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -117,25 +155,88 @@ CREATE INDEX idx_airtable_fields_table ON airtable_fields(table_id);
 CREATE INDEX idx_airtable_fields_linked ON airtable_fields(linked_table_id);
 ```
 
-The complete schema is in `sql/DatabaseSchemaLibrary.sql`. A new database created by the app already has both columns.
+### New tables: `airtable_tables` and `airtable_views`
 
-### Upgrading a database created from the original schema
-
-Run this once (`sql/migration_001_add_columns.sql`). Do not run it on a database the app created with this version.
+Table-level details and views are metadata, so they are stored in the database.
 
 ```sql
-ALTER TABLE airtable_fields ADD COLUMN prefers_single_record_link INTEGER;
-ALTER TABLE airtable_fields ADD COLUMN cardinality_is_capped INTEGER DEFAULT 0;
+CREATE TABLE airtable_tables (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    table_description TEXT,        -- the description typed on the table in Airtable
+    primary_field_id TEXT,         -- the table's primaryFieldId
+    table_json TEXT,               -- the table object as returned, minus its fields and views (lossless for anything else)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_airtable_tables_base ON airtable_tables(base_id);
+
+CREATE TABLE airtable_views (
+    view_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    view_name TEXT NOT NULL,
+    view_type TEXT NOT NULL,       -- grid, form, calendar, gallery, kanban, timeline, block (Gantt), ...
+    view_position INTEGER,         -- 0-based position in the order Airtable listed the table's views
+    visible_field_ids TEXT,        -- JSON array of Airtable field IDs the view shows (requested with include=visibleFieldIds)
+    view_json TEXT,                -- the view object exactly as returned (lossless backup of everything above)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_airtable_views_table ON airtable_views(table_id);
+CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
 ```
 
-Existing data is kept. `cardinality_is_capped` is `0` for existing rows, and `prefers_single_record_link` stays `NULL` until the schema is ingested again. The app never alters existing tables itself; if the columns are missing, it says so and points to this file.
+**What views contain.** The Metadata API lists each table's views with an ID, a name and a type. The app also asks for `include=visibleFieldIds` (and repeats the request without it if Airtable ever rejects it), which adds the field IDs each view shows for the view types where Airtable reports them (a form view normally has none). `visible_field_ids` holds Airtable field IDs, so once the Airtable-to-Workfront field crosswalk exists they translate directly. `view_json` keeps the whole view object. Views no longer in the source are kept and flagged, like fields.
+
+**What views do not contain.** Filters, sorts, grouping, colours, field order, row height and form layout are not part of the schema response, so they are not captured. Airtable has a separate per-view endpoint that may return more detail; it is not used yet (it costs one call per view and may need an Enterprise plan).
+
+The complete schema is in `sql/DatabaseSchemaLibrary.sql`. A new database created by the app already has every column and table.
+
+### Upgrading an existing database
+
+Easiest, with Python only (no SQLite client needed):
+
+```
+python sql/apply_migrations.py path/to/your.db
+```
+
+It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql` and `sql/migration_003_add_tables_and_views.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
 ### What the new columns mean
 
-| Column | Values | Meaning |
-|---|---|---|
-| `prefers_single_record_link` | `1`, `0`, `NULL` | From Airtable's `prefersSingleRecordLink` option. `1` = the link field holds a single record (the "many-to-one" side). `NULL` = not a link field, or Airtable did not report it. |
-| `cardinality_is_capped` | `0`, `1` | `1` = the field has more distinct values than the cap, so `cardinality` holds the cap and means "more than this". `0` = `cardinality` is exact. |
+| Column | Meaning |
+|---|---|
+| `prefers_single_record_link` | `1` = the link field holds a single record (the "many-to-one" side), `0` = many, `NULL` = not a link field or not reported. |
+| `cardinality_is_capped` | `1` = more distinct values than the cap, so `cardinality` holds the cap and means "more than this". `0` = exact. |
+| `field_description`, `is_primary_field` | The field's description, and whether it is the table's primary field (from the table's `primaryFieldId`). |
+| `options_json` | The field's complete `options` object exactly as the Metadata API returned it. This is the lossless record: if a setting has no dedicated column (or Airtable adds one later), it is still here. |
+| `choices_json` | Select choices (`id`, `name`, `color`) in Airtable's order. |
+| `formula_text`, `referenced_field_ids`, `is_valid` | A formula's text, the fields it reads, and whether Airtable reports it as valid. |
+| `source_link_field_id`, `source_field_id` | For rollups, lookups and counts: the link field it reads through, and the field read in the linked table. |
+| `result_type`, `result_options_json` | What a computed field returns (for example `number` with `precision`, or a date format). |
+| `number_precision`, `currency_symbol` | Decimal places for number, percent and currency fields; the currency symbol. |
+| `date_format`, `time_format`, `time_zone` | Date and date-time formats and the time zone. |
+| `duration_format`, `rating_max`, `icon`, `option_color` | Duration format; rating scale; icon and colour for rating and checkbox fields. |
+
+**Settings are only as complete as the Metadata API makes them.** A rollup's aggregation function (such as `SUM(values)`) may not be returned by Airtable when reading; if it is, it is in `formula_text` and `options_json`. After your first real pull, check one rollup field's `options_json` to confirm what Airtable returned.
+
+The settings appear in a **Settings** column in Step 3 and in the report's schema inventory, and **Download fields and settings .csv**, **Download tables .csv** and **Download views .csv** (Step 3) export the field, table and view details for use in field mapping. `test/sample_schema_field_options.json` is a sample schema with one of nearly every field type, for testing.
+
+## Saving record data (optional)
+
+The migration has to move the actual rows, so the profiling pass can also write them out. **This is off by default.** In step 5, tick **Also save every record to JSON files during this run**.
+
+- **One pass, not two.** The profiler already reads every page of every table. With the box ticked, the same pages are also written to disk, so the number of API calls does not change. With the box unticked nothing is written, which is the way to do a test run without holding data on disk.
+- **Where.** One JSON file per table: `data_extract/<base id>/<table id>.json` next to `server.py` (change it with `"extract_dir"` in `config.json`). The folder is in `.gitignore`.
+- **Format.** Each file is one JSON document: `format`, `base_id`, `table_id`, `table_name`, `captured_at`, `fields` (field ID, name, type), `records` (Airtable's own record objects: `id`, `createdTime` and `fields`, keyed by **field ID**) and `record_count`. Values are exactly as Airtable returns them (linked records are record IDs, attachments are Airtable's attachment objects). Airtable omits empty cells, so an empty field is simply absent from a record.
+- **Safe to interrupt.** A table is written to a `.tmp` file and renamed only after every page was read and its statistics were saved. A failed or cancelled table leaves its earlier file untouched and no `.tmp` behind. A record returned twice while paging fails that table with a clear message.
+- **Manifest.** `data_extract/manifest.json` lists each file with its record count, size, SHA-256 and capture time. It holds no values. Step 6 shows it, including whether each file's record count matches the table's latest profile.
+- **Where values go.** Only into these files. Never into SQLite, the API call log (which records counts only), runbook entries, error messages, the report, any CSV export or any response to the browser; the page shows counts, sizes and checksums. The tests check this by searching every one of those places for values taken from the files.
+- **Deleting.** Step 6 has **Delete saved record files** (all bases, or one). Deleting the folder by hand has the same effect.
+- **Limits.** Attachment URLs in the data are temporary links from Airtable and expire after a few hours; the attached files themselves are not downloaded. Each file is loaded whole by whatever reads it next, which is fine for thousands of rows and needs care for millions.
+
+The files hold real record values. Keep them in a location that suits your organisation's data-handling rules, and delete them when the migration no longer needs them.
 
 ## Load order report
 
@@ -153,11 +254,30 @@ Step 4 can produce a self-contained report for two audiences: people **auditing*
 
 The report is built from the database each time, using the link handling selected in step 4, so regenerating it from the same database gives the same content (only the generated time changes). If the load order saved in `dependency_matrix` differs from the freshly computed one, the report says so. The source and date in section 2 come from the audit entry written with each ingest; a schema ingested before this feature shows "Not recorded" for the source but still shows its date.
 
+### CSV exports
+
+Two metadata-only CSV downloads let you check a run against an answer key or hand the numbers to the next stage.
+
+- **Load order .csv** (step 4, with a base picker): `base_id, table, table_id, load_no, depth, parent_tables, in_cycle`. `load_no` counts within the base. It uses the link handling selected in step 4.
+- **Results .csv** (step 5, uses the base and table pickers above the results grid): `base_id, table, field, field_type, row_count, null_count, cardinality, cardinality_capped`. Fields no longer in the source are left out. A capped field shows the cap and `cardinality_capped = yes`; raise the cap if you need an exact value.
+
+The headers are accepted by the reference `compare.py`. Export one base at a time and name its label, for example `python src/compare.py --profile profile.csv --load-order load-order.csv --mode resolve --base ff_main` (use `--mode literal` for a Literal-mode export).
+
+### Checking against an answer key
+
+`test/answer_key_check.py` is optional and needs no Airtable access. Point it at an answer-key folder (`expected_profile.csv`, `expected_link_treatment.csv`, `expected_load_order.csv`, `expected_load_order_literal.csv`):
+
+```
+python test/answer_key_check.py path/to/out/answer_key
+```
+
+It rebuilds the schema from the key, loads it into a scratch database, and compares load number, depth and second-pass treatment for every table and link field in both modes. Against the Fictional Fashionwear key (39 tables, 130 link fields) it reports `checked=416 fail=0`. This checks the ordering logic only; profile counts have to be checked against a real run.
+
 ## Test plan (no real data, about 5 minutes)
 
 **A. Logic only (no Airtable, no token needed)**
 
-1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 10 tables, all with 0 rows, and foreign keys on.
+1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 12 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -165,9 +285,9 @@ The report is built from the database each time, using the link handling selecte
    - Customers and Products load before Orders; Orders before OrderItems (depth 2).
    - **Three cycles**: Departments ↔ Employees, Articles ↔ Tags, Projects ↔ Tasks. Three OPEN `dependency_graph` rows in the runbook panel. Recomputing again adds no duplicates.
 5. Switch to "Resolve two-way link pairs", Recompute. Expect:
-   - **One cycle** remains: Departments ↔ Employees (a true loop with no inverse fields).
+   - Departments ↔ Employees remains a cycle (a true loop with no inverse fields).
    - **Projects ↔ Tasks** is ordered: Tasks is the child of Projects (the `Tasks.Project` field is a single-record link), so Projects loads first and Tasks has depth 1.
-   - **Articles ↔ Tags** is listed as "direction unknown" (many-to-many) and adds no ordering; populate those links in a second pass.
+   - **Articles ↔ Tags** is listed as "direction unknown" (many-to-many), so both tables stay in a cycle, load together, and have their links set in a second pass. That makes **two cycles** in this mode: Articles ↔ Tags and Departments ↔ Employees.
 6. Edit a copy of the JSON to delete the `Price` field from Products and ingest it. Expect "1 previously known field no longer in source"; the field stays in the schema view with a flag.
 7. Ingest the original JSON under a different base ID. Expect a refusal ("already belong to base ...") and nothing saved.
 8. In step 4, click **Preview report**, then download the **.mhtml** and open it in Chrome or Edge. Expect: section 2 shows `appSampleBase001` as "Provided as a JSON document" with the time you ingested it; section 3 lists all 26 fields; section 4 has 10 rows in the order from step 4 above; section 5 highlights the second-pass links (Customers.Referred By, the Departments/Employees links, Articles.Tags and Tags.Articles); section 6 draws the graph with the Departments/Employees cycle in red and a self-link mark on Customers.
@@ -188,7 +308,7 @@ The report is built from the database each time, using the link handling selecte
 
 **C. Upgrading an older database (optional)**
 
-Create a SQLite file from the original schema, connect to it in step 1, and note that the app lists the missing columns and refuses to continue. Run `sql/migration_001_add_columns.sql` on it, connect again, and it is accepted with existing data intact.
+Create a SQLite file from the original schema, connect to it in step 1, and note that the app lists the missing columns and refuses to continue. Run `python sql/apply_migrations.py` on it, connect again, and it is accepted with existing data intact.
 
 ## How it works
 
@@ -199,7 +319,7 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 **Two-way link pairs.** Airtable normally creates a reverse (inverse) link field on the linked table. Read literally, every such pair is a two-table cycle, so there are two link-handling modes:
 
 - **Literal** (default): every link field is a dependency, exactly as stated above.
-- **Resolve two-way link pairs:** a pair is detected from `inverse_link_field_id`. If exactly one side has `prefers_single_record_link = 1`, that side's table is the child and only that field orders the load. If both sides or neither side are single-record links (many-to-many, or the hint was not reported), the pair adds no ordering and is listed for a second-pass load.
+- **Resolve two-way link pairs:** a pair is detected from `inverse_link_field_id`. If exactly one side has `prefers_single_record_link = 1`, that side's table is the child and only that field orders the load. If both sides or neither side are single-record links (many-to-many, or the hint was not reported), the direction is unknown, so both fields stay as dependencies and the two tables form a cycle: they load together and their links are set in a second pass. (This follows the rule in the reference answer key: such pairs "stay a cycle".)
 
 **Ingest audit entries.** Each schema ingest writes one informational entry to `runbook_logs` (status `RESOLVED`, component `schema_ingest:<base id>`) in the same transaction and with the same timestamp as the field rows. This is how the report states exactly where a schema came from and when, without adding a column. These entries do not appear in the "Open runbook items" list.
 
@@ -212,7 +332,7 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 - **Capped fields.** Once a field has more distinct values than the cap, tracking stops. The database stores the cap in `cardinality` and sets `cardinality_is_capped = 1`; the UI shows "capped (more than N)". A capped number is never presented as exact. `row_count` and `null_count` are always exact.
 - A table's statistics are saved only after all its pages are read. A table that fails partway keeps its previous statistics.
 
-**API calls.** One function makes every outbound call and logs every attempt (timestamp in UTC, purpose, method, endpoint path, base and table IDs, attempt number, HTTP status, success, duration, records returned, error). It retries HTTP 429, 5xx, network errors and timeouts, with up to 5 attempts, waits that start at 1 second and double up to 30 seconds, and `Retry-After` honored up to 60 seconds. It does not retry 401, 403, 404 or 422; it fails fast with a plain-language explanation (for example, 403 usually means the token lacks access to the base or scope). Requests to the same base are spaced at least 0.2 seconds apart (5 per second). A table that still fails after its retries is logged to `runbook_logs` and the run continues with the next table.
+**API calls.** One function makes every outbound call and logs every attempt (timestamp in UTC, purpose, method, endpoint path, base and table IDs, attempt number, HTTP status, success, duration, records returned, error). It retries HTTP 429, 5xx, network errors and timeouts, with up to 5 attempts, waits that start at 1 second and double up to 30 seconds, and `Retry-After` honored up to 60 seconds. It does not retry 401, 403, 404 or 422; it fails fast with a plain-language explanation (for example, 403 usually means the token lacks access to the base or scope). Requests to the same base are paced by `requests_per_second` in `config.json` (default 5, and never above Airtable's limit of 5 per second per base). A table that still fails after its retries is logged to `runbook_logs` and the run continues with the next table.
 
 **Security.** The server binds to `127.0.0.1` only, rejects requests with a non-localhost `Host` header or a cross-site `Origin`, and requires JSON for all writes. Strings are scrubbed of anything that looks like a token before being logged or returned. The page inserts all data with `textContent`, never `innerHTML`.
 
@@ -230,7 +350,7 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 - A relative database path is resolved next to `server.py`.
 - Link fields that point at a table not yet in the database (for example, the other base was not ingested) are listed as "unresolved" and ignored for ordering.
 - Schema fetch is one Metadata API call per base; the token must be able to see the base.
-- Forms, automations and Workfront tables exist in the schema for later stages. This stage builds no features for them. Mapping fields to Workfront Planning and loading records in batches of 100 are also later stages.
+- Forms, automations and Workfront tables exist in the schema for later stages. This stage builds no features for them. Mapping fields to Workfront Planning and loading the saved records into Workfront Planning in batches of 100 are also later stages.
 
 ## License
 
