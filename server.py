@@ -18,6 +18,8 @@ sent to the browser.
 """
 import hashlib
 import heapq
+import html as _html
+import quopri
 import http.client
 import json
 import os
@@ -32,6 +34,7 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from random import random
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -56,6 +59,9 @@ HTTP_TIMEOUT = 30
 MAX_BODY_BYTES = 25 * 1024 * 1024
 DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
+# Bump when the API changes. The page compares it with its own expected version, so an old server process
+# left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
+APP_VERSION = "1.3"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -437,6 +443,7 @@ def api_db_create(body):
 def api_status(_q=None):
     cfg, err = load_config()
     return {
+        "version": APP_VERSION,
         "token_configured": bool(cfg["airtable_pat"]),
         "config_problem": err,
         "default_db_path": cfg["db_path"],
@@ -472,11 +479,12 @@ def log_api_attempt(row):
 
 
 def write_runbook(component, message, root_cause=None, mitigation=None, preventative=None,
-                  status="OPEN", conn=None):
+                  status="OPEN", conn=None, timestamp=None):
     sql = """INSERT INTO runbook_logs(timestamp, source_system, failing_component, error_message,
              root_cause_summary, mitigation_steps_taken, preventative_action, status)
              VALUES (?,?,?,?,?,?,?,?)"""
-    args = (utc_now(), "Airtable", component, scrub(message), root_cause, mitigation, preventative, status)
+    args = (timestamp or utc_now(), "Airtable", component, scrub(message), root_cause, mitigation, preventative,
+            status)
     try:
         if conn is not None:
             conn.execute(sql, args)
@@ -712,7 +720,11 @@ def parse_schema(doc):
     return rows
 
 
-def upsert_schema(base_id, rows):
+SOURCE_LABELS = {"api": "Pulled from the Airtable Metadata API",
+                 "json": "Provided as a JSON document (uploaded file or pasted text)"}
+
+
+def upsert_schema(base_id, rows, source):
     ts = utc_now()
     try:
         with db() as conn:
@@ -724,6 +736,13 @@ def upsert_schema(base_id, rows):
                                "entered the right base ID. Nothing was saved." % (clash[0], len(clash) - 1, other, base_id))
             new_ids = {r["field_id"] for r in rows}
             before_in_base = {fid for fid, b in existing.items() if b == base_id}
+            missing = sorted(before_in_base - new_ids)
+            summary = {"base_id": base_id,
+                       "tables": len({r["table_id"] for r in rows}),
+                       "fields": len(rows),
+                       "added": len(new_ids - before_in_base),
+                       "updated": len(new_ids & before_in_base),
+                       "no_longer_in_source": len(missing)}
             with conn:
                 conn.executemany(
                     """INSERT INTO airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type,
@@ -740,13 +759,16 @@ def upsert_schema(base_id, rows):
                     [(base_id, r["table_id"], r["table_name"], r["field_id"], r["field_name"], r["data_type"],
                       r["linked_table_id"], r["inverse_link_field_id"], r["prefers_single_record_link"], ts)
                      for r in rows])
-            missing = sorted(before_in_base - new_ids)
-            return {"base_id": base_id,
-                    "tables": len({r["table_id"] for r in rows}),
-                    "fields": len(rows),
-                    "added": len(new_ids - before_in_base),
-                    "updated": len(new_ids & before_in_base),
-                    "no_longer_in_source": len(missing)}
+                # Audit entry, same transaction and same timestamp as the field rows, so the report can say
+                # exactly where this schema came from and when. Informational: status RESOLVED.
+                write_runbook("schema_ingest:%s" % base_id,
+                              "Schema ingested for base %s: %d tables, %d fields (%d new, %d refreshed, %d no longer "
+                              "in source)." % (base_id, summary["tables"], summary["fields"], summary["added"],
+                                               summary["updated"], summary["no_longer_in_source"]),
+                              root_cause="Source: " + SOURCE_LABELS[source],
+                              mitigation="Informational audit entry; no action needed.",
+                              status="RESOLVED", conn=conn, timestamp=ts)
+            return summary
     except sqlite3.Error as e:
         raise DbError("Database write failed: %s. Nothing from this ingest was saved." % scrub(e))
 
@@ -775,7 +797,7 @@ def api_schema_ingest(body):
     else:
         raise AppError("Choose a schema source: Airtable API or JSON.")
     rows = parse_schema(doc)
-    result = upsert_schema(base_id, rows)
+    result = upsert_schema(base_id, rows, source)
     result["source"] = source
     return result
 
@@ -869,14 +891,15 @@ def compute_graph(conn, mode="literal"):
     if mode not in ("literal", "collapse"):
         raise AppError("Unknown dependency mode.")
     rows = [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"]]
-    tables = {}
+    tables, base_of = {}, {}
     for r in rows:
         tables[r["table_id"]] = r["table_name"]
+        base_of[r["table_id"]] = r["base_id"]
     by_field = {r["field_id"]: r for r in rows}
     links = [r for r in rows if r["linked_table_id"]]
 
     # inverse pair detection (always computed; only used for ordering in 'collapse' mode)
-    paired, oriented, pair_list = set(), set(), {}
+    paired, oriented, pair_list, pair_other = set(), set(), {}, {}
     for a in links:
         if a["table_id"] == a["linked_table_id"] or not a["inverse_link_field_id"]:
             continue
@@ -884,6 +907,8 @@ def compute_graph(conn, mode="literal"):
         if b and b["linked_table_id"] == a["table_id"] and b["table_id"] == a["linked_table_id"]:
             paired.add(a["field_id"])
             paired.add(b["field_id"])
+            pair_other[a["field_id"]] = b["field_id"]
+            pair_other[b["field_id"]] = a["field_id"]
             key = tuple(sorted((a["field_id"], b["field_id"])))
             if key in pair_list:
                 continue
@@ -953,7 +978,7 @@ def compute_graph(conn, mode="literal"):
     for i in order:
         for n in sorted(sccs[i], key=skey):
             seq += 1
-            matrix.append({"table_id": n, "table_name": tables[n],
+            matrix.append({"table_id": n, "table_name": tables[n], "base_id": base_of[n],
                            "parent_table_ids": sorted(parents_by_table[n]),
                            "load_order_sequence": seq, "dependency_depth": depth[i],
                            "in_cycle": len(sccs[i]) > 1})
@@ -970,8 +995,38 @@ def compute_graph(conn, mode="literal"):
     cycles.sort(key=lambda c: skey(c["table_ids"][0]))
     edge_list = [{"child": c, "parent": p, "fields": sorted(f)}
                  for (c, p), f in sorted(edges.items(), key=lambda kv: (skey(kv[0][0]), skey(kv[0][1])))]
+    # How every link field is treated, for the report: does it order the load, or wait for a second pass?
+    link_fields = []
+    for a in sorted(links, key=lambda r: (r["table_name"].lower(), r["field_name"].lower(), r["field_id"])):
+        tgt = a["linked_table_id"]
+        if tgt == a["table_id"]:
+            cls, second, why = ("Self-link", True,
+                                "Links to its own table. Load the table's records first, then set these links.")
+        elif tgt not in tables:
+            cls, second, why = ("Unresolved", True,
+                                "The linked table is not in the database. Ingest its base, then recompute.")
+        elif mode == "collapse" and a["field_id"] in paired and a["field_id"] not in oriented:
+            if pair_other[a["field_id"]] in oriented:
+                cls, second, why = ("Inverse of an ordered pair", False,
+                                    "Reverse side of a two-way link whose direction is set by the other field. "
+                                    "Adds no ordering.")
+            else:
+                cls, second, why = ("Two-way pair, direction unknown", True,
+                                    "Many-to-many, or the single-link hint was not reported. Load both tables, "
+                                    "then set these links in a second pass.")
+        elif comp_of[a["table_id"]] == comp_of[tgt]:
+            cls, second, why = ("In a dependency cycle", True,
+                                "Part of a loop between tables. Load the records first, then set these links "
+                                "in a second pass.")
+        else:
+            cls, second, why = ("Orders the load", False,
+                                "The linked (parent) table must be loaded before this table.")
+        link_fields.append({"base_id": a["base_id"], "table_id": a["table_id"], "table_name": a["table_name"],
+                            "field_id": a["field_id"], "field_name": a["field_name"], "linked_table_id": tgt,
+                            "linked_table_name": tables.get(tgt, tgt), "treatment": cls, "second_pass": second,
+                            "explanation": why})
     return {"mode": mode, "matrix": matrix, "edges": edge_list, "cycles": cycles, "self_links": self_links,
-            "unresolved_links": unresolved, "inverse_pairs": pairs}
+            "unresolved_links": unresolved, "inverse_pairs": pairs, "link_fields": link_fields}
 
 
 def _cycle_message(cyc, mode):
@@ -1301,6 +1356,366 @@ def api_runbook(q):
 
 
 # --------------------------------------------------------------------------
+# Load order report (self-contained HTML, also packaged as MHTML)
+# Generated from the database only. Contains schema metadata, never record data. No LLM involved.
+# --------------------------------------------------------------------------
+def esc(x):
+    return _html.escape("" if x is None else str(x), quote=True)
+
+
+def _ts(ts):
+    return (str(ts)[:19] + " UTC") if ts else "unknown"
+
+
+def _code(x):
+    return "<code>%s</code>" % esc(x)
+
+
+REPORT_CSS = """
+body{font:14px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#1d2330;margin:0;background:#fff}
+main{max-width:1180px;margin:0 auto;padding:24px 28px 48px}
+h1{font-size:24px;margin:0 0 4px}
+h2{font-size:18px;margin:34px 0 8px;padding-bottom:4px;border-bottom:2px solid #1f5fd1}
+h3{font-size:15px;margin:20px 0 6px}
+.meta{color:#5d667a;font-size:13px}
+table{border-collapse:collapse;width:100%;margin:8px 0 14px;font-size:12.5px}
+th,td{border:1px solid #d5d9e2;padding:4px 7px;text-align:left;vertical-align:top}
+th{background:#eef1f7}
+td.n,th.n{text-align:right}
+code{background:#eef0f4;padding:0 4px;border-radius:3px;font-size:12px;white-space:nowrap}
+.rep{color:#a0a8b8}
+tr.second td{background:#fff6e5}
+.box{border:1px solid #d5d9e2;border-radius:6px;padding:10px 14px;margin:10px 0;background:#f8f9fc}
+.box.warn{background:#fff3df;border-color:#f0cf9a}
+.box.err{background:#fdeceb;border-color:#f0b8b3}
+.tag{display:inline-block;font-size:11px;padding:0 6px;border-radius:8px;background:#e9ecf3;margin-left:4px}
+.tag.warn{background:#ffe5b8}
+.graph{overflow:auto;border:1px solid #d5d9e2;border-radius:6px;padding:6px;background:#fcfcfd}
+li{margin:3px 0}
+.sign td{height:34px}
+@media print{main{max-width:none;padding:0}h2{break-after:avoid}tr{break-inside:avoid}.graph{overflow:visible}}
+"""
+
+MODE_TEXT = {
+    "literal": ("Literal",
+                "Every link field is a dependency: a table that links to another table is the child, and the "
+                "linked table is its parent. Self-links are ignored for ordering."),
+    "collapse": ("Resolve two-way link pairs",
+                 "As Literal, except that a link field and its inverse (a two-way pair) are resolved with "
+                 "Airtable's single-record-link hint. If exactly one side is a single-record link, that side's "
+                 "table is the child and only that field orders the load. Otherwise the pair adds no ordering "
+                 "and its links are set in a second pass."),
+}
+
+
+def svg_graph(nodes, edges, self_tables):
+    """Dependency graph as inline SVG. Parents on the left, children on the right."""
+    if not nodes:
+        return ""
+    W, H, GX, GY, PAD = 210, 30, 90, 16, 20
+    cols = {}
+    for n in nodes:
+        cols.setdefault(n["dependency_depth"], []).append(n)
+    depths = sorted(cols)
+    pos, max_rows = {}, 0
+    for ci, d in enumerate(depths):
+        cols[d].sort(key=lambda n: n["load_order_sequence"])
+        max_rows = max(max_rows, len(cols[d]))
+        for ri, n in enumerate(cols[d]):
+            pos[n["table_id"]] = (PAD + ci * (W + GX), PAD + ri * (H + GY))
+    width = PAD * 2 + len(depths) * W + (len(depths) - 1) * GX + 40
+    height = PAD * 2 + max_rows * H + (max_rows - 1) * GY
+    cyc = {n["table_id"] for n in nodes if n["in_cycle"]}
+    names = {n["table_id"]: n["table_name"] for n in nodes}
+    o = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img" '
+         'aria-label="Table dependency graph" style="max-width:100%%;height:auto;font:12px sans-serif">'
+         % (width, height, width, height)]
+    for mid, color in (("arr", "#8a93a6"), ("arrc", "#b3261e")):
+        o.append('<defs><marker id="%s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
+                 'orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="%s"/></marker></defs>' % (mid, color))
+    for e in edges:
+        p, c = pos.get(e["parent"]), pos.get(e["child"])
+        if not p or not c:
+            continue
+        in_cyc = e["parent"] in cyc and e["child"] in cyc
+        if p[0] == c[0]:
+            x1, y1, y2 = p[0] + W, p[1] + H / 2, c[1] + H / 2
+            d = "M%g,%g C%g,%g %g,%g %g,%g" % (x1, y1, x1 + 45, y1, x1 + 45, y2, x1, y2)
+        else:
+            x1, y1, x2, y2 = p[0] + W, p[1] + H / 2, c[0], c[1] + H / 2
+            mx = (x1 + x2) / 2
+            d = "M%g,%g C%g,%g %g,%g %g,%g" % (x1, y1, mx, y1, mx, y2, x2, y2)
+        o.append('<path d="%s" fill="none" stroke="%s" stroke-width="1.3" marker-end="url(#%s)"><title>%s</title></path>'
+                 % (d, "#b3261e" if in_cyc else "#8a93a6", "arrc" if in_cyc else "arr",
+                    esc("%s → %s: %s" % (names.get(e["parent"]), names.get(e["child"]), ", ".join(e["fields"])))))
+    for n in nodes:
+        x, y = pos[n["table_id"]]
+        label = "%d. %s" % (n["load_order_sequence"], n["table_name"])
+        if len(label) > 30:
+            label = label[:29] + "…"
+        o.append('<g><rect x="%d" y="%d" width="%d" height="%d" rx="5" fill="%s" stroke="%s" stroke-width="%s"/>'
+                 '<text x="%d" y="%d" fill="#1d2330">%s</text>%s<title>%s</title></g>'
+                 % (x, y, W, H, "#fff6f5" if n["in_cycle"] else "#fff", "#b3261e" if n["in_cycle"] else "#7b8498",
+                    "2" if n["in_cycle"] else "1.2", x + 8, y + H // 2 + 4, esc(label),
+                    ('<text x="%d" y="%d" fill="#1d2330">↻</text>' % (x + W - 18, y + H // 2 + 4))
+                    if n["table_id"] in self_tables else "",
+                    esc("%s (%s)" % (n["table_name"], n["table_id"]))))
+    o.append("</svg>")
+    return "".join(o)
+
+
+def _tr(cells, cls=""):
+    return "<tr%s>%s</tr>" % ((' class="%s"' % cls) if cls else "", "".join(cells))
+
+
+def _td(html_text, cls=""):
+    return "<td%s>%s</td>" % ((' class="%s"' % cls) if cls else "", html_text)
+
+
+def _th(labels):
+    return "<tr>%s</tr>" % "".join("<th%s>%s</th>" % (' class="n"' if l.endswith("#") or l == "Depth" else "", l)
+                                   for l in labels)
+
+
+def build_report(mode):
+    if mode not in MODE_TEXT:
+        raise AppError("Unknown link-handling mode.")
+    with db() as conn:
+        g = compute_graph(conn, mode)
+        frows = conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f ORDER BY f.base_id, "
+                             "lower(f.table_name), f.table_id, lower(f.field_name), f.field_id" % STALE_SQL).fetchall()
+        saved = [{"table_id": r["table_id"], "table_name": r["table_name"],
+                  "parent_table_ids": json.loads(r["parent_table_ids"] or "[]"),
+                  "load_order_sequence": r["load_order_sequence"], "dependency_depth": r["dependency_depth"]}
+                 for r in conn.execute("SELECT * FROM dependency_matrix ORDER BY load_order_sequence")]
+        audits = [dict(r) for r in conn.execute(
+            "SELECT error_id, timestamp, failing_component, error_message, root_cause_summary FROM runbook_logs "
+            "WHERE failing_component LIKE 'schema_ingest:%' ORDER BY error_id")]
+        db_name = os.path.basename(STATE["db_path"] or "")
+    if not frows:
+        raise AppError("There is no schema in the database yet. Ingest a schema (step 3) first.")
+    fresh = [{k: m[k] for k in ("table_id", "table_name", "parent_table_ids", "load_order_sequence",
+                                "dependency_depth")} for m in g["matrix"]]
+    in_sync = fresh == saved
+    tname = {r["table_id"]: r["table_name"] for r in frows}
+    bases = {}
+    for r in frows:
+        b = bases.setdefault(r["base_id"], {"tables": set(), "fields": 0, "stale": 0, "last": ""})
+        b["tables"].add(r["table_id"])
+        b["fields"] += 1
+        b["stale"] += 1 if r["stale"] else 0
+        b["last"] = max(b["last"], r["updated_at"] or "")
+
+    def source_for(base):
+        a = next((x for x in reversed(audits)
+                  if x["failing_component"] == "schema_ingest:" + base and x["timestamp"] == bases[base]["last"]), None)
+        if a and a["root_cause_summary"]:
+            return a["root_cause_summary"].replace("Source: ", "", 1)
+        return "Not recorded (this schema was ingested before audit entries were added)"
+
+    mode_name, mode_desc = MODE_TEXT[mode]
+    self_tables = {s["table_id"] for s in g["self_links"]}
+    second = [l for l in g["link_fields"] if l["second_pass"]]
+    h = []
+    h.append("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+             "<title>Airtable Load Order Report</title><style>%s</style></head><body><main>" % REPORT_CSS)
+    h.append("<h1>Airtable schema and load order report</h1>")
+    h.append("<p class=\"meta\">Generated %s by the Airtable &rarr; Workfront Planning migration control plane "
+             "(stage 1) from database file %s. Link handling: <strong>%s</strong>.</p>"
+             % (esc(_ts(utc_now())), _code(db_name), esc(mode_name)))
+
+    # 1. About
+    h.append("<h2>1. About this report</h2>")
+    h.append("<div class=\"box\"><p><strong>Where the data came from.</strong> Everything here comes from the "
+             "<em>schema</em> (table, field and link definitions) of the Airtable bases listed in section 2, as "
+             "captured in the database file named above. It does not contain any Airtable records, and none were "
+             "stored to produce it. The load order is computed from the link fields in that schema.</p>"
+             "<p><strong>For auditors:</strong> section 2 records the source and date of each schema, section 3 lists "
+             "every table and field exactly as captured, and section 7 explains how the order is derived and how "
+             "to re-check it. The computation is deterministic and uses no AI: the same schema always gives the "
+             "same report content.</p>"
+             "<p><strong>For whoever runs the next stage:</strong> section 4 is the order in which to load "
+             "tables, section 5 lists the link fields that must wait for a second pass, and section 6 is the "
+             "dependency graph. The next stage maps these fields to Workfront Planning fields and loads records "
+             "in batches of 100.</p></div>")
+    if not in_sync:
+        h.append("<div class=\"box warn\"><strong>Note:</strong> the load order saved in the database "
+                 "(<code>dependency_matrix</code>) differs from the order computed here for the current schema and "
+                 "link handling. This report shows the freshly computed order. Click \"Recompute load order\" in "
+                 "the app, with the same link handling, to save it.</div>")
+
+    # 2. Provenance
+    h.append("<h2>2. Schema source and date</h2><table>")
+    h.append(_th(["Base", "Schema source", "Captured (UTC)", "Tables", "Fields", "Fields no longer in source"]))
+    for base in sorted(bases):
+        b = bases[base]
+        h.append(_tr([_td(_code(base)), _td(esc(source_for(base))), _td(esc(_ts(b["last"]))),
+                      _td(str(len(b["tables"])), "n"), _td(str(b["fields"]), "n"), _td(str(b["stale"]), "n")]))
+    h.append("</table><p class=\"meta\">\"Captured\" is the moment the schema was pulled from Airtable or the file "
+             "was provided to the app. If a base was ingested more than once, the latest ingest is shown above and "
+             "every ingest appears in the history below. \"No longer in source\" fields were in an earlier ingest "
+             "but absent from the latest one; they are kept for reference and excluded from the load order.</p>")
+    if audits:
+        h.append("<h3>Ingest history</h3><table>")
+        h.append(_th(["Time (UTC)", "Base", "Source", "Event"]))
+        for a in audits:
+            h.append(_tr([_td(esc(_ts(a["timestamp"]))), _td(_code(a["failing_component"].split(":", 1)[1])),
+                          _td(esc((a["root_cause_summary"] or "").replace("Source: ", "", 1))),
+                          _td(esc(a["error_message"]))]))
+        h.append("</table>")
+    n_link = len(g["link_fields"])
+    h.append("<h3>Summary</h3><ul>"
+             "<li>%d base(s), %d table(s), %d field(s) captured (%d link fields).</li>"
+             "<li>%d dependency cycle(s); %d self-link field(s); %d two-way link pair(s); %d unresolved link(s).</li>"
+             "<li>%d of %d link fields must be set in a second pass (section 5).</li></ul>"
+             % (len(bases), len(tname), len(frows), n_link, len(g["cycles"]), len(g["self_links"]),
+                len(g["inverse_pairs"]), len(g["unresolved_links"]), len(second), n_link))
+
+    # 3. Inventory
+    h.append("<h2>3. Schema inventory: bases, tables and fields</h2>"
+             "<p class=\"meta\">One row per field, as captured. Repeated base and table values are shown in grey so "
+             "the grid can be filtered or copied into a spreadsheet.</p><table>")
+    h.append(_th(["Base", "Table ID", "Table", "Field ID", "Field", "Type"]))
+    prev_base = prev_table = None
+    for r in frows:
+        same_base, same_table = r["base_id"] == prev_base, r["table_id"] == prev_table
+        typ = esc(r["data_type"])
+        if r["linked_table_id"]:
+            typ += " &rarr; %s (%s)" % (esc(tname.get(r["linked_table_id"], r["linked_table_id"])),
+                                         _code(r["linked_table_id"]))
+            if r["prefers_single_record_link"] == 1:
+                typ += " &middot; single-record link"
+            elif r["prefers_single_record_link"] == 0:
+                typ += " &middot; multiple records"
+            if r["inverse_link_field_id"]:
+                typ += " &middot; inverse field " + _code(r["inverse_link_field_id"])
+        if r["stale"]:
+            typ += " <span class=\"tag warn\">no longer in source</span>"
+        h.append(_tr([_td(_code(r["base_id"]), "rep" if same_base else ""),
+                      _td(_code(r["table_id"]), "rep" if same_table else ""),
+                      _td(esc(r["table_name"]), "rep" if same_table else ""),
+                      _td(_code(r["field_id"])), _td(esc(r["field_name"])), _td(typ)]))
+        prev_base, prev_table = r["base_id"], r["table_id"]
+    h.append("</table>")
+
+    # 4. Load order
+    h.append("<h2>4. Load order</h2><div class=\"box\"><p><strong>How to read this.</strong> Load tables in "
+             "ascending <em>Load #</em>. A table's parents always have a lower number. Tables with the same "
+             "<em>Depth</em> do not depend on each other. Tables flagged <em>In a cycle</em> depend on each other: "
+             "load their records first, then set their link fields in a second pass. Tables flagged <em>Self-link</em> "
+             "link to themselves: set those links after the table's records exist.</p>"
+             "<p><strong>Link handling: %s.</strong> %s</p></div><table>" % (esc(mode_name), esc(mode_desc)))
+    h.append(_th(["Load #", "Base", "Table ID", "Table", "Depth", "Parent tables (must load first)", "Flags"]))
+    for m in g["matrix"]:
+        flags = [f for f, on in (("In a cycle", m["in_cycle"]), ("Self-link", m["table_id"] in self_tables)) if on]
+        parents = "<br>".join("%s (%s)" % (esc(tname.get(p, p)), _code(p)) for p in m["parent_table_ids"]) or "none"
+        h.append(_tr([_td(str(m["load_order_sequence"]), "n"), _td(_code(m["base_id"])), _td(_code(m["table_id"])),
+                      _td("<strong>%s</strong>" % esc(m["table_name"])), _td(str(m["dependency_depth"]), "n"),
+                      _td(parents), _td(esc(", ".join(flags)))]))
+    h.append("</table>")
+    for c in g["cycles"]:
+        h.append("<div class=\"box err\"><strong>Cycle:</strong> %s<ul>%s</ul>Load these tables' records first, "
+                 "then set the links in a second pass.</div>"
+                 % (esc(" ↔ ".join(c["tables"])),
+                    "".join("<li>%s links to %s via %s</li>" % (esc(e["child"]), esc(e["parent"]), esc(", ".join(e["fields"])))
+                            for e in c["edges"])))
+    if g["inverse_pairs"]:
+        h.append("<h3>Two-way link pairs</h3><ul>%s</ul>" % "".join(
+            "<li>%s.%s ⇄ %s.%s: %s</li>" % (
+                esc(p["table_a"]), esc(p["field_a"]), esc(p["table_b"]), esc(p["field_b"]),
+                esc("%s is the child of %s (single-record link)" % (p["child_table"], p["parent_table"])
+                    if p["child_table"] else "direction unknown (many-to-many, or the hint was not reported)"))
+            for p in g["inverse_pairs"]))
+        if mode == "literal":
+            h.append("<p class=\"meta\">In Literal mode each pair counts as a two-table cycle. Regenerate with "
+                     "\"Resolve two-way link pairs\" to order them using the single-link hint.</p>")
+    if g["unresolved_links"]:
+        h.append("<div class=\"box warn\"><strong>Unresolved links:</strong> these fields link to tables that are not "
+                 "in the database (ingest the other base, then recompute).<ul>%s</ul></div>" % "".join(
+                     "<li>%s.%s &rarr; %s</li>" % (esc(u["table_name"]), esc(u["field_name"]), _code(u["linked_table_id"]))
+                     for u in g["unresolved_links"]))
+
+    # 5. Link fields
+    h.append("<h2>5. Link fields and second-pass loading</h2><p class=\"meta\">Every link field and how it is "
+             "treated. Highlighted rows must be set in a second pass, after the records of both tables exist.</p><table>")
+    h.append(_th(["Table", "Field ID", "Field", "Links to", "Treatment", "Second pass?", "What to do"]))
+    for l in g["link_fields"]:
+        h.append(_tr([_td(esc(l["table_name"])), _td(_code(l["field_id"])), _td(esc(l["field_name"])),
+                      _td("%s (%s)" % (esc(l["linked_table_name"]), _code(l["linked_table_id"]))),
+                      _td(esc(l["treatment"])), _td("<strong>Yes</strong>" if l["second_pass"] else "No"),
+                      _td(esc(l["explanation"]))], "second" if l["second_pass"] else ""))
+    if not g["link_fields"]:
+        h.append(_tr(["<td colspan=\"7\">This schema has no link fields.</td>"]))
+    h.append("</table>")
+
+    # 6. Graph
+    h.append("<h2>6. Dependency graph</h2><p class=\"meta\">Parents are on the left and children on the right; arrows "
+             "point from parent to child. Numbers are the load order. A red outline means the table is in a cycle; "
+             "↻ marks a self-link. The same information is in the table in section 4.</p>")
+    h.append("<div class=\"graph\">%s</div>" % svg_graph(g["matrix"], g["edges"], self_tables))
+
+    # 7. Method
+    h.append("<h2>7. How the order is derived, and how to verify it</h2><h3>Method</h3><ol>"
+             "<li>Each link field in the captured schema says which table it points to. A table that links to "
+             "another table is the child; the linked table is its parent. Self-links are ignored.</li>"
+             "<li>Tables that depend on each other in a loop are found with Tarjan's strongly-connected-components "
+             "algorithm and treated as a single step.</li>"
+             "<li>Steps are ordered parent-first (a topological order). Ties are broken by table name, then table "
+             "ID, so the result is always the same for the same schema. Depth is the longest chain of parents above "
+             "a table.</li>"
+             "<li>Nothing here is estimated or generated by a language model, and no Airtable record data is read "
+             "to produce this report.</li></ol><h3>Suggested checks for auditors</h3><ol>"
+             "<li>Compare the capture date in section 2 with the date the Airtable base was last changed. If the "
+             "base changed after that date, re-ingest and regenerate.</li>"
+             "<li>Spot-check table and field counts against the Airtable base.</li>"
+             "<li>Pick a few tables in section 4 and confirm in Airtable that every table they link to has a lower "
+             "Load #, except those flagged as cycles or self-links.</li>"
+             "<li>Regenerate the report from the same database: the load order, flags and tables must be identical "
+             "(only the generated time changes).</li></ol><h3>Review sign-off</h3>"
+             "<table class=\"sign\"><tr><th>Prepared by</th><th>Date</th><th>Reviewed by</th><th>Date</th>"
+             "<th>Notes</th></tr><tr><td></td><td></td><td></td><td></td><td></td></tr></table>")
+    h.append("</main></body></html>")
+    return "".join(h)
+
+
+def to_mhtml(html_text, title):
+    """Wrap one HTML document as an MHTML (MIME multipart/related) archive."""
+    raw = html_text.encode("utf-8")
+    body = quopri.encodestring(raw).replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    boundary = "----=_MigrationReport_" + hashlib.sha256(raw).hexdigest()[:24]
+    head = ("From: <Saved by Airtable Migration Control Plane>\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\n"
+            "Content-Type: multipart/related; type=\"text/html\"; boundary=\"%s\"\r\n\r\n"
+            "--%s\r\nContent-Type: text/html; charset=\"utf-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n"
+            "Content-Location: file:///load-order-report.html\r\n\r\n"
+            % (title, formatdate(usegmt=True), boundary, boundary))
+    return head.encode("ascii") + body + ("\r\n--%s--\r\n" % boundary).encode("ascii")
+
+
+def _report_text(q):
+    mode = (q.get("mode") or ["literal"])[0]
+    return scrub(build_report(mode))
+
+
+def _stamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+
+
+def api_report_html(q):
+    headers = {}
+    text = _report_text(q)
+    if (q.get("download") or [""])[0]:
+        headers["Content-Disposition"] = 'attachment; filename="load-order-report_%s.html"' % _stamp()
+    return (text.encode("utf-8"), "text/html; charset=utf-8", headers)
+
+
+def api_report_mhtml(q):
+    text = _report_text(q)
+    return (to_mhtml(text, "Airtable Load Order Report"), "application/x-mimearchive",
+            {"Content-Disposition": 'attachment; filename="load-order-report_%s.mhtml"' % _stamp()})
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -1310,7 +1725,8 @@ STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
               "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
-              "/api/profile/results": api_profile_results, "/api/calllog": api_calllog, "/api/runbook": api_runbook}
+              "/api/profile/results": api_profile_results, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
+              "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
                "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel}
@@ -1322,10 +1738,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # keep the console quiet; never print headers
         pass
 
-    def _send(self, status, payload, ctype="application/json; charset=utf-8"):
+    def _send(self, status, payload, ctype="application/json; charset=utf-8", headers=None):
         data = payload if isinstance(payload, bytes) else scrub(json.dumps(payload)).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1351,7 +1769,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run(self, fn, arg):
         try:
-            self._send(200, fn(arg))
+            result = fn(arg)
+            if isinstance(result, tuple):  # (bytes, content type, extra headers): the report downloads
+                self._send(200, result[0], result[1], result[2])
+            else:
+                self._send(200, result)
         except AppError as e:
             self._send(e.status, dict({"error": e.message}, **e.extra))
         except sqlite3.Error as e:

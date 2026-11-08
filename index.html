@@ -88,6 +88,17 @@
   <h3>Dependency graph</h3>
   <p class="hint">Parents on the left, children on the right. Arrows point from parent to child. Red outline: table is in a cycle. &#8635; marks a self-link.</p>
   <div id="graphBox" class="graphbox"></div>
+  <h3>Load order report</h3>
+  <p class="hint">A self-contained report for auditors and for whoever runs the next stage. It shows where each schema came from and when it was captured, every base, table and field, the load order, which links wait for a second pass, and the dependency graph. It is built from the database and contains no record data. It uses the link handling selected above.</p>
+  <div class="row">
+    <button id="btnReportPreview">Preview report</button>
+    <a id="lnkMhtml" class="btnlink primary" href="/api/report.mhtml">Download .mhtml</a>
+    <a id="lnkHtml" class="btnlink" href="/api/report.html?download=1">Download .html</a>
+  </div>
+  <p class="hint">.mhtml opens in Chrome and Edge (double-click it, or File &gt; Open). In Firefox or Safari, use the .html download instead. Both contain the same report.</p>
+  <div id="reportMessage" class="msg"></div>
+  <iframe id="reportFrame" class="reportframe" title="Load order report preview" sandbox hidden></iframe>
+
   <h3>Open runbook items</h3>
   <div id="runbookBox"></div>
 </section>

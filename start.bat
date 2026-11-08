@@ -39,6 +39,15 @@ if not exist config.json (
   )
 )
 
+rem --- an older copy still running on this port would keep serving old code
+netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1 && (
+  echo Something is already listening on port %PORT%. This is usually an older copy of this app.
+  echo Close its window ^(or press Ctrl+C in it^), then run start.bat again, or use another port: start.bat 8800
+  echo.
+  pause
+  exit /b 1
+)
+
 echo Starting on http://127.0.0.1:%PORT%  (close this window or press Ctrl+C to stop)
 rem open the browser after a short delay so the server is up first
 start "" cmd /c "ping -n 3 127.0.0.1 >nul & start http://127.0.0.1:%PORT%"

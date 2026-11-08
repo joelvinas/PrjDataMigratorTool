@@ -26,7 +26,7 @@ Saved in the SQLite file:
 - Aggregate statistics per field: `row_count`, `null_count`, `cardinality`, and whether the cardinality is capped.
 - The computed load order (`dependency_matrix`).
 - An API call log: timestamp, endpoint path, HTTP status, duration, record *count*, and error text. Never headers, the token, or response bodies.
-- Runbook entries: plain-language descriptions of failures and cycles.
+- Runbook entries: plain-language descriptions of failures and cycles, plus one informational audit entry for each schema ingest (which base, whether it came from the API or a JSON file, and when).
 
 Not saved anywhere (not in the database, not on disk, not in logs):
 
@@ -85,7 +85,7 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 1. **Connect to a database.** Opens an existing SQLite file or creates one from the schema, checks that all expected tables and columns exist, and shows row counts.
 2. **Confirm token and enter a base ID.** The page shows only whether a token is configured (yes/no).
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
-4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph.
+4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
 5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field.
 6. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
 
@@ -137,6 +137,22 @@ Existing data is kept. `cardinality_is_capped` is `0` for existing rows, and `pr
 | `prefers_single_record_link` | `1`, `0`, `NULL` | From Airtable's `prefersSingleRecordLink` option. `1` = the link field holds a single record (the "many-to-one" side). `NULL` = not a link field, or Airtable did not report it. |
 | `cardinality_is_capped` | `0`, `1` | `1` = the field has more distinct values than the cap, so `cardinality` holds the cap and means "more than this". `0` = `cardinality` is exact. |
 
+## Load order report
+
+Step 4 can produce a self-contained report for two audiences: people **auditing** the process, and people **running the next stage** of the migration. Use **Preview report** to see it in the page, or download it as **.mhtml** (single file, opens in Chrome and Edge) or **.html** (any browser, including Firefox and Safari). Both contain the same report.
+
+| Section | What it contains | Mainly for |
+|---|---|---|
+| 1. About this report | Where the data came from (schema metadata only, no records), and how to use the report | Both |
+| 2. Schema source and date | For each base: whether the schema was pulled from the Airtable Metadata API or provided as a JSON file, when (UTC), table and field counts, and the full ingest history | Auditors |
+| 3. Schema inventory | One grid row per field: base, table ID, table name, field ID, field name, type (with linked table, single/multiple, and inverse field for link fields) | Both |
+| 4. Load order | Load #, base, table, depth, parent tables, cycle and self-link flags; cycles and two-way pairs spelled out | Next stage |
+| 5. Link fields and second-pass loading | Every link field, how it is treated, and whether its links must be set in a second pass | Next stage |
+| 6. Dependency graph | The graph as an inline picture (parents left, children right; cycles in red) | Both |
+| 7. Method and checks | How the order is derived, suggested audit checks, and a blank review sign-off block | Auditors |
+
+The report is built from the database each time, using the link handling selected in step 4, so regenerating it from the same database gives the same content (only the generated time changes). If the load order saved in `dependency_matrix` differs from the freshly computed one, the report says so. The source and date in section 2 come from the audit entry written with each ingest; a schema ingested before this feature shows "Not recorded" for the source but still shows its date.
+
 ## Test plan (no real data, about 5 minutes)
 
 **A. Logic only (no Airtable, no token needed)**
@@ -154,6 +170,7 @@ Existing data is kept. `cardinality_is_capped` is `0` for existing rows, and `pr
    - **Articles ↔ Tags** is listed as "direction unknown" (many-to-many) and adds no ordering; populate those links in a second pass.
 6. Edit a copy of the JSON to delete the `Price` field from Products and ingest it. Expect "1 previously known field no longer in source"; the field stays in the schema view with a flag.
 7. Ingest the original JSON under a different base ID. Expect a refusal ("already belong to base ...") and nothing saved.
+8. In step 4, click **Preview report**, then download the **.mhtml** and open it in Chrome or Edge. Expect: section 2 shows `appSampleBase001` as "Provided as a JSON document" with the time you ingested it; section 3 lists all 26 fields; section 4 has 10 rows in the order from step 4 above; section 5 highlights the second-pass links (Customers.Referred By, the Departments/Employees links, Articles.Tags and Tags.Articles); section 6 draws the graph with the Departments/Employees cycle in red and a self-link mark on Customers.
 
 **B. Profiling and API handling against the mock (still no real data)**
 
@@ -184,6 +201,8 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 - **Literal** (default): every link field is a dependency, exactly as stated above.
 - **Resolve two-way link pairs:** a pair is detected from `inverse_link_field_id`. If exactly one side has `prefers_single_record_link = 1`, that side's table is the child and only that field orders the load. If both sides or neither side are single-record links (many-to-many, or the hint was not reported), the pair adds no ordering and is listed for a second-pass load.
 
+**Ingest audit entries.** Each schema ingest writes one informational entry to `runbook_logs` (status `RESOLVED`, component `schema_ingest:<base id>`) in the same transaction and with the same timestamp as the field rows. This is how the report states exactly where a schema came from and when, without adding a column. These entries do not appear in the "Open runbook items" list.
+
 **Profiling rules.**
 
 - A value is **null** if the field is missing, `null`, an empty string, or an empty list. `0` is a real value. `false` is a real value.
@@ -196,6 +215,14 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 **API calls.** One function makes every outbound call and logs every attempt (timestamp in UTC, purpose, method, endpoint path, base and table IDs, attempt number, HTTP status, success, duration, records returned, error). It retries HTTP 429, 5xx, network errors and timeouts, with up to 5 attempts, waits that start at 1 second and double up to 30 seconds, and `Retry-After` honored up to 60 seconds. It does not retry 401, 403, 404 or 422; it fails fast with a plain-language explanation (for example, 403 usually means the token lacks access to the base or scope). Requests to the same base are spaced at least 0.2 seconds apart (5 per second). A table that still fails after its retries is logged to `runbook_logs` and the run continues with the next table.
 
 **Security.** The server binds to `127.0.0.1` only, rejects requests with a non-localhost `Host` header or a cross-site `Origin`, and requires JSON for all writes. Strings are scrubbed of anything that looks like a token before being logged or returned. The page inserts all data with `textContent`, never `innerHTML`.
+
+## Troubleshooting
+
+**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`index.html`, `scripts.js`, `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
+
+**"Port 8765 is already in use."** Another copy is running. Close it, or use another port (`PORT=8800 python server.py`, or `start.bat 8800`).
+
+**"No database is connected yet."** Complete step 1 first. The server forgets the connection when it restarts, so connect again after a restart.
 
 ## Assumptions and scope
 

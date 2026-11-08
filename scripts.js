@@ -3,6 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
+const EXPECTED_SERVER_VERSION = "1.3"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -55,6 +56,11 @@ async function api(method, path, body) {
 async function loadStatus() {
   const s = await api("GET", "/api/status");
   state.status = s;
+  if (s.version !== EXPECTED_SERVER_VERSION) {
+    showGlobalError("The server is running an older version of server.py than this page (" + (s.version || "unknown") +
+      " instead of " + EXPECTED_SERVER_VERSION + "). Some buttons will not work. Close the window or terminal running the server " +
+      "(Ctrl+C), start it again with start.bat or python server.py, then reload this page.");
+  }
   const tb = $("tokenBadge");
   tb.textContent = "Token: " + (s.token_configured ? "configured" : "not configured");
   tb.className = "badge " + (s.token_configured ? "ok" : "bad");
@@ -75,6 +81,7 @@ function applyReady() {
   dbBadge.textContent = "Database: " + (state.ready ? "connected" : "not connected");
   dbBadge.className = "badge " + (state.ready ? "ok" : "");
   for (const id of ["btnIngest", "btnRecompute", "btnProfile", "btnReloadSchema", "btnResults", "btnLog"]) $(id).disabled = !state.ready;
+  if (typeof syncReportLinks === "function") syncReportLinks();
   $("btnIngest").disabled = !state.ready;
 }
 
@@ -185,6 +192,7 @@ async function loadSchema() {
     box.appendChild(d);
   }
   fillScopeSelectors();
+  syncReportLinks();
 }
 
 function fillScopeSelectors() {
@@ -319,6 +327,25 @@ function drawGraph(g, selfTables) {
   box.appendChild(svg);
 }
 
+/* ---------- step 4: report ---------- */
+function reportUrl(kind, extra) {
+  return "/api/report." + kind + "?mode=" + encodeURIComponent($("depMode").value) + (extra || "");
+}
+function syncReportLinks() {
+  $("lnkMhtml").setAttribute("href", reportUrl("mhtml"));
+  $("lnkHtml").setAttribute("href", reportUrl("html", "&download=1"));
+  const off = !state.ready || !state.schema.length;
+  $("lnkMhtml").classList.toggle("disabled", off);
+  $("lnkHtml").classList.toggle("disabled", off);
+  $("btnReportPreview").disabled = off;
+}
+function previewReport() {
+  const f = $("reportFrame");
+  f.hidden = false;
+  f.src = reportUrl("html", "&t=" + Date.now());
+  setMsg("reportMessage", "Preview shows the current database. Use the download buttons to keep a copy.", "");
+}
+
 async function loadRunbook() {
   const data = await api("GET", "/api/runbook?status=OPEN");
   const box = $("runbookBox");
@@ -444,7 +471,9 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
   $("btnRecompute").addEventListener("click", recompute);
-  $("depMode").addEventListener("change", guard(loadDepgraph));
+  $("depMode").addEventListener("change", () => { syncReportLinks(); loadDepgraph().catch((e) => showGlobalError(e.message)); });
+  $("btnReportPreview").addEventListener("click", previewReport);
+  for (const id of ["lnkMhtml", "lnkHtml"]) $(id).addEventListener("click", () => setMsg("reportMessage", "Report downloaded.", "ok"));
   $("scope").addEventListener("change", updateScopeVisibility);
   $("btnProfile").addEventListener("click", startProfile);
   $("btnCancel").addEventListener("click", cancelProfile);
