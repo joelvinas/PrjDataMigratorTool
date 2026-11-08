@@ -64,7 +64,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -85,6 +85,27 @@ CREATE TABLE airtable_fields (
     null_count INTEGER DEFAULT 0,
     cardinality INTEGER DEFAULT 0,
     cardinality_is_capped INTEGER DEFAULT 0, -- 1 = cardinality is a lower bound: more distinct values than the cap
+    -- Field settings from the Metadata API (all NULL when not applicable or not reported)
+    field_description TEXT,        -- the description typed on the field in Airtable
+    is_primary_field INTEGER,      -- 1 = the table's primary field, 0 = not, NULL = not reported
+    options_json TEXT,             -- the field's full options object exactly as returned (lossless backup of everything below)
+    choices_json TEXT,             -- singleSelect / multipleSelects: [{"id","name","color"}] in Airtable's order
+    formula_text TEXT,             -- formula fields: options.formula (and a rollup's formula when Airtable returns one)
+    referenced_field_ids TEXT,     -- JSON array: options.referencedFieldIds (formula, rollup, lookup, lastModifiedTime)
+    source_link_field_id TEXT,     -- rollup / lookup / count: options.recordLinkFieldId, the link field it reads through
+    source_field_id TEXT,          -- rollup / lookup: options.fieldIdInLinkedTable, the field read in the linked table
+    is_valid INTEGER,              -- formula / rollup / lookup / count: 1 = valid, 0 = broken (options.isValid)
+    result_type TEXT,              -- computed fields: options.result.type (what the formula, rollup or lookup returns)
+    result_options_json TEXT,      -- computed fields: options.result.options (precision, date format, choices of the result)
+    number_precision INTEGER,      -- number / percent / currency: decimal places (options.precision)
+    currency_symbol TEXT,          -- currency: options.symbol
+    date_format TEXT,              -- date / dateTime: options.dateFormat.name (for example us, european, iso, local, friendly)
+    time_format TEXT,              -- dateTime: options.timeFormat.name (12hour or 24hour)
+    time_zone TEXT,                -- dateTime: options.timeZone
+    duration_format TEXT,          -- duration: options.durationFormat (for example h:mm:ss)
+    rating_max INTEGER,            -- rating: options.max
+    icon TEXT,                     -- rating / checkbox: options.icon
+    option_color TEXT,             -- rating / checkbox: options.color
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -427,7 +448,7 @@ def api_db_connect(body):
     result = _connect_result(path, info)
     if info["column_problems"]:
         result["message"] = ("Some existing tables do not have the expected columns. This app never alters "
-                             "existing tables. Run sql/migration_001_add_columns.sql on this database "
+                             "existing tables. Run: python sql/apply_migrations.py <this database file> "
                              "(see the README), or choose a new file.")
     return result
 
@@ -698,6 +719,73 @@ def check_base_id(raw):
     return b
 
 
+OPTION_COLUMNS = ["field_description", "is_primary_field", "options_json", "choices_json", "formula_text",
+                  "referenced_field_ids", "source_link_field_id", "source_field_id", "is_valid", "result_type",
+                  "result_options_json", "number_precision", "currency_symbol", "date_format", "time_format",
+                  "time_zone", "duration_format", "rating_max", "icon", "option_color"]
+
+
+def _j(v):
+    """Compact, stable JSON for a value taken from the schema (None stays None)."""
+    return None if v is None else json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _s(v):
+    return v if isinstance(v, str) and v != "" else None
+
+
+def _i(v):
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def extract_field_settings(f, primary_id):
+    """Pull the settings that define a field out of one field of the Metadata API response. Anything the
+    Metadata API did not report stays None. options_json keeps the whole options object, so nothing is lost
+    even for a field type or setting this function does not know about."""
+    ftype = f.get("type")
+    opts = f.get("options")
+    opts = opts if isinstance(opts, dict) else {}
+    out = dict.fromkeys(OPTION_COLUMNS)
+    out["field_description"] = _s(f.get("description"))
+    out["is_primary_field"] = None if not primary_id else (1 if f.get("id") == primary_id else 0)
+    out["options_json"] = _j(opts) if opts else None
+    if ftype in ("singleSelect", "multipleSelects") and isinstance(opts.get("choices"), list):
+        out["choices_json"] = json.dumps(
+            [{"id": c.get("id"), "name": c.get("name"), "color": c.get("color")}
+             for c in opts["choices"] if isinstance(c, dict)], separators=(",", ":"), ensure_ascii=False)
+    if isinstance(opts.get("formula"), str):
+        out["formula_text"] = opts["formula"]
+    if isinstance(opts.get("referencedFieldIds"), list):
+        out["referenced_field_ids"] = json.dumps(opts["referencedFieldIds"], separators=(",", ":"))
+    out["source_link_field_id"] = _s(opts.get("recordLinkFieldId"))
+    out["source_field_id"] = _s(opts.get("fieldIdInLinkedTable"))
+    if isinstance(opts.get("isValid"), bool):
+        out["is_valid"] = 1 if opts["isValid"] else 0
+    res = opts.get("result")
+    if isinstance(res, dict):
+        out["result_type"] = _s(res.get("type"))
+        if isinstance(res.get("options"), dict) and res["options"]:
+            out["result_options_json"] = _j(res["options"])
+    if ftype in ("number", "percent", "currency"):
+        out["number_precision"] = _i(opts.get("precision"))
+    if ftype == "currency":
+        out["currency_symbol"] = _s(opts.get("symbol"))
+    if ftype in ("date", "dateTime") and isinstance(opts.get("dateFormat"), dict):
+        out["date_format"] = _s(opts["dateFormat"].get("name"))
+    if ftype == "dateTime":
+        if isinstance(opts.get("timeFormat"), dict):
+            out["time_format"] = _s(opts["timeFormat"].get("name"))
+        out["time_zone"] = _s(opts.get("timeZone"))
+    if ftype == "duration":
+        out["duration_format"] = _s(opts.get("durationFormat"))
+    if ftype == "rating":
+        out["rating_max"] = _i(opts.get("max"))
+    if ftype in ("rating", "checkbox"):
+        out["icon"] = _s(opts.get("icon"))
+        out["option_color"] = _s(opts.get("color"))
+    return out
+
+
 def parse_schema(doc):
     if isinstance(doc, list):
         tables = doc
@@ -729,10 +817,12 @@ def parse_schema(doc):
                 inverse = opts.get("inverseLinkFieldId")
                 p = opts.get("prefersSingleRecordLink")
                 prefers = None if p is None else (1 if p else 0)
-            rows.append({"table_id": t["id"], "table_name": t["name"], "field_id": f["id"],
-                         "field_name": f["name"], "data_type": f["type"],
-                         "linked_table_id": linked, "inverse_link_field_id": inverse,
-                         "prefers_single_record_link": prefers})
+            row = {"table_id": t["id"], "table_name": t["name"], "field_id": f["id"],
+                   "field_name": f["name"], "data_type": f["type"],
+                   "linked_table_id": linked, "inverse_link_field_id": inverse,
+                   "prefers_single_record_link": prefers}
+            row.update(extract_field_settings(f, t.get("primaryFieldId")))
+            rows.append(row)
     if not rows:
         raise AppError("The schema contains no fields, so there is nothing to ingest.")
     return rows
@@ -762,20 +852,13 @@ def upsert_schema(base_id, rows, source):
                        "updated": len(new_ids & before_in_base),
                        "no_longer_in_source": len(missing)}
             with conn:
+                cols = (["base_id", "table_id", "table_name", "field_id", "field_name", "data_type", "linked_table_id",
+                         "inverse_link_field_id", "prefers_single_record_link"] + OPTION_COLUMNS + ["updated_at"])
+                updates = ", ".join("%s=excluded.%s" % (c, c) for c in cols if c != "field_id")
                 conn.executemany(
-                    """INSERT INTO airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type,
-                                                   linked_table_id, inverse_link_field_id,
-                                                   prefers_single_record_link, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)
-                       ON CONFLICT(field_id) DO UPDATE SET
-                         base_id=excluded.base_id, table_id=excluded.table_id, table_name=excluded.table_name,
-                         field_name=excluded.field_name, data_type=excluded.data_type,
-                         linked_table_id=excluded.linked_table_id,
-                         inverse_link_field_id=excluded.inverse_link_field_id,
-                         prefers_single_record_link=excluded.prefers_single_record_link,
-                         updated_at=excluded.updated_at""",
-                    [(base_id, r["table_id"], r["table_name"], r["field_id"], r["field_name"], r["data_type"],
-                      r["linked_table_id"], r["inverse_link_field_id"], r["prefers_single_record_link"], ts)
+                    "INSERT INTO airtable_fields(%s) VALUES (%s) ON CONFLICT(field_id) DO UPDATE SET %s"
+                    % (", ".join(cols), ",".join("?" * len(cols)), updates),
+                    [tuple([base_id if c == "base_id" else ts if c == "updated_at" else r[c] for c in cols])
                      for r in rows])
                 # Audit entry, same transaction and same timestamp as the field rows, so the report can say
                 # exactly where this schema came from and when. Informational: status RESOLVED.
@@ -820,6 +903,49 @@ def api_schema_ingest(body):
     return result
 
 
+def settings_summary(r):
+    """One short, human-readable line of the settings that define a field (for the schema view and report)."""
+    p = []
+    if r["is_primary_field"] == 1:
+        p.append("primary field")
+    t = r["data_type"]
+    if r["choices_json"]:
+        try:
+            names = [c.get("name") or "(unnamed)" for c in json.loads(r["choices_json"])]
+            p.append("%d choices: %s" % (len(names), ", ".join(names[:8]) + (", ..." if len(names) > 8 else "")))
+        except ValueError:
+            pass
+    if r["formula_text"]:
+        p.append("formula: " + (r["formula_text"] if len(r["formula_text"]) <= 120 else r["formula_text"][:117] + "..."))
+    if r["source_link_field_id"]:
+        p.append("reads %s via link %s" % (r["source_field_id"] or "(count)", r["source_link_field_id"]))
+    if r["result_type"]:
+        p.append("returns " + r["result_type"])
+    if r["currency_symbol"]:
+        p.append("symbol " + r["currency_symbol"])
+    if r["number_precision"] is not None:
+        p.append("%d decimal place(s)" % r["number_precision"])
+    if r["date_format"]:
+        p.append("date " + r["date_format"])
+    if r["time_format"]:
+        p.append("time " + r["time_format"])
+    if r["time_zone"]:
+        p.append("zone " + r["time_zone"])
+    if r["duration_format"]:
+        p.append("duration " + r["duration_format"])
+    if r["rating_max"] is not None:
+        p.append("max %d" % r["rating_max"])
+    if t in ("rating", "checkbox") and r["icon"]:
+        p.append("icon " + r["icon"] + (" (%s)" % r["option_color"] if r["option_color"] else ""))
+    if r["is_valid"] == 0:
+        p.append("INVALID in Airtable")
+    if r["field_description"]:
+        d = r["field_description"]
+        p.append("description: " + (d if len(d) <= 100 else d[:97] + "..."))
+    return "; ".join(p)
+
+
+
 def api_schema_view(_q=None):
     with db() as conn:
         rows = conn.execute("""SELECT f.*, %s AS stale FROM airtable_fields f
@@ -839,6 +965,7 @@ def api_schema_view(_q=None):
             "linked_table_id": link, "linked_table_name": names.get(link) if link else None,
             "inverse_link_field_id": r["inverse_link_field_id"],
             "prefers_single_record_link": r["prefers_single_record_link"],
+            "settings": settings_summary(r),
             "self_link": bool(link and link == r["table_id"]),
             "stale": bool(r["stale"])})
         if r["stale"]:
@@ -1589,8 +1716,9 @@ def build_report(mode):
     # 3. Inventory
     h.append("<h2>3. Schema inventory: bases, tables and fields</h2>"
              "<p class=\"meta\">One row per field, as captured. Repeated base and table values are shown in grey so "
-             "the grid can be filtered or copied into a spreadsheet.</p><table>")
-    h.append(_th(["Base", "Table ID", "Table", "Field ID", "Field", "Type"]))
+             "the grid can be filtered or copied into a spreadsheet. The Settings column summarizes the options that define "
+             "each field (choices, formulas, precision, formats); the full options are stored in the database.</p><table>")
+    h.append(_th(["Base", "Table ID", "Table", "Field ID", "Field", "Type", "Settings"]))
     prev_base = prev_table = None
     for r in frows:
         same_base, same_table = r["base_id"] == prev_base, r["table_id"] == prev_table
@@ -1609,7 +1737,8 @@ def build_report(mode):
         h.append(_tr([_td(_code(r["base_id"]), "rep" if same_base else ""),
                       _td(_code(r["table_id"]), "rep" if same_table else ""),
                       _td(esc(r["table_name"]), "rep" if same_table else ""),
-                      _td(_code(r["field_id"])), _td(esc(r["field_name"])), _td(typ)]))
+                      _td(_code(r["field_id"])), _td(esc(r["field_name"])), _td(typ),
+                      _td(esc(settings_summary(r)))]))
         prev_base, prev_table = r["base_id"], r["table_id"]
     h.append("</table>")
 
@@ -1770,6 +1899,21 @@ def api_export_profile(q):
             {"Content-Disposition": 'attachment; filename="profile_%s.csv"' % _stamp()})
 
 
+FIELD_CSV_COLUMNS = ["base_id", "table_id", "table_name", "field_id", "field_name", "data_type", "linked_table_id",
+                     "inverse_link_field_id", "prefers_single_record_link"] + OPTION_COLUMNS
+
+
+def api_export_field_options(q):
+    base = (q.get("base_id") or [""])[0]
+    sql = ("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) + (" WHERE f.base_id=?" if base else "")
+    sql += " ORDER BY f.base_id, lower(f.table_name), f.table_id, lower(f.field_name), f.field_id"
+    with db() as conn:
+        rows = [r for r in conn.execute(sql, (base,) if base else ()) if not r["stale"]]
+    body = _csv_bytes(FIELD_CSV_COLUMNS, [[r[c] for c in FIELD_CSV_COLUMNS] for r in rows])
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="field-options_%s.csv"' % _stamp()})
+
+
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
@@ -1782,7 +1926,8 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
-              "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile}
+              "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
+              "/api/export/field_options.csv": api_export_field_options}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
                "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel}

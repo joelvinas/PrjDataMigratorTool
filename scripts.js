@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.4"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.5"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -185,9 +185,10 @@ async function loadSchema() {
       const sum = el("summary", {}, t.table_name, el("span", { class: "tag", text: t.fields.length + " fields" }),
         t.stale ? el("span", { class: "tag stale", text: "no longer in source" }) : (t.stale_fields ? el("span", { class: "tag stale", text: t.stale_fields + " field(s) no longer in source" }) : null));
       const rows = t.fields.map((f) => el("tr", {}, el("td", { text: f.field_name }), el("td", { text: f.field_id }), el("td", { text: typeLabel(f) }),
+        el("td", { class: "settings", text: f.settings || "" }),
         el("td", {}, f.stale ? el("span", { class: "tag stale", text: "no longer in source" }) : "")));
       inner.appendChild(el("details", {}, sum, el("table", { class: "grid compact" },
-        el("thead", {}, el("tr", {}, el("th", { text: "Field" }), el("th", { text: "Field ID" }), el("th", { text: "Type / linked table" }), el("th", { text: "" }))),
+        el("thead", {}, el("tr", {}, el("th", { text: "Field" }), el("th", { text: "Field ID" }), el("th", { text: "Type / linked table" }), el("th", { text: "Settings" }), el("th", { text: "" }))),
         el("tbody", {}, rows))));
     }
     d.appendChild(inner);
@@ -401,6 +402,7 @@ function syncReportLinks() {
     "&table_id=" + encodeURIComponent($("resTable").value));
   const off = !state.ready || !state.schema.length;
   $("lnkOrderCsv").classList.toggle("disabled", off);
+  $("lnkFieldCsv").classList.toggle("disabled", off);
   $("lnkProfileCsv").classList.toggle("disabled", off);
   $("lnkMhtml").classList.toggle("disabled", off);
   $("lnkHtml").classList.toggle("disabled", off);

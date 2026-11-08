@@ -22,7 +22,7 @@ This is an independent student project. It is not affiliated with or endorsed by
 
 Saved in the SQLite file:
 
-- Schema metadata: base, table and field IDs and names, field types, which tables each link field points to.
+- Schema metadata: base, table and field IDs and names, field types, which tables each link field points to, and the settings that define each field (select choices, formula text, rollup and lookup definitions, currency symbol and precision, date and time formats, rating scale, number precision, descriptions).
 - Aggregate statistics per field: `row_count`, `null_count`, `cardinality`, and whether the cardinality is capped.
 - The computed load order (`dependency_matrix`).
 - An API call log: timestamp, endpoint path, HTTP status, duration, record *count*, and error text. Never headers, the token, or response bodies.
@@ -54,10 +54,13 @@ airtable-migration-control/
 ├── README.md
 ├── sql/
 │   ├── DatabaseSchemaLibrary.sql       the full finalized schema (same DDL the app embeds)
-│   └── migration_001_add_columns.sql   upgrades a database created from the original schema
+│   ├── migration_001_add_columns.sql   link handling and capped cardinality columns
+│   ├── migration_002_add_field_options.sql   field settings columns
+│   └── apply_migrations.py             applies both to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
+    ├── sample_schema_field_options.json   one field of nearly every type, with settings
     ├── mock_airtable.py             fake Airtable so you can test with no real data
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
 ```
@@ -102,7 +105,7 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 
 ## SQL schema changes
 
-The schema is the original `DatabaseSchemaLibrary.sql` with **two columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged.
+The schema is the original `DatabaseSchemaLibrary.sql` with **new columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged. There have been two rounds: link handling and capped cardinality (migration 001), then field settings (migration 002).
 
 ### Updated `airtable_fields` definition
 
@@ -121,6 +124,27 @@ CREATE TABLE airtable_fields (
     null_count INTEGER DEFAULT 0,
     cardinality INTEGER DEFAULT 0,
     cardinality_is_capped INTEGER DEFAULT 0, -- 1 = cardinality is a lower bound: more distinct values than the cap
+    -- Field settings from the Metadata API (all NULL when not applicable or not reported)
+    field_description TEXT,        -- the description typed on the field in Airtable
+    is_primary_field INTEGER,      -- 1 = the table's primary field, 0 = not, NULL = not reported
+    options_json TEXT,             -- the field's full options object exactly as returned (lossless backup of everything below)
+    choices_json TEXT,             -- singleSelect / multipleSelects: [{"id","name","color"}] in Airtable's order
+    formula_text TEXT,             -- formula fields: options.formula (and a rollup's formula when Airtable returns one)
+    referenced_field_ids TEXT,     -- JSON array: options.referencedFieldIds (formula, rollup, lookup, lastModifiedTime)
+    source_link_field_id TEXT,     -- rollup / lookup / count: options.recordLinkFieldId, the link field it reads through
+    source_field_id TEXT,          -- rollup / lookup: options.fieldIdInLinkedTable, the field read in the linked table
+    is_valid INTEGER,              -- formula / rollup / lookup / count: 1 = valid, 0 = broken (options.isValid)
+    result_type TEXT,              -- computed fields: options.result.type (what the formula, rollup or lookup returns)
+    result_options_json TEXT,      -- computed fields: options.result.options (precision, date format, choices of the result)
+    number_precision INTEGER,      -- number / percent / currency: decimal places (options.precision)
+    currency_symbol TEXT,          -- currency: options.symbol
+    date_format TEXT,              -- date / dateTime: options.dateFormat.name (for example us, european, iso, local, friendly)
+    time_format TEXT,              -- dateTime: options.timeFormat.name (12hour or 24hour)
+    time_zone TEXT,                -- dateTime: options.timeZone
+    duration_format TEXT,          -- duration: options.durationFormat (for example h:mm:ss)
+    rating_max INTEGER,            -- rating: options.max
+    icon TEXT,                     -- rating / checkbox: options.icon
+    option_color TEXT,             -- rating / checkbox: options.color
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -128,25 +152,37 @@ CREATE INDEX idx_airtable_fields_table ON airtable_fields(table_id);
 CREATE INDEX idx_airtable_fields_linked ON airtable_fields(linked_table_id);
 ```
 
-The complete schema is in `sql/DatabaseSchemaLibrary.sql`. A new database created by the app already has both columns.
+The complete schema is in `sql/DatabaseSchemaLibrary.sql`. A new database created by the app already has every column.
 
-### Upgrading a database created from the original schema
+### Upgrading an existing database
 
-Run this once (`sql/migration_001_add_columns.sql`). Do not run it on a database the app created with this version.
+Easiest, with Python only (no SQLite client needed):
 
-```sql
-ALTER TABLE airtable_fields ADD COLUMN prefers_single_record_link INTEGER;
-ALTER TABLE airtable_fields ADD COLUMN cardinality_is_capped INTEGER DEFAULT 0;
+```
+python sql/apply_migrations.py path/to/your.db
 ```
 
-Existing data is kept. `cardinality_is_capped` is `0` for existing rows, and `prefers_single_record_link` stays `NULL` until the schema is ingested again. The app never alters existing tables itself; if the columns are missing, it says so and points to this file.
+It adds only the columns that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql` and `sql/migration_002_add_field_options.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns until the schema is ingested again (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
 ### What the new columns mean
 
-| Column | Values | Meaning |
-|---|---|---|
-| `prefers_single_record_link` | `1`, `0`, `NULL` | From Airtable's `prefersSingleRecordLink` option. `1` = the link field holds a single record (the "many-to-one" side). `NULL` = not a link field, or Airtable did not report it. |
-| `cardinality_is_capped` | `0`, `1` | `1` = the field has more distinct values than the cap, so `cardinality` holds the cap and means "more than this". `0` = `cardinality` is exact. |
+| Column | Meaning |
+|---|---|
+| `prefers_single_record_link` | `1` = the link field holds a single record (the "many-to-one" side), `0` = many, `NULL` = not a link field or not reported. |
+| `cardinality_is_capped` | `1` = more distinct values than the cap, so `cardinality` holds the cap and means "more than this". `0` = exact. |
+| `field_description`, `is_primary_field` | The field's description, and whether it is the table's primary field (from the table's `primaryFieldId`). |
+| `options_json` | The field's complete `options` object exactly as the Metadata API returned it. This is the lossless record: if a setting has no dedicated column (or Airtable adds one later), it is still here. |
+| `choices_json` | Select choices (`id`, `name`, `color`) in Airtable's order. |
+| `formula_text`, `referenced_field_ids`, `is_valid` | A formula's text, the fields it reads, and whether Airtable reports it as valid. |
+| `source_link_field_id`, `source_field_id` | For rollups, lookups and counts: the link field it reads through, and the field read in the linked table. |
+| `result_type`, `result_options_json` | What a computed field returns (for example `number` with `precision`, or a date format). |
+| `number_precision`, `currency_symbol` | Decimal places for number, percent and currency fields; the currency symbol. |
+| `date_format`, `time_format`, `time_zone` | Date and date-time formats and the time zone. |
+| `duration_format`, `rating_max`, `icon`, `option_color` | Duration format; rating scale; icon and colour for rating and checkbox fields. |
+
+**Settings are only as complete as the Metadata API makes them.** Table-level details (table description, views) are not stored, because there is no table-level table in the schema. A rollup's aggregation function (such as `SUM(values)`) may not be returned by Airtable when reading; if it is, it is in `formula_text` and `options_json`. After your first real pull, check one rollup field's `options_json` to confirm what Airtable returned.
+
+The settings appear in a **Settings** column in Step 3 and in the report's schema inventory, and **Download fields and settings .csv** (Step 3) exports every column for use in field mapping. `test/sample_schema_field_options.json` is a sample schema with one of nearly every field type, for testing.
 
 ## Load order report
 
@@ -218,7 +254,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 **C. Upgrading an older database (optional)**
 
-Create a SQLite file from the original schema, connect to it in step 1, and note that the app lists the missing columns and refuses to continue. Run `sql/migration_001_add_columns.sql` on it, connect again, and it is accepted with existing data intact.
+Create a SQLite file from the original schema, connect to it in step 1, and note that the app lists the missing columns and refuses to continue. Run `python sql/apply_migrations.py` on it, connect again, and it is accepted with existing data intact.
 
 ## How it works
 

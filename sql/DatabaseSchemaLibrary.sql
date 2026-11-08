@@ -13,6 +13,27 @@ CREATE TABLE airtable_fields (
     null_count INTEGER DEFAULT 0,
     cardinality INTEGER DEFAULT 0,
     cardinality_is_capped INTEGER DEFAULT 0, -- 1 = cardinality is a lower bound: more distinct values than the cap
+    -- Field settings from the Metadata API (all NULL when not applicable or not reported)
+    field_description TEXT,        -- the description typed on the field in Airtable
+    is_primary_field INTEGER,      -- 1 = the table's primary field, 0 = not, NULL = not reported
+    options_json TEXT,             -- the field's full options object exactly as returned (lossless backup of everything below)
+    choices_json TEXT,             -- singleSelect / multipleSelects: [{"id","name","color"}] in Airtable's order
+    formula_text TEXT,             -- formula fields: options.formula (and a rollup's formula when Airtable returns one)
+    referenced_field_ids TEXT,     -- JSON array: options.referencedFieldIds (formula, rollup, lookup, lastModifiedTime)
+    source_link_field_id TEXT,     -- rollup / lookup / count: options.recordLinkFieldId, the link field it reads through
+    source_field_id TEXT,          -- rollup / lookup: options.fieldIdInLinkedTable, the field read in the linked table
+    is_valid INTEGER,              -- formula / rollup / lookup / count: 1 = valid, 0 = broken (options.isValid)
+    result_type TEXT,              -- computed fields: options.result.type (what the formula, rollup or lookup returns)
+    result_options_json TEXT,      -- computed fields: options.result.options (precision, date format, choices of the result)
+    number_precision INTEGER,      -- number / percent / currency: decimal places (options.precision)
+    currency_symbol TEXT,          -- currency: options.symbol
+    date_format TEXT,              -- date / dateTime: options.dateFormat.name (for example us, european, iso, local, friendly)
+    time_format TEXT,              -- dateTime: options.timeFormat.name (12hour or 24hour)
+    time_zone TEXT,                -- dateTime: options.timeZone
+    duration_format TEXT,          -- duration: options.durationFormat (for example h:mm:ss)
+    rating_max INTEGER,            -- rating: options.max
+    icon TEXT,                     -- rating / checkbox: options.icon
+    option_color TEXT,             -- rating / checkbox: options.color
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
