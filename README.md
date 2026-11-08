@@ -24,6 +24,7 @@ Saved in the SQLite file:
 
 - Schema metadata: base, table and field IDs and names, field types, which tables each link field points to, the settings that define each field (select choices, formula text, rollup and lookup definitions, currency symbol and precision, date and time formats, rating scale, number precision, descriptions), 
 - Table-level details (description, primary field) and every view the schema reports (name, type, visible fields).
+- Attachment statistics from profiling: per table, field and file type, the number of files, their total, smallest and largest size, and a size-band count. No filenames, links or file contents.
 - Aggregate statistics per field: `row_count`, `null_count`, `cardinality`, and whether the cardinality is capped.
 - The computed load order (`dependency_matrix`).
 - An API call log: timestamp, endpoint path, HTTP status, duration, record *count*, and error text. Never headers, the token, or response bodies.
@@ -58,6 +59,7 @@ airtable-migration-control/
 │   ├── migration_001_add_columns.sql   link handling and capped cardinality columns
 │   ├── migration_002_add_field_options.sql   field settings columns
 │   ├── migration_003_add_tables_and_views.sql   the airtable_tables and airtable_views tables
+│   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
 │   └── apply_migrations.py             applies all three to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
@@ -108,7 +110,7 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 
 ## SQL schema changes
 
-The schema is the original `DatabaseSchemaLibrary.sql` with **new columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged. There have been three rounds: link handling and capped cardinality (migration 001), field settings (migration 002), and two new tables for table-level details and views (migration 003).
+The schema is the original `DatabaseSchemaLibrary.sql` with **new columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged. There have been four rounds: link handling and capped cardinality (migration 001), field settings (migration 002), two new tables for table-level details and views (migration 003), and one new table for attachment statistics (migration 004).
 
 ### Updated `airtable_fields` definition
 
@@ -193,6 +195,31 @@ CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
 
 The complete schema is in `sql/DatabaseSchemaLibrary.sql`. A new database created by the app already has every column and table.
 
+### New table: `airtable_attachment_stats`
+
+Attachment storage (SharePoint, Workfront Core, AEM and Box each have different limits and prices) depends on how many files there are, how large they are and what types they are. Every profiling run records this from the attachment details that Airtable already returns with each record, so it needs no download and no extra API calls, and it works with "save records" on or off.
+
+```sql
+CREATE TABLE airtable_attachment_stats (
+    base_id TEXT NOT NULL,  table_id TEXT NOT NULL,  field_id TEXT NOT NULL,
+    file_extension TEXT NOT NULL,   -- from the filename, else the MIME type, else 'bin'
+    mime_type TEXT NOT NULL,        -- as reported by Airtable, lower case, 'unknown' if none
+    file_count INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    min_bytes INTEGER,  max_bytes INTEGER,
+    unknown_size_count INTEGER NOT NULL DEFAULT 0,   -- attachments with no size reported
+    size_lt_1mb INTEGER, size_1_10mb INTEGER, size_10_100mb INTEGER, size_100mb_1gb INTEGER, size_ge_1gb INTEGER,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (field_id, file_extension, mime_type)
+);
+```
+
+One row per attachment field and file type. A profiling run replaces all the rows for the tables it profiles, so running it again never double counts. The size bands use 1 MB = 1,048,576 bytes. It holds no filenames, links or file contents.
+
+Where to see it: step 5 has an **Attachments** panel (totals, size bands, by file type, by table) and **Download attachment stats .csv**, and the load order report has section 3c. The same numbers are at `/api/attachments/stats`.
+
+What it counts: an attachment is counted once for each cell it appears in. The size is the size Airtable reports for the original file; Airtable keeps thumbnails separately and they are not counted. File-version history (if any) is not part of the API and is not counted.
+
 ### Upgrading an existing database
 
 Easiest, with Python only (no SQLite client needed):
@@ -201,7 +228,7 @@ Easiest, with Python only (no SQLite client needed):
 python sql/apply_migrations.py path/to/your.db
 ```
 
-It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql` and `sql/migration_003_add_tables_and_views.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
+It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
 ### What the new columns mean
 
@@ -290,7 +317,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 **A. Logic only (no Airtable, no token needed)**
 
-1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 12 tables, all with 0 rows, and foreign keys on.
+1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 13 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:

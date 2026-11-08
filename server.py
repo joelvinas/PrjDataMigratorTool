@@ -66,7 +66,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -142,6 +142,30 @@ CREATE TABLE airtable_views (
 
 CREATE INDEX idx_airtable_views_table ON airtable_views(table_id);
 CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
+
+-- 1c. Attachment size and type statistics (counts, bytes and file types only: no filenames, links or file contents)
+CREATE TABLE airtable_attachment_stats (
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    field_id TEXT NOT NULL,
+    file_extension TEXT NOT NULL,   -- from the attachment filename, else the MIME type, else 'bin'
+    mime_type TEXT NOT NULL,        -- as reported by Airtable, lower case, 'unknown' if none
+    file_count INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    min_bytes INTEGER,
+    max_bytes INTEGER,
+    unknown_size_count INTEGER NOT NULL DEFAULT 0,  -- attachments for which Airtable reported no size
+    size_lt_1mb INTEGER NOT NULL DEFAULT 0,         -- size buckets use 1 MB = 1,048,576 bytes
+    size_1_10mb INTEGER NOT NULL DEFAULT 0,
+    size_10_100mb INTEGER NOT NULL DEFAULT 0,
+    size_100mb_1gb INTEGER NOT NULL DEFAULT 0,
+    size_ge_1gb INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (field_id, file_extension, mime_type)
+);
+
+CREATE INDEX idx_attachment_stats_table ON airtable_attachment_stats(table_id);
+CREATE INDEX idx_attachment_stats_base ON airtable_attachment_stats(base_id);
 
 -- 2. Workfront Planning Environment Schema (Dev & Prod)
 CREATE TABLE workfront_fields (
@@ -1468,6 +1492,8 @@ def _profile_table(job, t):
     row_count, offset = 0, None
     path = "/v0/%s/%s" % (quote(t["base_id"], safe=""), quote(t["table_id"], safe=""))
     sink = None
+    att_fields = {fid for fid, ftype in fields if ftype == "multipleAttachments"}
+    att_stats = {}   # (field_id, extension, mime) -> counters; sizes and types only, never names or links
     if job.save_records:
         sink = job.sinks[t["table_id"]] = RecordSink(job, t)
     while True:
@@ -1481,6 +1507,10 @@ def _profile_table(job, t):
                 sink.add(rec)
             fv = rec.get("fields") or {}
             row_count += 1
+            for fid in att_fields:
+                for a in fv.get(fid) or []:
+                    if isinstance(a, dict):
+                        _tally_attachment(att_stats, fid, a)
             for fid, ftype in fields:
                 v = fv.get(fid)
                 if ftype == "checkbox" and v is None:
@@ -1501,10 +1531,31 @@ def _profile_table(job, t):
         offset = body.get("offset")
         if not offset:
             break
-    return row_count, nulls, sets, capped
+    return row_count, nulls, sets, capped, att_stats
 
 
-def _save_table(job, t, row_count, nulls, sets, capped):
+MB = 1048576
+ATT_BUCKET_EDGES = (MB, 10 * MB, 100 * MB, 1024 * MB)   # < 1 MB, 1-10, 10-100, 100 MB-1 GB, >= 1 GB
+
+
+def _tally_attachment(stats, fid, a):
+    """Add one attachment to the per-(field, extension, MIME type) counters. Sizes and types only."""
+    mime = str(a.get("type") or "").split(";")[0].strip().lower() or "unknown"
+    key = (fid, attachment_ext(a.get("filename"), a.get("type")), mime)
+    c = stats.setdefault(key, {"n": 0, "bytes": 0, "min": None, "max": None, "unknown": 0, "buckets": [0] * 5})
+    c["n"] += 1
+    size = a.get("size")
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0:
+        c["unknown"] += 1
+        return
+    size = int(size)
+    c["bytes"] += size
+    c["min"] = size if c["min"] is None else min(c["min"], size)
+    c["max"] = size if c["max"] is None else max(c["max"], size)
+    c["buckets"][sum(1 for e in ATT_BUCKET_EDGES if size >= e)] += 1
+
+
+def _save_table(job, t, row_count, nulls, sets, capped, att_stats=None):
     try:
         with db() as conn:
             with conn:
@@ -1516,6 +1567,16 @@ def _save_table(job, t, row_count, nulls, sets, capped):
                                  "cardinality_is_capped=? WHERE field_id=?",
                                  (row_count, nulls[fid], job.cap if fid in capped else len(sets[fid]),
                                   1 if fid in capped else 0, fid))
+                # Attachment sizes and types for this table are replaced as a whole, so a re-run never double counts.
+                conn.execute("DELETE FROM airtable_attachment_stats WHERE table_id=?", (t["table_id"],))
+                ts = utc_now()
+                for (fid, ext, mime), c in sorted((att_stats or {}).items()):
+                    conn.execute("INSERT INTO airtable_attachment_stats(base_id, table_id, field_id, file_extension, "
+                                 "mime_type, file_count, total_bytes, min_bytes, max_bytes, unknown_size_count, "
+                                 "size_lt_1mb, size_1_10mb, size_10_100mb, size_100mb_1gb, size_ge_1gb, updated_at) "
+                                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                 (t["base_id"], t["table_id"], fid, ext, mime, c["n"], c["bytes"], c["min"], c["max"],
+                                  c["unknown"], *c["buckets"], ts))
     except sqlite3.Error as e:
         raise DbError("Database write failed while saving %s: %s" % (t["table_name"], scrub(e)))
 
@@ -2120,6 +2181,14 @@ def svg_graph(nodes, edges, self_tables):
     return "".join(o)
 
 
+def human_bytes(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024
+
+
 def _tr(cells, cls=""):
     return "<tr%s>%s</tr>" % ((' class="%s"' % cls) if cls else "", "".join(cells))
 
@@ -2287,6 +2356,29 @@ def build_report(mode):
                           _td(esc(v["view_name"]) + " " + _code(v["view_id"])), _td(esc(v["view_type"])), _td(vis)]))
 
     # 4. Load order
+    # 3c. Attachments (sizes and types seen while profiling)
+    with db() as conn3:
+        astats = load_attachment_stats(conn3)
+    h.append("<h3>3c. Attachments: how many, how large, what types</h3><p class=\"meta\">Counted from the attachment "
+             "details Airtable returns with each record while profiling (step 5). No files are downloaded and no "
+             "filenames or links are stored. 1 MB = 1,048,576 bytes. Run profiling to fill this in.</p>")
+    if not astats:
+        h.append("<p class=\"meta\">No attachment statistics yet (profiling has not found attachments, or has not run).</p>")
+    else:
+        tot, by_type, by_table = summarize_attachment_stats(astats)
+        h.append("<p><strong>%s files, %s</strong> in total; largest single file %s%s.</p>" % (
+            "{:,}".format(tot["files"]), human_bytes(tot["bytes"]), human_bytes(tot["max_bytes"]),
+            "; %d with no size reported" % tot["unknown_size"] if tot["unknown_size"] else ""))
+        lab = ["under 1 MB", "1-10 MB", "10-100 MB", "100 MB-1 GB", "1 GB or more"]
+        h.append("<table>" + _th(["Size band", "Files"]) + "".join(
+            _tr([_td(l), _td("{:,}".format(n))]) for l, n in zip(lab, tot["buckets"])) + "</table>")
+        h.append("<h4>By file type</h4><table>" + _th(["Extension", "Files", "Total size", "Largest"]) + "".join(
+            _tr([_td(esc(k)), _td("{:,}".format(v["files"])), _td(human_bytes(v["bytes"])), _td(human_bytes(v["max_bytes"]))])
+            for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]["bytes"])) + "</table>")
+        h.append("<h4>By table</h4><table>" + _th(["Base", "Table", "Files", "Total size", "Largest"]) + "".join(
+            _tr([_td(_code(k[0])), _td(esc(k[2])), _td("{:,}".format(v["files"])), _td(human_bytes(v["bytes"])),
+                 _td(human_bytes(v["max_bytes"]))]) for k, v in sorted(by_table.items(), key=lambda kv: (kv[0][0], kv[0][2].lower()))) + "</table>")
+
     h.append("<h2>4. Load order</h2><div class=\"box\"><p><strong>How to read this.</strong> Load tables in "
              "ascending <em>Load #</em>. A table's parents always have a lower number. Tables with the same "
              "<em>Depth</em> do not depend on each other. Tables flagged <em>In a cycle</em> depend on each other: "
@@ -2443,6 +2535,70 @@ def api_export_profile(q):
             {"Content-Disposition": 'attachment; filename="profile_%s.csv"' % _stamp()})
 
 
+ATT_SUMMARY_SQL = ("SELECT s.base_id, s.table_id, COALESCE(t.table_name, s.table_id) AS table_name, s.field_id, "
+                   "COALESCE(f.field_name, s.field_id) AS field_name, s.file_extension, s.mime_type, s.file_count, "
+                   "s.total_bytes, s.min_bytes, s.max_bytes, s.unknown_size_count, s.size_lt_1mb, s.size_1_10mb, "
+                   "s.size_10_100mb, s.size_100mb_1gb, s.size_ge_1gb FROM airtable_attachment_stats s "
+                   "LEFT JOIN airtable_tables t ON t.table_id = s.table_id "
+                   "LEFT JOIN airtable_fields f ON f.field_id = s.field_id WHERE 1=1")
+
+
+def load_attachment_stats(conn, base="", table=""):
+    sql, args = ATT_SUMMARY_SQL, []
+    if base:
+        sql += " AND s.base_id=?"
+        args.append(base)
+    if table:
+        sql += " AND s.table_id=?"
+        args.append(table)
+    sql += (" ORDER BY s.base_id, lower(COALESCE(t.table_name, s.table_id)), s.table_id, "
+            "lower(COALESCE(f.field_name, s.field_id)), s.field_id, s.total_bytes DESC, s.file_extension")
+    return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
+def summarize_attachment_stats(rows):
+    def blank():
+        return {"files": 0, "bytes": 0, "max_bytes": 0, "unknown_size": 0, "buckets": [0] * 5}
+    tot, by_type, by_table = blank(), {}, {}
+    keys = ("size_lt_1mb", "size_1_10mb", "size_10_100mb", "size_100mb_1gb", "size_ge_1gb")
+    for r in rows:
+        for agg in (tot, by_type.setdefault(r["file_extension"], blank()),
+                    by_table.setdefault((r["base_id"], r["table_id"], r["table_name"]), blank())):
+            agg["files"] += r["file_count"]
+            agg["bytes"] += r["total_bytes"]
+            agg["max_bytes"] = max(agg["max_bytes"], r["max_bytes"] or 0)
+            agg["unknown_size"] += r["unknown_size_count"]
+            for i, k in enumerate(keys):
+                agg["buckets"][i] += r[k]
+    return tot, by_type, by_table
+
+
+def api_attachment_stats(q):
+    """Counts, bytes and file types of the attachments seen while profiling. No filenames, no links."""
+    base = (q.get("base_id") or [""])[0]
+    table = (q.get("table_id") or [""])[0]
+    with db() as conn:
+        rows = load_attachment_stats(conn, base, table)
+    tot, by_type, by_table = summarize_attachment_stats(rows)
+    return {"total": tot, "rows": rows,
+            "by_type": [dict(extension=k, **v) for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]["bytes"])],
+            "by_table": [dict(base_id=k[0], table_id=k[1], table_name=k[2], **v)
+                         for k, v in sorted(by_table.items(), key=lambda kv: (kv[0][0], kv[0][2].lower()))]}
+
+
+def api_export_attachment_stats(q):
+    base = (q.get("base_id") or [""])[0]
+    table = (q.get("table_id") or [""])[0]
+    with db() as conn:
+        rows = load_attachment_stats(conn, base, table)
+    cols = ["base_id", "table_id", "table_name", "field_id", "field_name", "file_extension", "mime_type", "file_count",
+            "total_bytes", "min_bytes", "max_bytes", "unknown_size_count", "size_lt_1mb", "size_1_10mb",
+            "size_10_100mb", "size_100mb_1gb", "size_ge_1gb"]
+    body = _csv_bytes(cols, [["" if r[c] is None else r[c] for c in cols] for r in rows])
+    return (body, "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="attachment_stats_%s.csv"' % _stamp()})
+
+
 def api_export_views(q):
     base = (q.get("base_id") or [""])[0]
     with db() as conn:
@@ -2502,6 +2658,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
               "/api/export/field_options.csv": api_export_field_options,
+              "/api/export/attachment_stats.csv": api_export_attachment_stats, "/api/attachments/stats": api_attachment_stats,
               "/api/export/views.csv": api_export_views, "/api/export/tables.csv": api_export_tables}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,

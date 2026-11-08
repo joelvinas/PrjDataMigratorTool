@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.8"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.9"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -138,7 +138,7 @@ async function createDb() {
   } catch (e) { setMsg("dbMessage", e.message, "err"); }
 }
 async function afterConnect() {
-  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true), loadExtractFiles()]);
+  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
 }
 
 /* ---------- step 3: ingest + schema view ---------- */
@@ -491,13 +491,13 @@ async function loadProfileStatus(quiet) {
   if (running && !state.pollTimer) state.pollTimer = setInterval(() => loadProfileStatus(true).catch(() => {}), 1000);
   if (running) loadLog().catch(() => {});
   if (!running && state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook(), loadExtractFiles()]); }
+  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook(), loadExtractFiles(), loadAttachmentStats()]); }
   if (job) { state.lastJobId = job.id; state.lastJobStatus = job.status; }
   if (job && !quiet) loadLog();
 }
 
 /* ---------- step 6: record extraction (values go to files on disk; this page only shows counts) ---------- */
-const fmtBytes = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
+const fmtBytes = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
 
 async function deleteExtract() {
   const base = $("exBase").value;
@@ -525,6 +525,19 @@ async function loadExtractFiles() {
   });
   t.hidden = d.files.length === 0;
   setMsg("exFilesSummary", d.files.length ? d.files.length + " file(s), " + fmt(d.total_records) + " records, " + fmtBytes(d.total_bytes) + " in total." + (d.total_attachment_files || d.total_attachment_failed ? " Attachment files: " + fmt(d.total_attachment_files) + " (" + fmtBytes(d.total_attachment_bytes) + ")" + (d.total_attachment_failed ? ", " + fmt(d.total_attachment_failed) + " failed (see the index files)." : ".") : "") : "No extracted files yet.", "");
+}
+
+async function loadAttachmentStats() {
+  const q = "?base_id=" + encodeURIComponent($("resBase").value) + "&table_id=" + encodeURIComponent($("resTable").value);
+  const d = await api("GET", "/api/attachments/stats" + q);
+  const fill = (id, rows) => { const t = $(id), b = t.querySelector("tbody"); clear(b); rows.forEach((r) => b.appendChild(el("tr", {}, ...r))); t.hidden = rows.length === 0; };
+  const T = d.total;
+  setMsg("attSummary", T.files ? fmt(T.files) + " attachment file(s), " + fmtBytes(T.bytes) + " in total; largest " + fmtBytes(T.max_bytes) + (T.unknown_size ? "; " + fmt(T.unknown_size) + " with no size reported" : "") + "." : "No attachments counted yet (run profiling in step 5).", "");
+  const bands = ["under 1 MB", "1-10 MB", "10-100 MB", "100 MB-1 GB", "1 GB or more"];
+  fill("attBandTable", T.files ? bands.map((b, i) => [el("td", { text: b }), el("td", { class: "num", text: fmt(T.buckets[i]) })]) : []);
+  fill("attTypeTable", d.by_type.map((r) => [el("td", { text: r.extension }), el("td", { class: "num", text: fmt(r.files) }), el("td", { class: "num", text: fmtBytes(r.bytes) }), el("td", { class: "num", text: fmtBytes(r.max_bytes) })]));
+  fill("attTableTable", d.by_table.map((r) => [el("td", { text: r.base_id + " / " + r.table_name }), el("td", { class: "num", text: fmt(r.files) }), el("td", { class: "num", text: fmtBytes(r.bytes) }), el("td", { class: "num", text: fmtBytes(r.max_bytes) })]));
+  $("lnkAttCsv").href = "/api/export/attachment_stats.csv" + q;
 }
 
 async function loadResults() {
@@ -588,6 +601,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btnCancel").addEventListener("click", cancelProfile);
   $("btnExtractDelete").addEventListener("click", deleteExtract);
   $("btnExtractRefresh").addEventListener("click", guard(loadExtractFiles));
+  $("btnAttRefresh").addEventListener("click", guard(loadAttachmentStats));
   const syncSave = () => {
     const on = $("saveRecords").checked;
     $("saveNote").hidden = !on;

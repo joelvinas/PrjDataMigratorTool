@@ -156,6 +156,15 @@
     <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>
     <tbody></tbody>
   </table></div>
+
+  <h3>Attachments: how many, how large, what types</h3>
+  <p class="hint">Filled in by every profiling run from the attachment details Airtable returns with each record (file name aside, only the size and type are kept). Nothing is downloaded. Use it to size storage for SharePoint, Workfront Core, AEM or Box. 1 MB = 1,048,576 bytes.</p>
+  <div class="row"><a id="lnkAttCsv" class="btnlink" href="/api/export/attachment_stats.csv">Download attachment stats .csv</a>
+    <button id="btnAttRefresh">Refresh</button></div>
+  <div id="attSummary" class="msg"></div>
+  <div class="scroll"><table id="attBandTable" class="grid compact" hidden><thead><tr><th>Size band</th><th class="num">Files</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="attTypeTable" class="grid compact" hidden><thead><tr><th>Extension</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="attTableTable" class="grid compact" hidden><thead><tr><th>Table</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
 </section>
 
 <!-- STEP 6 -->
