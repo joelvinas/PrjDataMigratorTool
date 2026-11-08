@@ -103,7 +103,7 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
 4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
 5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field. An optional toggle also saves every record to JSON files during the same pass.
-6. **Saved record files.** Lists, checks and deletes the JSON files written by the toggle in step 5.
+6. **Saved record files.** Lists, checks and deletes the JSON files (and attachment files) written by the toggles in step 5.
 7. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
 
 ## SQL schema changes
@@ -234,9 +234,22 @@ The migration has to move the actual rows, so the profiling pass can also write 
 - **Manifest.** `data_extract/manifest.json` lists each file with its record count, size, SHA-256 and capture time. It holds no values. Step 6 shows it, including whether each file's record count matches the table's latest profile.
 - **Where values go.** Only into these files. Never into SQLite, the API call log (which records counts only), runbook entries, error messages, the report, any CSV export or any response to the browser; the page shows counts, sizes and checksums. The tests check this by searching every one of those places for values taken from the files.
 - **Deleting.** Step 6 has **Delete saved record files** (all bases, or one). Deleting the folder by hand has the same effect.
-- **Limits.** Attachment URLs in the data are temporary links from Airtable and expire after a few hours; the attached files themselves are not downloaded. Each file is loaded whole by whatever reads it next, which is fine for thousands of rows and needs care for millions.
+- **Limits.** Each file is loaded whole by whatever reads it next, which is fine for thousands of rows and needs care for millions. Attachment links inside the JSON are temporary links from Airtable and expire after a few hours (see the next section for downloading the files).
 
 The files hold real record values. Keep them in a location that suits your organisation's data-handling rules, and delete them when the migration no longer needs them.
+
+### Downloading attachment files (optional)
+
+Airtable's attachment links are signed and expire after a few hours, so the files have to be fetched in the same pass that reads the records. Under "Also save every record", step 5 shows a second box, **Also download the attachment files**. It is off by default and only available when saving records is ticked, because the files are matched to records through the saved JSON.
+
+- **Where and what name.** `data_extract/<base id>/attachments/<attachment id>.<extension>`, for example `attAbc123.jpg`. The extension is taken from the attachment's filename (`Photo.JPG` becomes `jpg`). If the filename has no usable extension (none at all, or a name such as `.jfif`), it is taken from the MIME type Airtable reports, and as a last resort it is `bin`. Attachment IDs are unique, so every file in a base has its own name.
+- **Index file.** For each table, `data_extract/<base id>/<table id>.attachments.json` lists every attachment with its record ID, field ID, attachment ID, original filename, type, size, saved file, byte count, SHA-256 and status (`downloaded`, `existing` or `failed`, with a reason). This is how the original filenames and the record each file belongs to are kept, since the saved file name is just the ID. It does not contain the Airtable links.
+- **Checks.** A file is accepted only if the number of bytes received equals the size Airtable reported. Files are written to a `.part` name and renamed when complete.
+- **Failures don't stop the run.** An expired or missing link (HTTP 401, 403, 404 or 410) is recorded as failed and not retried. Network errors and server errors are retried up to three times. The table still finishes, the failure count shows in the progress table and in step 6, and the reason is in the index file.
+- **Re-running a table.** Files already saved with the right size are kept and not downloaded again, so running the table again fetches only what failed or is new.
+- **Security.** The Airtable token is never sent to the file host, only https links on `airtableusercontent.com` or `airtable.com` are fetched, and the links are never written to the database, the call log, error messages or the browser (the browser sees counts and sizes). The index file holds filenames, which can be sensitive, so the folder deserves the same care as the record files.
+- **Cost.** Downloading uses no Airtable API calls beyond the paging that profiling already does, but it can take a long time and a lot of disk space. Estimate the total from the attachment sizes in one table's index before running a big base.
+- **Deleting.** Step 6's delete button removes the attachment files and index files together with the JSON files.
 
 ## Load order report
 
@@ -305,6 +318,13 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
    - **WideCardinality**: `Bucket` has cardinality 4 (exact); `Unique Key` shows **capped (more than 500)**.
 5. Profile WideCardinality again with the default cap (1,000). `Unique Key` has exactly 1,000 distinct values, which does not exceed the cap, so it is now exact (1,000, not capped).
 6. In the API log panel, tick "Failures only" (3 rows) and try the table and purpose filters.
+
+**B2. Saving records and downloading attachments against the mock**
+
+1. Start the mock with real downloadable files: `MOCK_FILES=1 python test/mock_airtable.py` (Windows cmd: `set MOCK_FILES=1 && python test/mock_airtable.py`), and the app as in B.
+2. Ingest `appSampleBase001`. In step 5 choose scope "One table", pick Customers, tick **Also save every record** and **Also download the attachment files**, and start. Expected: 3 API calls, `data_extract/appSampleBase001/attachments/` with 125 files named like `attR4A0.jpg`, and 1 failed file (the mock simulates an expired link). Step 6 shows 125 attachment files and 1 failed; `Customers`'s `.attachments.json` lists the failure with its reason.
+3. Run the same table again: the 125 files are kept, and only the failed link is tried again.
+4. Delete from step 6; the whole `data_extract` folder disappears.
 
 **C. Upgrading an older database (optional)**
 

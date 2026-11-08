@@ -24,6 +24,7 @@ import html as _html
 import quopri
 import http.client
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -65,7 +66,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -1394,6 +1395,7 @@ class Job:
         self.save_records = False   # True = also write every record to the JSON files (RecordSink)
         self.names = {}             # field_id -> field name, only used when saving records
         self.sinks = {}             # table_id -> open RecordSink
+        self.download_files = False # True = also download attachment files (needs save_records)
 
 
 JOB = {"current": None}
@@ -1430,6 +1432,10 @@ def api_profile_start(body):
     if not tables:
         raise AppError("There are no tables to profile for that choice. Ingest a schema first (step 3).")
     save = bool(body.get("save_records"))
+    dl = bool(body.get("download_attachments"))
+    if dl and not save:
+        raise AppError("Downloading attachment files needs \"Also save every record to JSON files\" to be ticked too, "
+                       "because the files are matched to records through the saved JSON.")
     names = {}
     if save:
         for t in tables:
@@ -1444,8 +1450,9 @@ def api_profile_start(body):
             raise AppError("A profiling run is already in progress. Wait for it to finish or cancel it.")
         job = Job(scope, cap, [{"base_id": t["base_id"], "table_id": t["table_id"], "table_name": t["table_name"],
                                 "fields": len(t["fields"]), "status": "pending", "pages": 0, "records": 0,
-                                "error": None, "capped_fields": 0, "saved": False} for t in tables])
-        job.save_records, job.names = save, names
+                                "error": None, "capped_fields": 0, "saved": False,
+                                "files": 0, "file_bytes": 0, "file_failed": 0} for t in tables])
+        job.save_records, job.names, job.download_files = save, names, dl
         for t in tables:
             job.fields[t["table_id"]] = t["fields"]
         JOB["current"] = job
@@ -1571,7 +1578,7 @@ def api_profile_status(_q=None):
         return {"job": None}
     return {"job": {"id": job.id, "status": job.status, "error": job.error, "scope": job.scope, "cap": job.cap,
                     "started_at": job.started_at, "finished_at": job.finished_at, "api": job.api.as_dict(),
-                    "save_records": job.save_records, "tables": [dict(t) for t in job.tables]}}
+                    "save_records": job.save_records, "download_files": job.download_files, "tables": [dict(t) for t in job.tables]}}
 
 
 def api_profile_cancel(_body=None):
@@ -1677,6 +1684,10 @@ class RecordSink:
         self.path = _extract_path(t["base_id"], t["table_id"])
         self.tmp = self.path + ".tmp"
         self.t, self.n, self.seen = t, 0, set()
+        self.job = job
+        self.att_fields = [fid for fid, ftype in job.fields[t["table_id"]] if ftype == "multipleAttachments"] \
+            if job.download_files else []
+        self.att_index, self.att_done = [], {}    # index entries; attachment id -> result of its download
         self.captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.fields_meta = [{"field_id": fid, "field_name": job.names.get(fid, fid), "data_type": ftype}
                             for fid, ftype in job.fields[t["table_id"]]]
@@ -1698,16 +1709,49 @@ class RecordSink:
         self.seen.add(rid)
         self.f.write(("," if self.n else "") + json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
         self.n += 1
+        if self.att_fields:
+            self._attachments(rec)
+
+    def _attachments(self, rec):
+        """Download every attachment in this record now, while Airtable's temporary links are fresh."""
+        t, job = self.t, self.job
+        for fid in self.att_fields:
+            for a in (rec.get("fields") or {}).get(fid) or []:
+                if not isinstance(a, dict):
+                    continue
+                if job.cancel.is_set():
+                    raise Cancelled()
+                aid = a.get("id")
+                if aid in self.att_done:      # the same attachment seen twice: reuse the first download
+                    res = self.att_done[aid]
+                else:
+                    res = download_attachment(self.t["base_id"], a, job.cancel)
+                    if aid:
+                        self.att_done[aid] = res
+                    if res["status"] == "failed":
+                        t["file_failed"] += 1
+                    else:
+                        t["files"] += 1
+                        t["file_bytes"] += res["bytes"]
+                self.att_index.append({"record_id": rec.get("id"), "field_id": fid, "attachment_id": aid,
+                                       "filename": a.get("filename"), "type": a.get("type"), "size": a.get("size"),
+                                       "file": res.get("file"), "bytes": res.get("bytes"), "sha256": res.get("sha256"),
+                                       "status": res["status"], "error": res.get("error")})
 
     def finish(self):
         t = self.t
         self.f.write('],"record_count":%d}' % self.n)
         self.f.close()
         os.replace(self.tmp, self.path)
+        att = None
+        if self.job.download_files:
+            att = self._write_att_index()
         entry = {"base_id": t["base_id"], "table_id": t["table_id"], "table_name": t["table_name"],
                  "file": "%s/%s.json" % (t["base_id"], t["table_id"]), "record_count": self.n,
                  "bytes": os.path.getsize(self.path), "sha256": _file_digest(self.path),
                  "captured_at": self.captured, "fields": len(self.fields_meta)}
+        if att:
+            entry["attachments"] = att
         with _manifest_lock:
             m = _read_manifest()
             m["tables"] = [x for x in m["tables"] if x.get("table_id") != t["table_id"]] + [entry]
@@ -1716,6 +1760,21 @@ class RecordSink:
                          "source control and delete it when the migration no longer needs it. This manifest holds "
                          "counts and checksums only.")
             _write_manifest(m)
+
+    def _write_att_index(self):
+        t = self.t
+        ipath = os.path.join(os.path.dirname(self.path), t["table_id"] + ".attachments.json")
+        tmp = ipath + ".tmp"
+        failed = [e for e in self.att_index if e["status"] == "failed"]
+        doc = {"format": "airtable-attachment-index/1", "base_id": t["base_id"], "table_id": t["table_id"],
+               "captured_at": self.captured, "folder": "attachments", "attachments": self.att_index}
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=1)
+        _private(tmp)
+        os.replace(tmp, ipath)
+        uniq = {e["attachment_id"]: e for e in self.att_index if e["status"] != "failed"}
+        return {"files": len(uniq), "bytes": sum(e["bytes"] or 0 for e in uniq.values()), "failed": len(failed),
+                "index": "%s/%s.attachments.json" % (t["base_id"], t["table_id"])}
 
     def abort(self):
         try:
@@ -1726,6 +1785,105 @@ class RecordSink:
             os.remove(self.tmp)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------
+# Attachment files. Airtable's attachment links are signed and expire after a few hours, so the files are
+# downloaded in the same pass that reads the records. The links are NOT secret-free: they are never logged,
+# never put in an error message and never sent to the browser, and the Airtable token is never sent to them.
+# --------------------------------------------------------------------------
+ATT_HOST_SUFFIXES = ("airtableusercontent.com", "airtable.com")
+ATT_CHUNK = 256 * 1024
+ATT_TRIES = 3
+
+
+def attachment_ext(filename, mime):
+    """Extension for the saved file: the one in the original filename if it is plain, else one from the MIME type."""
+    ext = os.path.splitext(str(filename or ""))[1].lstrip(".").lower()
+    if re.match(r"^[a-z0-9]{1,10}$", ext):
+        return ext
+    guess = (mimetypes.guess_extension(str(mime or "").split(";")[0].strip()) or "").lstrip(".").lower()
+    if guess == "jpe":
+        guess = "jpg"
+    return guess if re.match(r"^[a-z0-9]{1,10}$", guess) else "bin"
+
+
+def _attachment_url_ok(url):
+    if not isinstance(url, str):
+        return False
+    if AIRTABLE_API_BASE != "https://api.airtable.com" and url.startswith(AIRTABLE_API_BASE + "/"):
+        return True   # the mock-server test plan serves files from the mock
+    u = urlparse(url)
+    h = (u.hostname or "").lower()
+    return u.scheme == "https" and any(h == x or h.endswith("." + x) for x in ATT_HOST_SUFFIXES)
+
+
+def download_attachment(base_id, a, cancel):
+    """Download one attachment to <extract_dir>/<base>/attachments/<attachment id>.<ext>. Never raises for a bad
+    file (the result says failed and why, without the link); raises Cancelled if the run is cancelled."""
+    aid = a.get("id")
+    if not isinstance(aid, str) or not ID_SAFE_RE.match(aid):
+        return {"status": "failed", "error": "attachment has no usable ID"}
+    if not _attachment_url_ok(a.get("url")):
+        return {"status": "failed", "error": "attachment link is not an Airtable file link"}
+    ext = attachment_ext(a.get("filename"), a.get("type"))
+    rel = "attachments/%s.%s" % (aid, ext)
+    d = os.path.join(extract_dir(), base_id, "attachments")
+    path, part = os.path.join(d, "%s.%s" % (aid, ext)), os.path.join(d, "%s.%s.part" % (aid, ext))
+    want = a.get("size") if isinstance(a.get("size"), int) else None
+    os.makedirs(d, exist_ok=True)
+    _private(extract_dir(), True)
+    _private(os.path.dirname(d), True)
+    _private(d, True)
+    if os.path.isfile(path) and (want is None or os.path.getsize(path) == want):   # already have it: keep it
+        return {"status": "existing", "file": rel, "bytes": os.path.getsize(path), "sha256": _file_digest(path)}
+    err = "download failed"
+    for attempt in range(ATT_TRIES):
+        if cancel.is_set():
+            raise Cancelled()
+        h, n = hashlib.sha256(), 0
+        try:
+            # No Authorization header: the link is already signed, and the token must never leave for another host.
+            req = urllib.request.Request(a["url"], method="GET", headers={"User-Agent": "airtable-migration-control"})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp, open(part, "wb") as out:
+                _private(part)
+                while True:
+                    if cancel.is_set():
+                        raise Cancelled()
+                    chunk = resp.read(ATT_CHUNK)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    h.update(chunk)
+                    n += len(chunk)
+            if want is not None and n != want:
+                err = "downloaded %d bytes but Airtable reported %d" % (n, want)
+                continue
+            os.replace(part, path)
+            return {"status": "downloaded", "file": rel, "bytes": n, "sha256": h.hexdigest()}
+        except Cancelled:
+            _rm(part)
+            raise
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403, 404, 410):
+                _rm(part)
+                return {"status": "failed", "error": "link expired or file no longer available (HTTP %d)" % e.code}
+            err = "HTTP %d" % e.code
+        except (urllib.error.URLError, http.client.HTTPException, socket.timeout, TimeoutError, ConnectionError) as e:
+            err = "network error (%s)" % type(e).__name__    # the exception text can contain the link, so it is not kept
+        except OSError as e:
+            _rm(part)
+            return {"status": "failed", "error": "could not write the file (%s)" % type(e).__name__}
+        time.sleep(min(2.0 ** attempt, 8.0) * (0.2 if AIRTABLE_API_BASE != "https://api.airtable.com" else 1.0))
+    _rm(part)
+    return {"status": "failed", "error": err}
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _profile_row_counts():
@@ -1752,7 +1910,10 @@ def api_extract_files(_q=None):
         check = "no profile" if not prof and e["record_count"] else ("matches profile" if prof == e["record_count"] else "differs from profile (%s)" % prof)
         out.append(dict(e, bytes=size, check=check))
     return {"folder": extract_dir(), "files": out,
-            "total_records": sum(x["record_count"] for x in out), "total_bytes": sum(x["bytes"] for x in out)}
+            "total_records": sum(x["record_count"] for x in out), "total_bytes": sum(x["bytes"] for x in out),
+            "total_attachment_files": sum((x.get("attachments") or {}).get("files", 0) for x in out),
+            "total_attachment_bytes": sum((x.get("attachments") or {}).get("bytes", 0) for x in out),
+            "total_attachment_failed": sum((x.get("attachments") or {}).get("failed", 0) for x in out)}
 
 
 def api_extract_delete(body):
@@ -1769,7 +1930,20 @@ def api_extract_delete(body):
             continue
         p = os.path.join(root, d)
         for fn in os.listdir(p):
-            if re.match(r"^[A-Za-z0-9_-]+\.json(\.tmp)?$", fn):
+            if fn == "attachments" and os.path.isdir(os.path.join(p, fn)):
+                ad = os.path.join(p, fn)
+                for af in os.listdir(ad):
+                    if re.match(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9]{1,10}){1,2}$", af):
+                        try:
+                            os.remove(os.path.join(ad, af))
+                            removed += 1
+                        except OSError as e:
+                            raise AppError("Could not delete %s/attachments/%s: %s" % (d, af, scrub(e)))
+                try:
+                    os.rmdir(ad)
+                except OSError:
+                    pass
+            elif re.match(r"^[A-Za-z0-9_-]+(\.attachments)?\.json(\.tmp)?$", fn):
                 try:
                     os.remove(os.path.join(p, fn))
                     removed += 1

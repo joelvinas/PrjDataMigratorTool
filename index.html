@@ -131,6 +131,10 @@
   <div class="row">
     <label class="toggle"><input type="checkbox" id="saveRecords"> Also save every record to JSON files during this run</label>
   </div>
+  <div class="row" id="dlRow" hidden>
+    <label class="toggle"><input type="checkbox" id="downloadFiles"> Also download the attachment files (needs the box above)</label>
+  </div>
+  <div id="dlNote" class="note warn" hidden><strong>Attachment files will be downloaded.</strong> Each file is saved as <code>&lt;attachment id&gt;.&lt;extension&gt;</code> in <code class="exFolderRef">...</code> under <code>&lt;base id&gt;/attachments/</code>, and an index file per table (<code>&lt;table id&gt;.attachments.json</code>) ties each file to its record and field. This is the only step that downloads files, and it can use a lot of disk space and time. Airtable's links expire after a few hours, so this happens in the same pass; a failed file is listed in the index and can be retried by running that table again (files already saved are kept).</div>
   <div id="saveNote" class="note warn" hidden><strong>Record data will be written to disk.</strong> The same pass that profiles each table also writes every record and every field value to <code class="exFolderRef">...</code> (one JSON file per table), so there is no second set of API calls. The values are never put in the database, the logs or this page. Leave this box unticked for a test run that keeps nothing on disk. See step 6.</div>
   <div class="row">
     <button id="btnProfile" class="primary">Start profiling</button>
@@ -157,10 +161,10 @@
 <!-- STEP 6 -->
 <section class="card" id="step6">
   <h2><span class="num">6</span> Saved record files</h2>
-  <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files themselves are not downloaded.</p>
+  <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files are downloaded only when "Also download the attachment files" was ticked in step 5, into an <code>attachments</code> folder beside the table files.</p>
   <div id="exFilesSummary" class="msg"></div>
   <div class="scroll"><table id="exFilesTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th>Captured (UTC)</th><th>Check</th><th>SHA-256</th></tr></thead>
+    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th class="num">Attachment files</th><th>Captured (UTC)</th><th>Check</th><th>SHA-256</th></tr></thead>
     <tbody></tbody>
   </table></div>
   <p class="hint">The page shows counts, sizes and checksums only. "Matches profile" compares the file's record count with the table's latest profile.</p>

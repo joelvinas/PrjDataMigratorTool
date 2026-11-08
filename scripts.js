@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.7"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.8"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -437,7 +437,7 @@ async function startProfile() {
   setMsg("profMessage", "Starting...", "");
   try {
     const scope = $("scope").value;
-    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked });
+    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked, download_attachments: $("saveRecords").checked && $("downloadFiles").checked });
     setMsg("profMessage", "", "");
     await loadProfileStatus(false);
   } catch (e) { setMsg("profMessage", e.message, "err"); }
@@ -462,7 +462,7 @@ function renderProgress(job) {
   const label = { running: "Running", done: "Finished", cancelled: "Cancelled", error: "Stopped by an error" }[job.status] || job.status;
   box.appendChild(el("p", {}, el("strong", { text: label }), " – " + done + " of " + total + " tables done" + (failed ? ", " + failed + " failed" : "") +
     ". API calls this run: " + job.api.calls + " (" + job.api.success + " ok, " + job.api.failure + " failed)." +
-    (job.save_records ? " Saving records to JSON files." : " Not saving records.")));
+    (job.save_records ? " Saving records to JSON files." : " Not saving records.") + (job.download_files ? " Downloading attachment files." : "")));
   box.appendChild(el("div", { class: "bar" }, el("span", { style: "width:" + Math.round((100 * (done + failed)) / total) + "%" })));
   if (job.error) box.appendChild(note("err", job.error));
   const bases = {};
@@ -478,7 +478,8 @@ function renderProgress(job) {
   box.appendChild(el("table", { class: "grid compact prog" },
     el("thead", {}, el("tr", {}, ["Table", "Status", "Pages", "Records", "Detail"].map((h, i) => el("th", { class: i === 2 || i === 3 ? "num" : "", text: h })))),
     el("tbody", {}, job.tables.map((t) => el("tr", {}, el("td", { text: t.table_name }), el("td", {}, statusTag(t.status)), el("td", { class: "num", text: fmt(t.pages) }), el("td", { class: "num", text: fmt(t.records) }),
-      el("td", {}, t.error ? el("span", { class: "tag fail", text: t.error }) : "", t.capped_fields ? el("span", { class: "tag cap", text: t.capped_fields + " field(s) over cap" }) : "", t.saved ? el("span", { class: "tag done", text: "saved to file" }) : ""))))));
+      el("td", {}, t.error ? el("span", { class: "tag fail", text: t.error }) : "", t.capped_fields ? el("span", { class: "tag cap", text: t.capped_fields + " field(s) over cap" }) : "", t.saved ? el("span", { class: "tag done", text: "saved to file" }) : "",
+        t.files || t.file_failed ? el("span", { class: "tag " + (t.file_failed ? "cap" : "done"), text: fmt(t.files) + " file(s), " + fmtBytes(t.file_bytes) + (t.file_failed ? ", " + t.file_failed + " failed" : "") }) : ""))))));
 }
 
 async function loadProfileStatus(quiet) {
@@ -518,11 +519,12 @@ async function loadExtractFiles() {
   d.files.forEach((f) => {
     const bad = f.check.startsWith("differs");
     body.appendChild(el("tr", {}, el("td", { text: f.base_id + " / " + f.table_name }), el("td", { class: "num", text: fmt(f.record_count) }), el("td", { class: "num", text: fmt(f.fields) }),
-      el("td", { class: "num", text: fmtBytes(f.bytes) }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
+      el("td", { class: "num", text: fmtBytes(f.bytes) }),
+      el("td", { class: "num", text: f.attachments ? fmt(f.attachments.files) + " (" + fmtBytes(f.attachments.bytes) + ")" + (f.attachments.failed ? ", " + f.attachments.failed + " failed" : "") : "" }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
       el("td", {}, el("span", { class: "tag " + (bad ? "cap" : f.check === "matches profile" ? "done" : ""), text: f.check })), el("td", {}, el("code", { text: f.sha256.slice(0, 12) }))));
   });
   t.hidden = d.files.length === 0;
-  setMsg("exFilesSummary", d.files.length ? d.files.length + " file(s), " + fmt(d.total_records) + " records, " + fmtBytes(d.total_bytes) + " in total." : "No extracted files yet.", "");
+  setMsg("exFilesSummary", d.files.length ? d.files.length + " file(s), " + fmt(d.total_records) + " records, " + fmtBytes(d.total_bytes) + " in total." + (d.total_attachment_files || d.total_attachment_failed ? " Attachment files: " + fmt(d.total_attachment_files) + " (" + fmtBytes(d.total_attachment_bytes) + ")" + (d.total_attachment_failed ? ", " + fmt(d.total_attachment_failed) + " failed (see the index files)." : ".") : "") : "No extracted files yet.", "");
 }
 
 async function loadResults() {
@@ -586,7 +588,15 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btnCancel").addEventListener("click", cancelProfile);
   $("btnExtractDelete").addEventListener("click", deleteExtract);
   $("btnExtractRefresh").addEventListener("click", guard(loadExtractFiles));
-  $("saveRecords").addEventListener("change", () => { $("saveNote").hidden = !$("saveRecords").checked; });
+  const syncSave = () => {
+    const on = $("saveRecords").checked;
+    $("saveNote").hidden = !on;
+    $("dlRow").hidden = !on;
+    if (!on) $("downloadFiles").checked = false;
+    $("dlNote").hidden = !(on && $("downloadFiles").checked);
+  };
+  $("saveRecords").addEventListener("change", syncSave);
+  $("downloadFiles").addEventListener("change", syncSave);
   $("btnResults").addEventListener("click", guard(loadResults));
   initBaseCombo();
   $("resBase").addEventListener("change", syncReportLinks);
