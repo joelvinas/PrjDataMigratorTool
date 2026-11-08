@@ -1,0 +1,12 @@
+# Secrets and local data: never commit these
+config.json
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,272 @@
+{
+  "tables": [
+    {
+      "id": "tblCustomers0001",
+      "name": "Customers",
+      "primaryFieldId": "fldCustName0001",
+      "fields": [
+        {
+          "id": "fldCustName0001",
+          "name": "Name",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldCustEmail001",
+          "name": "Email",
+          "type": "email"
+        },
+        {
+          "id": "fldCustActive01",
+          "name": "Active",
+          "type": "checkbox",
+          "options": {
+            "icon": "check",
+            "color": "greenBright"
+          }
+        },
+        {
+          "id": "fldCustLogo0001",
+          "name": "Logo",
+          "type": "multipleAttachments"
+        },
+        {
+          "id": "fldCustReferred1",
+          "name": "Referred By",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblCustomers0001",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblOrders000001",
+      "name": "Orders",
+      "primaryFieldId": "fldOrdNumber001",
+      "fields": [
+        {
+          "id": "fldOrdNumber001",
+          "name": "Order Number",
+          "type": "autoNumber"
+        },
+        {
+          "id": "fldOrdTotal0001",
+          "name": "Total",
+          "type": "number",
+          "options": {
+            "precision": 2
+          }
+        },
+        {
+          "id": "fldOrdCustomer1",
+          "name": "Customer",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblCustomers0001",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblProducts0001",
+      "name": "Products",
+      "primaryFieldId": "fldProdName0001",
+      "fields": [
+        {
+          "id": "fldProdName0001",
+          "name": "Product",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldProdPrice001",
+          "name": "Price",
+          "type": "currency",
+          "options": {
+            "precision": 2,
+            "symbol": "$"
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblOrderItems001",
+      "name": "OrderItems",
+      "primaryFieldId": "fldItemName0001",
+      "fields": [
+        {
+          "id": "fldItemName0001",
+          "name": "Item",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldItemQty00001",
+          "name": "Quantity",
+          "type": "number",
+          "options": {
+            "precision": 0
+          }
+        },
+        {
+          "id": "fldItemOrder001",
+          "name": "Order",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblOrders000001",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        },
+        {
+          "id": "fldItemProduct1",
+          "name": "Product",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblProducts0001",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblDepartments01",
+      "name": "Departments",
+      "primaryFieldId": "fldDeptName0001",
+      "fields": [
+        {
+          "id": "fldDeptName0001",
+          "name": "Department",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldDeptHead0001",
+          "name": "Head",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblEmployees0001",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblEmployees0001",
+      "name": "Employees",
+      "primaryFieldId": "fldEmpName00001",
+      "fields": [
+        {
+          "id": "fldEmpName00001",
+          "name": "Employee",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldEmpDept00001",
+          "name": "Department",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblDepartments01",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblArticles0001",
+      "name": "Articles",
+      "primaryFieldId": "fldArtTitle0001",
+      "fields": [
+        {
+          "id": "fldArtTitle0001",
+          "name": "Title",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldArtTags00001",
+          "name": "Tags",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblTags00000001",
+            "inverseLinkFieldId": "fldTagArticles01",
+            "isReversed": false,
+            "prefersSingleRecordLink": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblTags00000001",
+      "name": "Tags",
+      "primaryFieldId": "fldTagName000001",
+      "fields": [
+        {
+          "id": "fldTagName000001",
+          "name": "Tag",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldTagArticles01",
+          "name": "Articles",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblArticles0001",
+            "inverseLinkFieldId": "fldArtTags00001",
+            "isReversed": false,
+            "prefersSingleRecordLink": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblProjects00001",
+      "name": "Projects",
+      "primaryFieldId": "fldProjName00001",
+      "fields": [
+        {
+          "id": "fldProjName00001",
+          "name": "Project",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldProjTasks0001",
+          "name": "Tasks",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblTasks0000001",
+            "inverseLinkFieldId": "fldTaskProject01",
+            "isReversed": false,
+            "prefersSingleRecordLink": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "tblTasks0000001",
+      "name": "Tasks",
+      "primaryFieldId": "fldTaskName00001",
+      "fields": [
+        {
+          "id": "fldTaskName00001",
+          "name": "Task",
+          "type": "singleLineText"
+        },
+        {
+          "id": "fldTaskProject01",
+          "name": "Project",
+          "type": "multipleRecordLinks",
+          "options": {
+            "linkedTableId": "tblProjects00001",
+            "inverseLinkFieldId": "fldProjTasks0001",
+            "isReversed": false,
+            "prefersSingleRecordLink": true
+          }
+        }
+      ]
+    }
+  ]
+}

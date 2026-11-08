@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Airtable Migration Control Plane</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane <span class="stage">Stage 1</span></h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+
+<main>
+<!-- STEP 1 -->
+<section class="card" id="step1">
+  <h2><span class="num">1</span> Connect to database</h2>
+  <p class="hint">Enter the path of a SQLite file. A relative path is resolved next to <code>server.py</code>.</p>
+  <div class="row">
+    <input id="dbPath" type="text" class="wide" placeholder="migration.db" autocomplete="off">
+    <button id="btnConnect" class="primary">Connect</button>
+  </div>
+  <div id="dbMessage" class="msg"></div>
+  <div id="dbActions" class="row" hidden>
+    <button id="btnCreate"></button>
+  </div>
+  <table id="countsTable" class="grid compact" hidden>
+    <thead><tr><th>Table</th><th class="num">Rows</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- STEP 2 -->
+<section class="card" id="step2">
+  <h2><span class="num">2</span> Confirm token and enter base ID</h2>
+  <p>Airtable token configured in <code>config.json</code>: <strong id="tokenYesNo">...</strong></p>
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <input id="baseId" type="text" placeholder="appXXXXXXXXXXXXXX" autocomplete="off">
+  </div>
+  <p class="hint">Run steps 3 to 5 once for each base. The token never appears in this page.</p>
+</section>
+
+<!-- STEP 3 -->
+<section class="card" id="step3">
+  <h2><span class="num">3</span> Ingest schema</h2>
+  <div class="row">
+    <label><input type="radio" name="src" value="api" checked> Fetch from Airtable Metadata API</label>
+    <label><input type="radio" name="src" value="json"> Upload or paste schema JSON</label>
+  </div>
+  <div id="jsonBox" hidden>
+    <div class="row"><input id="schemaFile" type="file" accept=".json,application/json"></div>
+    <textarea id="schemaText" rows="8" placeholder='{"tables":[{"id":"tbl...","name":"...","fields":[...]}]}'></textarea>
+  </div>
+  <div class="row"><button id="btnIngest" class="primary">Ingest schema</button></div>
+  <div id="ingestMessage" class="msg"></div>
+
+  <h3>Schema in database</h3>
+  <div class="row"><button id="btnReloadSchema">Refresh</button></div>
+  <div id="schemaView" class="schema"></div>
+</section>
+
+<!-- STEP 4 -->
+<section class="card" id="step4">
+  <h2><span class="num">4</span> Review load order</h2>
+  <p class="hint">A table that links to another table is the child; the linked table is its parent (self-links ignored).</p>
+  <div class="row">
+    <label for="depMode">Link handling</label>
+    <select id="depMode">
+      <option value="literal">Literal: every link field is a dependency</option>
+      <option value="collapse">Resolve two-way link pairs (use Airtable's single-link hint)</option>
+    </select>
+    <button id="btnRecompute" class="primary">Recompute load order</button>
+  </div>
+  <div id="depMessage" class="msg"></div>
+  <div id="depNotes"></div>
+  <table id="orderTable" class="grid" hidden>
+    <thead><tr><th class="num">Load #</th><th>Table</th><th>Table ID</th><th class="num">Depth</th><th>Parents</th><th>Notes</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3>Dependency graph</h3>
+  <p class="hint">Parents on the left, children on the right. Arrows point from parent to child. Red outline: table is in a cycle. &#8635; marks a self-link.</p>
+  <div id="graphBox" class="graphbox"></div>
+  <h3>Open runbook items</h3>
+  <div id="runbookBox"></div>
+</section>
+
+<!-- STEP 5 -->
+<section class="card" id="step5">
+  <h2><span class="num">5</span> Run profiling</h2>
+  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Records are counted in memory and discarded; raw data is never saved.</p>
+  <div class="row">
+    <label for="scope">Run</label>
+    <select id="scope">
+      <option value="all">Everything</option>
+      <option value="base">One base</option>
+      <option value="table">One table</option>
+    </select>
+    <select id="scopeBase" hidden></select>
+    <select id="scopeTable" hidden></select>
+    <label for="cap">Distinct-value cap per field</label>
+    <input id="cap" type="number" min="100" value="1000" class="short">
+  </div>
+  <div class="row">
+    <button id="btnProfile" class="primary">Start profiling</button>
+    <button id="btnCancel" hidden>Cancel run</button>
+  </div>
+  <div id="profMessage" class="msg"></div>
+  <div id="profProgress"></div>
+
+  <h3>Results</h3>
+  <div class="row">
+    <select id="resBase"><option value="">All bases</option></select>
+    <select id="resTable"><option value="">All tables</option></select>
+    <button id="btnResults">Show results</button>
+  </div>
+  <p class="hint">Null = missing, empty text or empty list. Zero and unchecked boxes count as real values. A cardinality marked "capped" is a lower bound: the field has more distinct values than the cap.</p>
+  <div class="scroll"><table id="resultsTable" class="grid" hidden>
+    <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<!-- API LOG -->
+<section class="card" id="logCard">
+  <h2>API call log</h2>
+  <div class="row">
+    <label><input type="checkbox" id="logFail"> Failures only</label>
+    <select id="logTable"><option value="">All tables</option></select>
+    <select id="logPurpose"><option value="">All purposes</option></select>
+    <button id="btnLog">Refresh</button>
+  </div>
+  <div id="logSummary" class="msg"></div>
+  <div class="scroll"><table id="logTableEl" class="grid compact">
+    <thead><tr><th>Time (UTC)</th><th>Purpose</th><th>Endpoint</th><th>Table</th><th class="num">Try</th><th class="num">Status</th><th>OK</th><th class="num">ms</th><th class="num">Records</th><th>Error</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+</main>
+<script src="scripts.js"></script>
+</body>
+</html>

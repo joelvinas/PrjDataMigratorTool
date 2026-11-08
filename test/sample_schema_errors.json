@@ -1,0 +1,19 @@
+{
+  "tables": [
+    {
+      "id": "tblFlaky0000001", "name": "Flaky",
+      "fields": [{"id": "fldFlakyName0001", "name": "Name", "type": "singleLineText"}]
+    },
+    {
+      "id": "tblForbidden0001", "name": "Forbidden",
+      "fields": [{"id": "fldForbName00001", "name": "Name", "type": "singleLineText"}]
+    },
+    {
+      "id": "tblWideCard00001", "name": "WideCardinality",
+      "fields": [
+        {"id": "fldWideKey000001", "name": "Unique Key", "type": "singleLineText"},
+        {"id": "fldWideBucket001", "name": "Bucket", "type": "singleLineText"}
+      ]
+    }
+  ]
+}

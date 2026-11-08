@@ -1,0 +1,4 @@
+{
+  "airtable_pat": "pat_REPLACE_WITH_YOUR_TOKEN",
+  "db_path": "migration.db"
+}
