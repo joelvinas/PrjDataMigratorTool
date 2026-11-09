@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.11"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.12"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -48,7 +48,11 @@ async function api(method, path, body) {
   }
   let data = {};
   try { data = await res.json(); } catch (e) { /* non-JSON error */ }
-  if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
+  if (!res.ok) {
+    const err = new Error(data.error || ("Request failed (" + res.status + ")"));
+    if (Array.isArray(data.problems)) err.problems = data.problems;
+    throw err;
+  }
   return data;
 }
 
@@ -136,7 +140,7 @@ function savedBase() { try { return sessionStorage.getItem(BASE_KEY) || ""; } ca
 const NAV_PAGES = [
   { key: "setup", href: "/setup", label: "Setup", sub: "Database, token, base" },
   { key: "stage1", href: "/stage1", label: "Stage 1: Data", sub: "Steps 3 to 6" },
-  { key: "stage2", href: "/stage2", label: "Stage 2: Forms", sub: "Not started" },
+  { key: "stage2", href: "/stage2", label: "Stage 2: Forms", sub: "Form recorder" },
   { key: "stage3", href: "/stage3", label: "Stage 3: Automations", sub: "Not started" },
   { key: "stage4", label: "Stage 4: Map and load", sub: "Planned" },
 ];

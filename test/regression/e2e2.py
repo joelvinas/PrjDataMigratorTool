@@ -13,12 +13,12 @@ sch=open("test/sample_schema.json").read(); err=open("test/sample_schema_errors.
 
 st,r=call("GET","/api/status"); check("token configured, not leaked", r["token_configured"] and "patMOCK" not in json.dumps(r))
 st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("nonexistent db offers create", r["exists"] is False)
-st,r=call("POST","/api/db/create",{"path":"t.db"}); check("create db ready", r["ready"] and len(r["created_tables"])==13)
+st,r=call("POST","/api/db/create",{"path":"t.db"}); check("create db ready", r["ready"] and len(r["created_tables"])==15)
 st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("reconnect ready", r["ready"] and r["foreign_keys"])
 # missing table detection
-c=sqlite3.connect("t.db"); c.execute("DROP TABLE form_fields"); c.commit(); c.close()
-st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("missing table reported", r["missing_tables"]==["form_fields"] and not r["ready"])
-st,r=call("POST","/api/db/create",{"path":"t.db"}); check("missing table recreated", r["ready"] and r["created_tables"]==["form_fields"])
+c=sqlite3.connect("t.db"); c.execute("DROP TABLE form_links"); c.commit(); c.close()
+st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("missing table reported", r["missing_tables"]==["form_links"] and not r["ready"])
+st,r=call("POST","/api/db/create",{"path":"t.db"}); check("missing table recreated", r["ready"] and r["created_tables"]==["form_links"])
 
 st,r=call("POST","/api/schema/ingest",{"base_id":"appSampleBase001","source":"json","schema_json":sch}); check("json ingest", st==200 and r["tables"]==10 and r["added"]==r["fields"], r)
 st,r=call("POST","/api/schema/ingest",{"base_id":"appSampleBase001","source":"json","schema_json":sch}); check("re-ingest idempotent", r["added"]==0 and r["updated"]==r["fields"] and r["no_longer_in_source"]==0)
@@ -161,7 +161,7 @@ orig=open(__import__("os").path.join(__import__("os").path.dirname(__import__("o
 a=sqlite3.connect(":memory:"); a.executescript(orig)
 oldcols={t:[x[1] for x in a.execute('pragma table_info(%s)'%t)] for t in srv.EXPECTED_TABLES}
 changed={t for t in srv.EXPECTED_TABLES if oldcols[t]!=srv.EXPECTED_COLUMNS[t][:len(oldcols[t])] and set(oldcols[t])!=set(srv.EXPECTED_COLUMNS[t])}
-check("only airtable_fields differs and only airtable_tables, airtable_views and airtable_attachment_stats are new", {x for x in srv.EXPECTED_TABLES if oldcols[x] and set(oldcols[x])!=set(srv.EXPECTED_COLUMNS[x])}=={"airtable_fields"} and {x for x in srv.EXPECTED_TABLES if not oldcols[x]}=={"airtable_tables","airtable_views","airtable_attachment_stats"})
+check("only airtable_fields differs and only the tables from migrations 003 to 005 are new", {x for x in srv.EXPECTED_TABLES if oldcols[x] and set(oldcols[x])!=set(srv.EXPECTED_COLUMNS[x])}=={"airtable_fields"} and {x for x in srv.EXPECTED_TABLES if not oldcols[x]}=={"airtable_tables","airtable_views","airtable_attachment_stats","form_specs","form_items","form_logic","form_links"})
 check("only the approved columns were added", set(srv.EXPECTED_COLUMNS["airtable_fields"])-set(oldcols["airtable_fields"])=={"prefers_single_record_link","cardinality_is_capped"}|set(srv.OPTION_COLUMNS) and not set(oldcols["airtable_fields"])-set(srv.EXPECTED_COLUMNS["airtable_fields"]))
 # old database: app refuses, migration fixes it, data survives
 old=sqlite3.connect("old.db"); old.executescript(orig); old.execute("insert into airtable_fields(base_id,table_id,table_name,field_id,field_name,data_type,row_count,null_count,cardinality) values('appOld00001','tblOld','Old','fldOld','F','singleLineText',7,1,3)"); old.commit(); old.close()
@@ -169,6 +169,8 @@ st,r=call("POST","/api/db/connect",{"path":"old.db"})
 check("old DB not ready; message points to migration", not r["ready"] and r["column_problems"][0]["missing_columns"] and "apply_migrations" in r["message"], r)
 old.close(); subprocess.run([sys.executable,"sql/apply_migrations.py","old.db"],check=True,capture_output=True)
 st,r=call("POST","/api/db/connect",{"path":"old.db"}); check("old DB ready after migration", r["ready"], r)
+oc=sqlite3.connect("old.db"); names={x[0] for x in oc.execute("select name from sqlite_master where type='table'")}; oc.close()
+check("migration 005 dropped the empty placeholders and added the form tables", not ({"form_sections","form_fields"}&names) and {"form_specs","form_items","form_logic","form_links"}<=names, names)
 old=sqlite3.connect("old.db"); row=old.execute("select row_count,null_count,cardinality,cardinality_is_capped,prefers_single_record_link from airtable_fields").fetchone(); old.close()
 check("migration kept data, flag defaults 0, hint NULL", row==(7,1,3,0,None), row)
 # ---- multi-page site: fixed list of pages, nothing outside it is served ----
@@ -179,7 +181,7 @@ PAGES={"/":"setup","/setup":"setup","/stage1":"stage1","/stage2":"stage2","/stag
 for path,key in PAGES.items():
     st,h,body=raw(path); t=body.decode("utf-8")
     check("page %s served as HTML with the nav mount and its page key"%path, st==200 and h["Content-Type"].startswith("text/html") and 'id="sidenav"' in t and 'data-page="%s"'%key in t, (st,h.get("Content-Type")))
-for path in ["/style.css","/common.js","/setup.js","/stage1.js","/log.js"]:
+for path in ["/style.css","/common.js","/setup.js","/stage1.js","/stage2.js","/log.js"]:
     st,h,body=raw(path); check("asset %s served"%path, st==200 and len(body)>200, st)
 st,h,body=raw("/index.html"); check("/index.html redirects to the home page (Setup)", st==302 and h.get("Location")=="/", (st,h.get("Location")))
 for path in ["/scripts.js","/server.py","/config.json","/README.md","/../server.py","/%2e%2e/server.py","/stage1/../server.py","/test/mock_airtable.py","/db/migration.db","/stage4","/stage1.html"]:
@@ -188,7 +190,7 @@ st,h,body=raw("/stage1","POST"); check("POST to a page is rejected", st in (404,
 # every page loads the shared script first; no page or script builds markup from data or carries a token
 for f in ["setup.html","stage1.html","stage2.html","stage3.html","log.html"]:
     t=open(f,encoding="utf-8").read(); check("%s: shared nav, shared script, no inline script"%f, '<nav id="sidenav"' in t and t.index("/common.js")<t.rindex("</body>") and "<script>" not in t)
-for f in ["common.js","setup.js","stage1.js","log.js"]:
+for f in ["common.js","setup.js","stage1.js","stage2.js","log.js"]:
     t=open(f,encoding="utf-8").read(); check("%s: no innerHTML use, no document.write and no token text"%f, not re.search(r"\.innerHTML|insertAdjacentHTML|document\.write|outerHTML", t) and "patMOCK" not in t and "Authorization" not in t)
 t=open("stage1.html",encoding="utf-8").read(); check("Stage 1 holds steps 3 to 6 and no step 1 or 2", all('id="step%d"'%i in t for i in (3,4,5,6)) and 'id="step1"' not in t and 'id="step2"' not in t)
 t=open("setup.html",encoding="utf-8").read(); check("Setup holds steps 1 and 2 only", 'id="step1"' in t and 'id="step2"' in t and 'id="step3"' not in t)

@@ -117,3 +117,36 @@ table.stages td:first-child { white-space: nowrap; }
   .sidenav { position: static; flex: none; height: auto; width: 100%; border-right: 0; border-bottom: 1px solid var(--line); }
   .sidenav .nav-bottom { margin-top: 0; }
 }
+
+/* Stage 2: form recorder */
+.fitem { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; background: #fff; }
+.fitem.t-section { background: #f4f6fb; border-color: #b9c3dc; }
+.fitem.t-hidden_field { background: #fff9ec; border-color: #ecd2a6; }
+.fitem > summary { cursor: pointer; padding: 6px 10px; display: flex; gap: 8px; align-items: baseline; }
+.fitem .pnum { font-weight: 700; color: var(--accent); min-width: 34px; }
+.fitem .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 8px; border-radius: 9px; background: #e9ecf3; white-space: nowrap; }
+.fitem .sumtext { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ibody { padding: 2px 12px 10px; }
+.itemctl { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 8px; }
+.kids { margin: 8px 0 4px 14px; padding-left: 10px; border-left: 3px solid #dbe2f2; }
+button.tb { padding: 2px 10px; font-size: 13px; }
+button.tb.add { background: #f3f6fd; }
+.addrow { gap: 6px; }
+.lbl { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
+.lbl input.wide { min-width: 420px; }
+.lbl-t { font-size: 13px; color: var(--muted); min-width: 90px; }
+.combo.pick { min-width: 280px; max-width: 520px; }
+.combo.pick.bad input { border-color: var(--err); background: var(--errbg); }
+.rich { margin: 8px 0; }
+.rich-label { font-size: 13px; color: var(--muted); margin-bottom: 2px; }
+.rich-tools { display: flex; gap: 4px; margin-bottom: 3px; }
+.rich textarea { font-family: inherit; font-size: 14px; }
+.rich-preview { border: 1px dashed var(--line); border-radius: 6px; padding: 4px 10px; margin-top: 4px; background: #fcfcfd; font-size: 14px; }
+.rich-preview p { margin: 4px 0; } .rich-preview ul, .rich-preview ol { margin: 4px 0 4px 20px; padding: 0; }
+.rich-preview .url, .url { color: var(--muted); font-size: 12px; word-break: break-all; }
+.linkform { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0; padding: 6px; background: #eaf1fd; border-radius: 6px; }
+.linkform input { min-width: 220px; }
+.logicbox { margin: 8px 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: #f2f6fe; border-radius: 0 6px 6px 0; }
+.logicbox.skip { border-left-color: var(--err); background: #fdf3f2; }
+.logic-head { font-weight: 600; font-size: 13.5px; }
+.row.cond { gap: 6px; }
