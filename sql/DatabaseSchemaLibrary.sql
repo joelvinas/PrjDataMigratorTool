@@ -119,48 +119,135 @@ CREATE TABLE field_crosswalk (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 
--- 4. Custom Form Structure & Section-Level Field Placement
-CREATE TABLE form_sections (
-    form_id TEXT NOT NULL,
+-- 4. Stage 2 Form Recorder (one versioned JSON spec per save, plus tables rebuilt from it for queries)
+CREATE TABLE form_specs (
+    spec_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    form_id TEXT NOT NULL,          -- the form key: an Airtable form view ID, or a name you chose
+    version_no INTEGER NOT NULL,    -- 1, 2, 3 ... one row per saved version, never edited
     form_name TEXT NOT NULL,
-    section_id TEXT NOT NULL,
-    section_name TEXT NOT NULL,
-    placement_order INTEGER NOT NULL,
-    PRIMARY KEY (form_id, section_id)
+    base_id TEXT,
+    table_id TEXT,
+    view_id TEXT,                   -- the Airtable form view this was recorded from, if any
+    version_note TEXT,
+    spec_json TEXT NOT NULL,        -- the whole recorded form (the audit record). The tables below are rebuilt from it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (form_id, version_no)
 );
+CREATE INDEX idx_form_specs_form ON form_specs(form_id);
 
-CREATE TABLE form_fields (
-    form_id TEXT NOT NULL,
-    section_id TEXT NOT NULL,
-    airtable_field_id TEXT NOT NULL,
-    workfront_dev_field_id TEXT,
-    workfront_prod_field_id TEXT,
-    field_order INTEGER NOT NULL,
+CREATE TABLE form_items (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    parent_item_id TEXT,            -- the containing section, NULL at the top level
+    item_order INTEGER NOT NULL,    -- position in document order across the whole form
+    path TEXT NOT NULL,             -- for example 2.1.3 (1-based, among siblings)
+    item_type TEXT NOT NULL CHECK(item_type IN ('section', 'field', 'hidden_field', 'heading', 'help_text', 'text_block')),
+    title TEXT,                     -- section title, heading text, or a field's custom label
+    content_md TEXT,                -- section description, field help text, help text or text block (Markdown)
+    airtable_field_id TEXT,         -- field and hidden_field items
     is_required INTEGER DEFAULT 0,
-    PRIMARY KEY (form_id, section_id, airtable_field_id),
-    FOREIGN KEY (form_id, section_id) REFERENCES form_sections(form_id, section_id)
+    preset_value TEXT,              -- hidden_field: the value the form link presets
+    preset_source TEXT,             -- hidden_field: where the value comes from (URL parameter, default, ...)
+    PRIMARY KEY (spec_id, item_id),
+    FOREIGN KEY (spec_id) REFERENCES form_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_form_items_field ON form_items(airtable_field_id);
+
+CREATE TABLE form_logic (
+    spec_id INTEGER NOT NULL,
+    owner_item_id TEXT NOT NULL,    -- the section or item the rule belongs to
+    logic_kind TEXT NOT NULL CHECK(logic_kind IN ('display', 'skip')),
+    junction TEXT NOT NULL CHECK(junction IN ('AND', 'OR')),
+    cond_order INTEGER NOT NULL,
+    controlling_field_id TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    value TEXT,
+    skip_to_item_id TEXT,           -- skip rules only: a later section's item_id, 'END', or NULL for just skipping this section
+    PRIMARY KEY (spec_id, owner_item_id, logic_kind, cond_order),
+    FOREIGN KEY (spec_id) REFERENCES form_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_form_logic_field ON form_logic(controlling_field_id);
+
+CREATE TABLE form_links (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,          -- 'form' for the form description
+    text_role TEXT NOT NULL,        -- description, help or content
+    ordinal INTEGER NOT NULL,       -- order of the link inside that text
+    link_text TEXT NOT NULL,        -- what the person sees
+    url TEXT NOT NULL,              -- the real address, verbatim
+    PRIMARY KEY (spec_id, item_id, text_role, ordinal),
+    FOREIGN KEY (spec_id) REFERENCES form_specs(spec_id) ON DELETE CASCADE
 );
 
--- 5. Automation Catalog & Action Steps (Airtable -> Workfront Fusion)
-CREATE TABLE automation_catalog (
-    automation_id TEXT PRIMARY KEY,
+-- 5. Stage 3 Automation Recorder (one versioned JSON spec per save, plus tables rebuilt from it for queries)
+CREATE TABLE automation_specs (
+    spec_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    automation_id TEXT NOT NULL,    -- the automation key: a name-based key you chose
+    version_no INTEGER NOT NULL,    -- 1, 2, 3 ... one row per saved version, never edited
     automation_name TEXT NOT NULL,
-    source_system TEXT DEFAULT 'Airtable',
-    trigger_type TEXT NOT NULL,
-    target_fusion_scenario_name TEXT,
-    notes TEXT
+    base_id TEXT,
+    trigger_type TEXT,
+    target_scenario_name TEXT,      -- the Workfront Fusion scenario this will become
+    version_note TEXT,
+    spec_json TEXT NOT NULL,        -- the whole recorded automation (the audit record). The tables below are rebuilt from it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (automation_id, version_no)
+);
+CREATE INDEX idx_automation_specs_key ON automation_specs(automation_id);
+
+CREATE TABLE automation_items (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,          -- 'trigger', or the step or branch id within the spec
+    parent_item_id TEXT,            -- the containing step (for a branch) or branch/repeat/NULL (for a step)
+    item_order INTEGER NOT NULL,    -- position in document order across the whole automation (the trigger is 0)
+    path TEXT NOT NULL,             -- 0 for the trigger, then for example 2, 2.1, 2.1.3
+    item_kind TEXT NOT NULL CHECK(item_kind IN ('trigger', 'step', 'branch')),
+    step_type TEXT,                 -- trigger type, action type, 'conditional', 'repeat' or 'branch'
+    title TEXT,
+    content_md TEXT,                -- the description (Markdown)
+    table_id TEXT,                  -- the Airtable table the item works on, if any
+    record_source TEXT,             -- update steps: which earlier step's record is updated (NULL = the trigger record)
+    PRIMARY KEY (spec_id, item_id),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
 );
 
-CREATE TABLE automation_steps (
-    step_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    automation_id TEXT NOT NULL,
-    step_order INTEGER NOT NULL,
-    action_type TEXT NOT NULL,
-    referenced_airtable_field_id TEXT,
-    referenced_workfront_dev_field_id TEXT,
-    referenced_workfront_prod_field_id TEXT,
-    step_logic_description TEXT,
-    FOREIGN KEY (automation_id) REFERENCES automation_catalog(automation_id)
+CREATE TABLE automation_logic (
+    spec_id INTEGER NOT NULL,
+    owner_item_id TEXT NOT NULL,    -- the trigger, find step or branch the condition group belongs to
+    node_path TEXT NOT NULL,        -- position in the nested group: 0 is the root group, 0.1 its second item, 0.1.0 and so on
+    node_kind TEXT NOT NULL CHECK(node_kind IN ('group', 'condition')),
+    junction TEXT,                  -- groups: AND or OR
+    controlling_field_id TEXT,      -- conditions on an Airtable field
+    source_item_id TEXT,            -- which record the field is read from: NULL = the trigger record, else an earlier step
+    left_text TEXT,                 -- conditions on something that is not a field (a step output, a date, ...)
+    operator TEXT,
+    value TEXT,
+    PRIMARY KEY (spec_id, owner_item_id, node_path),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_automation_logic_field ON automation_logic(controlling_field_id);
+
+CREATE TABLE automation_field_refs (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    ref_order INTEGER NOT NULL,
+    field_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('condition', 'set', 'read', 'use', 'watch')),
+    detail TEXT,                    -- the value a field is set to, or how it is used
+    PRIMARY KEY (spec_id, item_id, ref_order),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_automation_field_refs_field ON automation_field_refs(field_id);
+
+CREATE TABLE automation_links (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,          -- 'automation' for the automation description
+    text_role TEXT NOT NULL,        -- description, or setting:<name>
+    ordinal INTEGER NOT NULL,       -- order of the link inside that text
+    link_text TEXT NOT NULL,        -- what the person sees
+    url TEXT NOT NULL,              -- the real address, verbatim
+    PRIMARY KEY (spec_id, item_id, text_role, ordinal),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
 );
 
 -- 6. Dependency Matrix & Data Ingestion Load Order

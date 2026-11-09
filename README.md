@@ -1,4 +1,6 @@
-# Airtable → Workfront Planning Migration Control Plane (Stage 1)
+# Airtable → Workfront Planning Migration Control Plane
+
+Current state: **Stage 1 (Data), Stage 2 (Forms) and Stage 3 (Automations) are built and working** (version 1.13; Stages 2 and 3 are manual recorders), inside a **multi-page site** with a left navigation panel: Setup, Stage 1: Data, placeholder pages for Stage 2 (Forms) and Stage 3 (Automations), a slot for Stage 4 (Map and load), and the API call log pinned at the bottom. Stages 2 to 4 are **not built**; see "Roadmap and structure" below.
 
 A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to Adobe Workfront Planning.
 
@@ -48,10 +50,17 @@ The only non-deterministic parts are incidental: timestamps in logs, the timing 
 ```
 airtable-migration-control/
 ├── server.py                    backend: DB, Airtable calls, graph, profiling, JSON endpoints
-├── index.html  style.css  scripts.js
+├── setup.html  setup.js         Setup (home page, steps 1 and 2) and the list of stages
+├── stage1.html  stage1.js       Stage 1: Data (steps 3 to 6)
+├── stage2.html  stage2.js       Stage 2: Forms (the form recorder, reports and field usage)
+├── stage3.html  stage3.js       Stage 3: Automations (the automation recorder, reports and field usage)
+├── editor-kit.js                shared by Stages 2 and 3: type-ahead picker and the Markdown text box with live preview
+├── log.html  log.js             API call log (its own page, last in the side panel)
+├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
+├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
 ├── start.bat                    Windows launcher (finds Python, creates config.json, opens the browser)
 ├── config.example.json          copy to config.json and add your token
-├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/
+├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/ (databases live in db/)
 ├── LICENSE                      MIT
 ├── README.md
 ├── sql/
@@ -60,12 +69,16 @@ airtable-migration-control/
 │   ├── migration_002_add_field_options.sql   field settings columns
 │   ├── migration_003_add_tables_and_views.sql   the airtable_tables and airtable_views tables
 │   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
-│   └── apply_migrations.py             applies all three to an existing database (safe to repeat)
+│   ├── migration_005_add_form_specs.sql   Stage 2: form_specs, form_items, form_logic, form_links
+│   ├── migration_006_add_automation_specs.sql   Stage 3: automation_specs, automation_items, automation_logic, automation_field_refs, automation_links
+│   └── apply_migrations.py             applies all six to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
     ├── sample_schema_field_options.json   one field of nearly every type, with settings
     ├── mock_airtable.py             fake Airtable so you can test with no real data
+    ├── run_regression.py            runs every suite below against the mock, in throwaway copies of the project
+    ├── regression/                  the suites: e2e2, report_test, views_test, extract_test, attach_test, attstats_test, ui_test
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
 ```
 
@@ -91,8 +104,10 @@ airtable-migration-control/
    - `db_path`: the SQLite file offered in Step 1.
    - `requests_per_second`: pacing per base, between 0.5 and 5 (Airtable's limit). 4.5 leaves a small margin.
 2. In a terminal in this folder: `python server.py` (on Mac you may need `python3 server.py`).
-3. Open **http://127.0.0.1:8765**. For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
+3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
 4. Stop with Ctrl+C.
+
+Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/log` (API call log). The left panel links them; Stage 4 appears as a greyed "planned" entry. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
 
 Without `config.json`, or with an empty token, the page shows a setup message and still works for everything that does not call Airtable (for example, pasted schema JSON).
 
@@ -100,13 +115,15 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 
 ## What it does
 
+Steps 1 and 2 are on **Setup**; steps 3 to 6 are on **Stage 1: Data**; the call log is its own page.
+
 1. **Connect to a database.** Opens an existing SQLite file or creates one from the schema, checks that all expected tables and columns exist, and shows row counts.
 2. **Confirm token and enter a base ID.** The page shows only whether a token is configured (yes/no).
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
 4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph that can be downloaded on its own as an SVG or PNG. Each link-handling option has a short explanation under the dropdown. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
 5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field. An optional toggle also saves every record to JSON files during the same pass.
 6. **Saved record files.** Lists, checks and deletes the JSON files (and attachment files) written by the toggles in step 5.
-7. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
+7. **API call log page.** Every attempt, including retries, with filters for failures, table and purpose. It is the audit trail: every call to the Airtable API is written to it (see the exception for attachment files in CLAUDE.md).
 
 ## SQL schema changes
 
@@ -228,7 +245,7 @@ Easiest, with Python only (no SQLite client needed):
 python sql/apply_migrations.py path/to/your.db
 ```
 
-It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
+It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. Migration 005 also drops the old placeholder tables `form_sections` and `form_fields`, and migration 006 drops `automation_catalog` and `automation_steps`, but only if they are empty (a placeholder with rows is kept and reported). The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
 ### What the new columns mean
 
@@ -315,11 +332,17 @@ python test/answer_key_check.py path/to/out/answer_key
 
 It rebuilds the schema from the key, loads it into a scratch database, and compares load number, depth and second-pass treatment for every table and link field in both modes. Against the Fictional Fashionwear key (39 tables, 130 link fields) it reports `checked=416 fail=0`. This checks the ordering logic only; profile counts have to be checked against a real run.
 
+## Automated regression suites (no real data, about a minute)
+
+`python test/run_regression.py` starts the mock Airtable and the app in a throwaway copy of the project, runs every suite (about 450 checks: API and security behavior, the database schema, load order, reports, record saving, attachment download and statistics, and browser tests of the UI and of the form and automation recorders) and prints one line per suite. It never touches your `config.json` or databases. `ui_test` needs Playwright and is skipped without it. Run it after every change. A single suite: `python test/run_regression.py attach`.
+
 ## Test plan (no real data, about 5 minutes)
 
 **A. Logic only (no Airtable, no token needed)**
 
-1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 13 tables, all with 0 rows, and foreign keys on.
+Steps 1 and 2 are on Setup (`/setup`); steps 3 to 6 are on Stage 1 (`/stage1`), where the Base ID picker is repeated at the top. The base you pick on either page is kept as you move between them.
+
+1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 18 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -346,7 +369,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
    - **Flaky**: two 429 rows (attempts 1 and 2), then success (attempt 3) in the call log.
    - **WideCardinality**: `Bucket` has cardinality 4 (exact); `Unique Key` shows **capped (more than 500)**.
 5. Profile WideCardinality again with the default cap (1,000). `Unique Key` has exactly 1,000 distinct values, which does not exceed the cap, so it is now exact (1,000, not capped).
-6. In the API log panel, tick "Failures only" (3 rows) and try the table and purpose filters.
+6. On the API call log page, tick "Failures only" (3 rows) and try the table and purpose filters.
 
 **B2. Saving records and downloading attachments against the mock**
 
@@ -385,13 +408,75 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 
 **Security.** The server binds to `127.0.0.1` only, rejects requests with a non-localhost `Host` header or a cross-site `Origin`, and requires JSON for all writes. Strings are scrubbed of anything that looks like a token before being logged or returned. The page inserts all data with `textContent`, never `innerHTML`.
 
+## Stage 2: Form recorder
+
+Airtable's API returns a form view's name and (sometimes) its visible fields, but **not its layout, text, hidden fields or logic**, so a form can only be documented by hand. Stage 2 (`/stage2`) is the tool for that. It has four jobs:
+
+1. **Record the form's structure.** Choose a form view from the schema captured in Stage 1 (its Airtable view ID becomes the form key), or start a form with no view. Then add, in the order they appear: **sections and subsections**, **fields** (picked from a type-ahead list of the form's table, with an optional label, a required flag and help text), **hidden or preset fields** (the field, the preset value and where it comes from, such as a URL parameter), **headings**, **help text** and **text blocks**. Every item can have **display logic**; sections also have **skip logic** (skip this section, skip to a later section, or skip to the end). A rule is ALL/ANY of conditions on **earlier** fields, including hidden ones, because respondents never see hidden fields but logic can depend on them. Items can be moved up, down, into the previous section or out of a section.
+2. **Share an audit trail.** Every save is a new, never-edited **version** (with a note and UTC date). Reports can be previewed and downloaded as `.html` or `.mhtml` for any version: the structure in order, the logic written out in words, the fields used, every link, the version history and a sign-off block.
+3. **Query the critical fields.** The field usage panel answers "which forms use this field, and how?" (placed, required, hidden/preset, controls display logic, controls skip logic) across forms and, if wanted, versions, and downloads the answer as `.csv` with the crosswalk's Workfront field IDs alongside.
+4. **Rebuild for the target.** Choose **Workfront Planning (DEV or PROD)** in the report. Every Airtable field is replaced by its target field (name, ID and type) through `field_crosswalk` and `workfront_fields`, so a person can copy the form into Workfront Planning. A field with no usable mapping is marked `UNMAPPED` and the report opens with "Not ready to copy" until none is left. Text, links and logic values are carried over unchanged; if a choice is renamed in the target, change the logic value there.
+
+**Text and links.** Text boxes take Markdown: `**bold**`, `*italic*`, bulleted and numbered lists, and `[visible text](address)`. The Bold, Italic, List and Link buttons write it for you (the Link button asks for the visible text and the address separately). Airtable stores rich text in the same form, so text copied from a form pastes in cleanly. The server parses the Markdown once, so the editor preview, the saved record, the link list and the reports always agree. Link addresses are kept **verbatim** (including parentheses, as in Wikipedia addresses) and the report prints each address beside its visible text, so a paper copy still shows where the link goes. Only `http://`, `https://`, `mailto:` and `tel:` addresses are accepted; anything else is refused on save. **Links .csv** lists every link with its form, item, visible text and address, for checking that the addresses still work after the migration. Nothing typed into a form is ever inserted as HTML.
+
+**Where it is stored.** Each version's full record is one JSON document in `form_specs.spec_json` (the audit record, format `form-spec/1`: the Markdown and its parsed form for every text). On each save, three tables are rebuilt from it so the data can be queried: `form_items` (every section and item in document order, with its Airtable field ID), `form_logic` (one row per condition) and `form_links`. Fields are stored only by Airtable field ID, so the crosswalk can change later without touching old versions. Saving content identical to the latest version creates no new version.
+
+**What the server checks on save** (the page shows the full list): the form key and name; that every field exists in the form's base (and table, when the form has one); that a field is placed only once; that logic uses only fields placed earlier; that "skip to" points to a later section; that logic that is switched on has conditions; that sections, headings and text blocks are not empty; and that every link address is allowed.
+
+**Not captured.** Anything Airtable does not show on the form and you do not record: the share link's prefill values are recorded only if you enter them as hidden/preset fields, and form styling is not recorded. Field-level logic values are plain text copied from the form.
+
+## Stage 3: Automation recorder
+
+Airtable's API does not return automations at all, so, like forms, they are recorded by hand. Stage 3 (`/stage3`) works the same way as Stage 2 (versions, reports, field usage, Markdown text with verbatim links) and has the same four jobs: record what the API cannot show, keep an audit trail, query which fields are used, and translate for the target system.
+
+**What is recorded.** An automation is a **trigger** followed by an ordered tree of **steps**.
+- **Trigger:** one of nine types (record created, updated, matches conditions, enters a view, form submitted, button clicked, scheduled, webhook, other), with its table, view, the fields it watches, a schedule, notes and, for "matches conditions", the condition group.
+- **Actions:** create record, update record, find records, send email, send message, run script, send request, wait, or other. A record action has a table. Each action can list the **fields it sets (with the value), reads or uses**, and labelled **details** (recipient, subject, body, method, URL, and so on). Details are Markdown, except code, headers and raw bodies, which are kept **exactly as typed** (a script is never reformatted or read as Markdown, and appears in the report in a code block). An update step says which record it updates: the trigger record or the record of an earlier step.
+- **Conditional blocks:** an `If` branch, any number of `Else if` branches and one optional last `Else` branch. Each branch has its own steps.
+- **Repeating groups:** "for each" over the records found by an earlier find step, or described in words, with their own steps.
+- **Conditions** are nested groups: each group is ALL (AND) or ANY (OR) of conditions and further groups, to a depth of 8. A condition tests an Airtable field or an "other value" (for example a date or a step output, typed as text) with one of 14 operators. A field can be read from the trigger record or from the record of an **earlier** create, update or find step (or repeat). The conditions of a **find** step test the records being searched, so they use that step's table only.
+- Steps can be moved up, down, into the block above or out of the block they are in; branches can be reordered, and the `Else` branch always stays last.
+
+**Where it is stored.** Each version is one JSON document in `automation_specs.spec_json` (format `automation-spec/1`). On each save four tables are rebuilt from it: `automation_items` (the trigger, every step and every branch in document order, with paths such as `2.1.2`), `automation_logic` (every condition group and condition, with its nested position), `automation_field_refs` (every field the automation tests, watches, sets, reads or uses) and `automation_links`. Fields are stored only by Airtable field ID, so the crosswalk can change later without touching old versions. Saving content identical to the latest version creates no new version.
+
+**What the server checks on save:** the key and name; that every table and field exists in the base; that a field set or read by a step is in that step's table; that a condition's record source is an earlier step that creates, updates or finds records; that a branch has conditions (except the last `Else`); that `Else` is last and follows an `If`; that "repeat over" is an earlier find step; that trigger conditions use only the trigger record; and that every link address is allowed.
+
+**Reports and queries.** The report lists the trigger, then the steps in order, with branches labelled If / Else if / Else, conditions written out with their nesting, the fields each step touches, the fields-used table, every link with its address, the version history and a sign-off block. Choose **Workfront Planning (DEV or PROD)** to replace every Airtable field with its target field through `field_crosswalk` and `workfront_fields`; tables show the Workfront record type learned from their mapped fields, and the report says **"Not ready to rebuild"** and marks `UNMAPPED` fields until none is left. The **target Workfront Fusion scenario** name you record appears in the report. The usage panel answers "which automations use this field, and how?" (tested in a condition, written, read, used, watched by the trigger), with `.csv` export including the Workfront field IDs. **Links .csv** lists every link.
+
+**Not captured.** Anything Airtable shows only inside the automation editor that you do not record: run history, and the exact internal token names between steps (type them as text if you want them documented).
+
 ## Troubleshooting
 
-**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`index.html`, `scripts.js`, `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
+**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
 
 **"Port 8765 is already in use."** Another copy is running. Close it, or use another port (`PORT=8800 python server.py`, or `start.bat 8800`).
 
 **"No database is connected yet."** Complete step 1 first. The server forgets the connection when it restarts, so connect again after a restart.
+
+## Roadmap and structure
+
+**Status.** Stage 1 is complete and verified against a mock Airtable and an answer key. It has not yet been run end to end against the real Airtable bases (the mock cannot show how the real attachment file host, rollup settings or very large tables behave). The multi-page site is built (version 1.11). Stage 2, the form recorder, was added in version 1.12 and Stage 3, the automation recorder, in version 1.13 (new routes and one migration each, no change to Stage 1). Both are verified against the mock and in a browser test, but not yet against real forms or automations. Stage 4 (the field crosswalk and loading) is next, and the Stage 2 and 3 target reports become useful once it exists.
+
+| Page | URL | Purpose | Status |
+|---|---|---|---|
+| Setup (home) | `/`, `/setup` | Database (step 1), token and base (step 2), and the list of stages. Shared by every stage. | Built |
+| Stage 1: Data | `/stage1` | Schema, load order, profiling, record and attachment capture (steps 3 to 6, plus the open runbook items) | Built |
+| Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
+| Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
+| Stage 4 (anticipated): Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning | Slot in the side panel only; `workfront_fields` and `field_crosswalk` exist, empty |
+| API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
+
+Decisions made:
+- **Names.** "Data" (parallel with Forms and Automations, the kinds of thing being migrated). Only the navigation label and page headings carry the name; the URLs are `/stage1` to `/stage3` so a rename never breaks them.
+- **Step numbers.** Stage 1 keeps steps 3 to 6; Setup holds steps 1 and 2.
+- **Index.** Setup is the home page. `/index.html` redirects to `/`.
+- **Technical shape.** Standard-library Python plus plain HTML, CSS and JavaScript, no build step and no dependencies. Separate `.html` files share one stylesheet and `common.js` (API helper, base labels, base picker, version check, navigation, connection check), each with its own script. The server serves them from a fixed list of names in `STATIC`; nothing from a request is joined into a file path.
+- **Shared state.** The server holds the database connection and every page re-checks it on load. The chosen base ID is remembered per browser tab. Neither the token nor any record value is ever kept in the browser.
+- **Audit.** Every call to the Airtable API goes through one function that logs each attempt to `api_call_log`; the log has its own page. New calls must do the same.
+
+Open for later: where the open runbook items belong once Forms and Automations add their own entries (today they are at the end of step 4 on Stage 1).
+
+Rules that carry into every stage are in `CLAUDE.md`.
 
 ## Assumptions and scope
 
@@ -399,7 +484,7 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 - A relative database path is resolved next to `server.py`.
 - Link fields that point at a table not yet in the database (for example, the other base was not ingested) are listed as "unresolved" and ignored for ordering.
 - Schema fetch is one Metadata API call per base; the token must be able to see the base.
-- Forms, automations and Workfront tables exist in the schema for later stages. This stage builds no features for them. Mapping fields to Workfront Planning and loading the saved records into Workfront Planning in batches of 100 are also later stages.
+- The Workfront tables (`workfront_fields`, `field_crosswalk`) exist in the schema for the later mapping stage. Stages 2 and 3 only read them, for their target reports. Mapping fields to Workfront Planning and loading the saved records into Workfront Planning in batches of 100 are also later stages.
 
 ## License
 

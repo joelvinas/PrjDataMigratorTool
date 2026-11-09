@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Apply the migrations (001 to 004) to an existing database. Standard library only.
+"""Apply the migrations (001 to 006) to an existing database. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
 Adds only the columns and tables that are missing, so it is safe to run more than once and on a database that is already
-up to date. It never drops or changes data. Back up the file first if it matters to you."""
+up to date. It never changes data. The only drops are the removal of the empty placeholder tables form_sections and form_fields (migration 005) and automation_catalog and automation_steps (migration 006); a placeholder that has rows is kept and reported. Back up the file first if it matters to you."""
 import os, re, sqlite3, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +28,16 @@ def main():
     tables_before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.executescript(open(os.path.join(HERE, "migration_003_add_tables_and_views.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_004_add_attachment_stats.sql"), encoding="utf-8").read())
+    conn.executescript(open(os.path.join(HERE, "migration_005_add_form_specs.sql"), encoding="utf-8").read())
+    conn.executescript(open(os.path.join(HERE, "migration_006_add_automation_specs.sql"), encoding="utf-8").read())
+    dropped, kept = [], []
+    for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():
+            if conn.execute('SELECT COUNT(*) FROM "%s"' % old).fetchone()[0] == 0:
+                conn.execute('DROP TABLE "%s"' % old)
+                dropped.append(old)
+            else:
+                kept.append(old)
     new_tables = sorted({r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} - tables_before)
     conn.commit()
     conn.close()
@@ -35,7 +45,11 @@ def main():
         print("Added %d column(s): %s" % (len(added), ", ".join(added)))
     if new_tables:
         print("Added table(s): %s" % ", ".join(new_tables))
-    if not added and not new_tables:
+    if dropped:
+        print("Dropped empty placeholder table(s): %s" % ", ".join(dropped))
+    if kept:
+        print("Kept %s: they contain rows. The app no longer uses them; remove them by hand when you are sure." % ", ".join(kept))
+    if not added and not new_tables and not dropped:
         print("Already up to date.")
 
 

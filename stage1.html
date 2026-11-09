@@ -3,44 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Airtable Migration Control Plane</title>
-<link rel="stylesheet" href="style.css">
+<title>Stage 1: Data - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body data-page="stage1">
 <header class="topbar">
-  <h1>Airtable &rarr; Workfront Planning: migration control plane <span class="stage">Stage 1</span></h1>
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
   <div class="badges">
     <span id="tokenBadge" class="badge">Token: checking...</span>
     <span id="dbBadge" class="badge">Database: not connected</span>
   </div>
 </header>
-
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
 <div id="setupBanner" class="banner error" hidden></div>
 <div id="globalError" class="banner error" hidden></div>
-
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
 <main>
-<!-- STEP 1 -->
-<section class="card" id="step1">
-  <h2><span class="num">1</span> Connect to database</h2>
-  <p class="hint">Enter the path of a SQLite file. A relative path is resolved next to <code>server.py</code>.</p>
-  <div class="row">
-    <input id="dbPath" type="text" class="wide" placeholder="db/migration.db" autocomplete="off">
-    <button id="btnConnect" class="primary">Connect</button>
-  </div>
-  <div id="dbMessage" class="msg"></div>
-  <div id="dbActions" class="row" hidden>
-    <button id="btnCreate"></button>
-  </div>
-  <table id="countsTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th class="num">Rows</th></tr></thead>
-    <tbody></tbody>
-  </table>
-</section>
-
-<!-- STEP 2 -->
-<section class="card" id="step2">
-  <h2><span class="num">2</span> Confirm token and enter base ID</h2>
-  <p>Airtable token configured in <code>config.json</code>: <strong id="tokenYesNo">...</strong></p>
+<section class="card context" id="baseStrip">
   <div class="row">
     <label for="baseId">Base ID</label>
     <div class="combo" id="baseCombo">
@@ -49,9 +30,8 @@
       <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
     </div>
   </div>
-  <p class="hint">Run steps 3 to 5 once for each base. The token never appears in this page.</p>
+  <p class="hint">Run steps 3 to 5 once for each base. The database and token are set on <a href="/setup">Setup</a>; the token never appears in this page.</p>
 </section>
-
 <!-- STEP 3 -->
 <section class="card" id="step3">
   <h2><span class="num">3</span> Ingest schema</h2>
@@ -121,7 +101,7 @@
 <!-- STEP 5 -->
 <section class="card" id="step5">
   <h2><span class="num">5</span> Run profiling</h2>
-  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them. Values are written to disk only if you tick "Also save every record" below (see step 6).</p>
+  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them. Values are written to disk only if you tick "Also save every record" below (see step 6). Every call is recorded on the <a href="/log">API call log</a> page.</p>
   <div class="row">
     <label for="scope">Run</label>
     <select id="scope">
@@ -191,23 +171,10 @@
   </div>
   <div id="exMessage" class="msg"></div>
 </section>
-
-<!-- API LOG -->
-<section class="card" id="logCard">
-  <h2>API call log</h2>
-  <div class="row">
-    <label><input type="checkbox" id="logFail"> Failures only</label>
-    <select id="logTable"><option value="">All tables</option></select>
-    <select id="logPurpose"><option value="">All purposes</option></select>
-    <button id="btnLog">Refresh</button>
-  </div>
-  <div id="logSummary" class="msg"></div>
-  <div class="scroll"><table id="logTableEl" class="grid compact">
-    <thead><tr><th>Time (UTC)</th><th>Purpose</th><th>Endpoint</th><th>Table</th><th class="num">Try</th><th class="num">Status</th><th>OK</th><th class="num">ms</th><th class="num">Records</th><th>Error</th></tr></thead>
-    <tbody></tbody>
-  </table></div>
-</section>
 </main>
-<script src="scripts.js"></script>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/stage1.js"></script>
 </body>
 </html>

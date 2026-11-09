@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="setup">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<main>
+<!-- STEP 1 -->
+<section class="card" id="step1">
+  <h2><span class="num">1</span> Connect to database</h2>
+  <p class="hint">Enter the path of a SQLite file. A relative path is resolved next to <code>server.py</code>.</p>
+  <div class="row">
+    <input id="dbPath" type="text" class="wide" placeholder="db/migration.db" autocomplete="off">
+    <button id="btnConnect" class="primary">Connect</button>
+  </div>
+  <div id="dbMessage" class="msg"></div>
+  <div id="dbActions" class="row" hidden>
+    <button id="btnCreate"></button>
+  </div>
+  <table id="countsTable" class="grid compact" hidden>
+    <thead><tr><th>Table</th><th class="num">Rows</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- STEP 2 -->
+<section class="card" id="step2">
+  <h2><span class="num">2</span> Confirm token and enter base ID</h2>
+  <p>Airtable token configured in <code>config.json</code>: <strong id="tokenYesNo">...</strong></p>
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+  </div>
+  <p class="hint">Run steps 3 to 5 on <a href="/stage1">Stage 1</a> once for each base; the base chosen here is carried to the other pages. The token never appears in any page.</p>
+</section>
+
+<section class="card" id="stageList">
+  <h2>Stages</h2>
+  <p class="hint">Do Setup first, then work down the list. The left panel is the same on every page.</p>
+  <table class="grid compact stages">
+    <thead><tr><th>Page</th><th>What it does</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td><a href="/stage1">Stage 1: Data</a></td><td>Ingest the schema, review the load order, profile the data, save records and attachments (steps 3 to 6)</td><td>Built</td></tr>
+      <tr><td><a href="/stage2">Stage 2: Forms</a></td><td>Record Airtable forms (structure, logic, hidden fields, links) and rebuild them in Workfront Planning</td><td>Built (manual recorder)</td></tr>
+      <tr><td><a href="/stage3">Stage 3: Automations</a></td><td>Catalog Airtable automations for rebuilding as Workfront Fusion scenarios</td><td>Not started</td></tr>
+      <tr><td>Stage 4: Map and load</td><td>Field crosswalk and loading records into Workfront Planning</td><td>Planned</td></tr>
+      <tr><td><a href="/log">API call log</a></td><td>Every call to Airtable, kept for auditing</td><td>Built</td></tr>
+    </tbody>
+  </table>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/setup.js"></script>
+</body>
+</html>

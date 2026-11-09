@@ -66,7 +66,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.10"
+APP_VERSION = "1.13"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -193,48 +193,135 @@ CREATE TABLE field_crosswalk (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 
--- 4. Custom Form Structure & Section-Level Field Placement
-CREATE TABLE form_sections (
-    form_id TEXT NOT NULL,
+-- 4. Stage 2 Form Recorder (one versioned JSON spec per save, plus tables rebuilt from it for queries)
+CREATE TABLE form_specs (
+    spec_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    form_id TEXT NOT NULL,          -- the form key: an Airtable form view ID, or a name you chose
+    version_no INTEGER NOT NULL,    -- 1, 2, 3 ... one row per saved version, never edited
     form_name TEXT NOT NULL,
-    section_id TEXT NOT NULL,
-    section_name TEXT NOT NULL,
-    placement_order INTEGER NOT NULL,
-    PRIMARY KEY (form_id, section_id)
+    base_id TEXT,
+    table_id TEXT,
+    view_id TEXT,                   -- the Airtable form view this was recorded from, if any
+    version_note TEXT,
+    spec_json TEXT NOT NULL,        -- the whole recorded form (the audit record). The tables below are rebuilt from it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (form_id, version_no)
 );
+CREATE INDEX idx_form_specs_form ON form_specs(form_id);
 
-CREATE TABLE form_fields (
-    form_id TEXT NOT NULL,
-    section_id TEXT NOT NULL,
-    airtable_field_id TEXT NOT NULL,
-    workfront_dev_field_id TEXT,
-    workfront_prod_field_id TEXT,
-    field_order INTEGER NOT NULL,
+CREATE TABLE form_items (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    parent_item_id TEXT,            -- the containing section, NULL at the top level
+    item_order INTEGER NOT NULL,    -- position in document order across the whole form
+    path TEXT NOT NULL,             -- for example 2.1.3 (1-based, among siblings)
+    item_type TEXT NOT NULL CHECK(item_type IN ('section', 'field', 'hidden_field', 'heading', 'help_text', 'text_block')),
+    title TEXT,                     -- section title, heading text, or a field's custom label
+    content_md TEXT,                -- section description, field help text, help text or text block (Markdown)
+    airtable_field_id TEXT,         -- field and hidden_field items
     is_required INTEGER DEFAULT 0,
-    PRIMARY KEY (form_id, section_id, airtable_field_id),
-    FOREIGN KEY (form_id, section_id) REFERENCES form_sections(form_id, section_id)
+    preset_value TEXT,              -- hidden_field: the value the form link presets
+    preset_source TEXT,             -- hidden_field: where the value comes from (URL parameter, default, ...)
+    PRIMARY KEY (spec_id, item_id),
+    FOREIGN KEY (spec_id) REFERENCES form_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_form_items_field ON form_items(airtable_field_id);
+
+CREATE TABLE form_logic (
+    spec_id INTEGER NOT NULL,
+    owner_item_id TEXT NOT NULL,    -- the section or item the rule belongs to
+    logic_kind TEXT NOT NULL CHECK(logic_kind IN ('display', 'skip')),
+    junction TEXT NOT NULL CHECK(junction IN ('AND', 'OR')),
+    cond_order INTEGER NOT NULL,
+    controlling_field_id TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    value TEXT,
+    skip_to_item_id TEXT,           -- skip rules only: a later section's item_id, 'END', or NULL for just skipping this section
+    PRIMARY KEY (spec_id, owner_item_id, logic_kind, cond_order),
+    FOREIGN KEY (spec_id) REFERENCES form_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_form_logic_field ON form_logic(controlling_field_id);
+
+CREATE TABLE form_links (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,          -- 'form' for the form description
+    text_role TEXT NOT NULL,        -- description, help or content
+    ordinal INTEGER NOT NULL,       -- order of the link inside that text
+    link_text TEXT NOT NULL,        -- what the person sees
+    url TEXT NOT NULL,              -- the real address, verbatim
+    PRIMARY KEY (spec_id, item_id, text_role, ordinal),
+    FOREIGN KEY (spec_id) REFERENCES form_specs(spec_id) ON DELETE CASCADE
 );
 
--- 5. Automation Catalog & Action Steps (Airtable -> Workfront Fusion)
-CREATE TABLE automation_catalog (
-    automation_id TEXT PRIMARY KEY,
+-- 5. Stage 3 Automation Recorder (one versioned JSON spec per save, plus tables rebuilt from it for queries)
+CREATE TABLE automation_specs (
+    spec_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    automation_id TEXT NOT NULL,    -- the automation key: a name-based key you chose
+    version_no INTEGER NOT NULL,    -- 1, 2, 3 ... one row per saved version, never edited
     automation_name TEXT NOT NULL,
-    source_system TEXT DEFAULT 'Airtable',
-    trigger_type TEXT NOT NULL,
-    target_fusion_scenario_name TEXT,
-    notes TEXT
+    base_id TEXT,
+    trigger_type TEXT,
+    target_scenario_name TEXT,      -- the Workfront Fusion scenario this will become
+    version_note TEXT,
+    spec_json TEXT NOT NULL,        -- the whole recorded automation (the audit record). The tables below are rebuilt from it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (automation_id, version_no)
+);
+CREATE INDEX idx_automation_specs_key ON automation_specs(automation_id);
+
+CREATE TABLE automation_items (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,          -- 'trigger', or the step or branch id within the spec
+    parent_item_id TEXT,            -- the containing step (for a branch) or branch/repeat/NULL (for a step)
+    item_order INTEGER NOT NULL,    -- position in document order across the whole automation (the trigger is 0)
+    path TEXT NOT NULL,             -- 0 for the trigger, then for example 2, 2.1, 2.1.3
+    item_kind TEXT NOT NULL CHECK(item_kind IN ('trigger', 'step', 'branch')),
+    step_type TEXT,                 -- trigger type, action type, 'conditional', 'repeat' or 'branch'
+    title TEXT,
+    content_md TEXT,                -- the description (Markdown)
+    table_id TEXT,                  -- the Airtable table the item works on, if any
+    record_source TEXT,             -- update steps: which earlier step's record is updated (NULL = the trigger record)
+    PRIMARY KEY (spec_id, item_id),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
 );
 
-CREATE TABLE automation_steps (
-    step_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    automation_id TEXT NOT NULL,
-    step_order INTEGER NOT NULL,
-    action_type TEXT NOT NULL,
-    referenced_airtable_field_id TEXT,
-    referenced_workfront_dev_field_id TEXT,
-    referenced_workfront_prod_field_id TEXT,
-    step_logic_description TEXT,
-    FOREIGN KEY (automation_id) REFERENCES automation_catalog(automation_id)
+CREATE TABLE automation_logic (
+    spec_id INTEGER NOT NULL,
+    owner_item_id TEXT NOT NULL,    -- the trigger, find step or branch the condition group belongs to
+    node_path TEXT NOT NULL,        -- position in the nested group: 0 is the root group, 0.1 its second item, 0.1.0 and so on
+    node_kind TEXT NOT NULL CHECK(node_kind IN ('group', 'condition')),
+    junction TEXT,                  -- groups: AND or OR
+    controlling_field_id TEXT,      -- conditions on an Airtable field
+    source_item_id TEXT,            -- which record the field is read from: NULL = the trigger record, else an earlier step
+    left_text TEXT,                 -- conditions on something that is not a field (a step output, a date, ...)
+    operator TEXT,
+    value TEXT,
+    PRIMARY KEY (spec_id, owner_item_id, node_path),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_automation_logic_field ON automation_logic(controlling_field_id);
+
+CREATE TABLE automation_field_refs (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    ref_order INTEGER NOT NULL,
+    field_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('condition', 'set', 'read', 'use', 'watch')),
+    detail TEXT,                    -- the value a field is set to, or how it is used
+    PRIMARY KEY (spec_id, item_id, ref_order),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_automation_field_refs_field ON automation_field_refs(field_id);
+
+CREATE TABLE automation_links (
+    spec_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,          -- 'automation' for the automation description
+    text_role TEXT NOT NULL,        -- description, or setting:<name>
+    ordinal INTEGER NOT NULL,       -- order of the link inside that text
+    link_text TEXT NOT NULL,        -- what the person sees
+    url TEXT NOT NULL,              -- the real address, verbatim
+    PRIMARY KEY (spec_id, item_id, text_role, ordinal),
+    FOREIGN KEY (spec_id) REFERENCES automation_specs(spec_id) ON DELETE CASCADE
 );
 
 -- 6. Dependency Matrix & Data Ingestion Load Order
@@ -2653,12 +2740,1558 @@ def api_export_field_options(q):
 
 
 # --------------------------------------------------------------------------
+# Stage 2: form recorder. A form is recorded by hand (Airtable's API does not return form layout or logic) as one
+# JSON spec per saved version. The spec is the audit record; form_items, form_logic and form_links are rebuilt from it
+# on every save so fields, logic and links can be queried. Text is Markdown (bold, italic, links, lists), parsed here
+# once so the editor preview, the stored spec, the link list and the reports all agree.
+# --------------------------------------------------------------------------
+SPEC_FORMAT = "form-spec/1"
+ITEM_TYPES = ("section", "field", "hidden_field", "heading", "help_text", "text_block")
+LOGIC_OPERATORS = {"equals": "is exactly", "notEquals": "is not", "contains": "contains",
+                   "doesNotContain": "does not contain", "isEmpty": "is empty", "isNotEmpty": "is not empty"}
+NO_VALUE_OPERATORS = ("isEmpty", "isNotEmpty")
+LINK_OK = re.compile(r"^(https?://|mailto:|tel:)[^\s<>\"']+$", re.I)
+FORM_KEY_OK = re.compile(r"^[A-Za-z0-9_.\- ]{1,100}$")
+ITEM_ID_OK = re.compile(r"^[A-Za-z0-9_\-]{1,40}$")
+MAX_TEXT = 20000
+MAX_ITEMS = 5000
+BULLET = re.compile(r"^\s*[-*+]\s+(.*)$")
+ORDERED = re.compile(r"^\s*\d+[.)]\s+(.*)$")
+
+
+def _merge_runs(runs):
+    out = []
+    for r in runs:
+        if not r["t"]:
+            continue
+        if out and out[-1]["b"] == r["b"] and out[-1]["i"] == r["i"] and out[-1]["href"] == r["href"]:
+            out[-1]["t"] += r["t"]
+        else:
+            out.append(dict(r))
+    return out
+
+
+def _find_closing_paren(s, start):
+    """Index of the ')' that closes a link address starting at s[start], allowing balanced () inside it
+    (Wikipedia links such as .../Foo_(bar) need that). -1 if none."""
+    depth = 0
+    for k in range(start, len(s)):
+        c = s[k]
+        if c.isspace():
+            return -1
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                return k
+            depth -= 1
+    return -1
+
+
+def parse_inline(s, bold=False, italic=False, href=None, warnings=None):
+    """Markdown subset -> runs [{"t","b","i","href"}]. Supports **bold**, *italic*, [text](address), backslash escapes."""
+    runs, buf, i, n = [], [], 0, len(s)
+
+    def flush():
+        if buf:
+            runs.append({"t": "".join(buf), "b": bold, "i": italic, "href": href})
+            del buf[:]
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n and s[i + 1] in "\\*[]()_":
+            buf.append(s[i + 1])
+            i += 2
+            continue
+        if c == "*" and s.startswith("**", i):
+            j = s.find("**", i + 2)
+            if j > i + 2:
+                flush()
+                runs.extend(parse_inline(s[i + 2:j], True, italic, href, warnings))
+                i = j + 2
+                continue
+        elif c == "*":
+            j = i + 1
+            while j < n and not (s[j] == "*" and s[j - 1] != "\\" and not s.startswith("**", j) and s[j - 1] != "*"):
+                j += 1
+            if j < n and j > i + 1:
+                flush()
+                runs.extend(parse_inline(s[i + 1:j], bold, True, href, warnings))
+                i = j + 1
+                continue
+        elif c == "[" and href is None:
+            depth, j = 0, i
+            while j < n:
+                if s[j] == "\\":
+                    j += 2
+                    continue
+                if s[j] == "[":
+                    depth += 1
+                elif s[j] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j < n and s.startswith("](", j):
+                close = _find_closing_paren(s, j + 2)
+                if close > 0:
+                    url = s[j + 2:close].strip()
+                    inner = s[i + 1:j]
+                    flush()
+                    if LINK_OK.match(url):
+                        runs.extend(parse_inline(inner, bold, italic, url, warnings))
+                    else:
+                        if warnings is not None:
+                            warnings.append("unsupported link address: %s" % _short(url, 60))
+                        runs.extend(parse_inline(inner, bold, italic, None, None))
+                    i = close + 1
+                    continue
+        buf.append(c)
+        i += 1
+    flush()
+    return _merge_runs(runs)
+
+
+def parse_rich(md, warnings=None):
+    """Markdown text -> blocks [{"type": "p", "runs"} | {"type": "ul"|"ol", "items": [runs, ...]}]."""
+    md = (md or "").replace("\r\n", "\n").replace("\r", "\n")
+    blocks, para = [], []
+
+    def end_para():
+        if para:
+            blocks.append({"type": "p", "runs": parse_inline("\n".join(para), warnings=warnings)})
+            del para[:]
+    for line in md.split("\n"):
+        if not line.strip():
+            end_para()
+            continue
+        m_b, m_o = BULLET.match(line), ORDERED.match(line)
+        if m_b or m_o:
+            end_para()
+            kind = "ul" if m_b else "ol"
+            runs = parse_inline((m_b or m_o).group(1), warnings=warnings)
+            if blocks and blocks[-1]["type"] == kind:
+                blocks[-1]["items"].append(runs)
+            else:
+                blocks.append({"type": kind, "items": [runs]})
+        else:
+            para.append(line.rstrip())
+    end_para()
+    return blocks
+
+
+def blocks_links(blocks):
+    """[(visible text, address)] in order. Neighbouring runs with one address (for example bold inside a link) are one link."""
+    links = []
+
+    def scan(runs):
+        cur = None
+        for r in runs:
+            if r["href"]:
+                if cur and cur[1] == r["href"]:
+                    cur[0] += r["t"]
+                else:
+                    cur = [r["t"], r["href"]]
+                    links.append(cur)
+            else:
+                cur = None
+    for b in blocks:
+        if b["type"] == "p":
+            scan(b["runs"])
+        else:
+            for it in b["items"]:
+                scan(it)
+    return [(t, u) for t, u in links]
+
+
+def runs_html(runs):
+    out = []
+    for r in runs:
+        text = esc(r["t"]).replace("\n", "<br>")
+        if r["b"]:
+            text = "<strong>%s</strong>" % text
+        if r["i"]:
+            text = "<em>%s</em>" % text
+        if r["href"]:
+            text = '<a href="%s" rel="noopener noreferrer">%s</a>' % (esc(r["href"]), text)
+        out.append(text)
+    return "".join(out)
+
+
+def _runs_with_urls(runs):
+    """Report HTML for runs: a link shows its visible text and, beside it, the real address."""
+    parts, i = [], 0
+    while i < len(runs):
+        r = runs[i]
+        if r["href"]:
+            j = i
+            while j + 1 < len(runs) and runs[j + 1]["href"] == r["href"]:
+                j += 1
+            parts.append(runs_html(runs[i:j + 1]) + ' <span class="url">(%s)</span>' % esc(r["href"]))
+            i = j + 1
+        else:
+            parts.append(runs_html([r]))
+            i += 1
+    return "".join(parts)
+
+
+def blocks_html(blocks):
+    out = []
+    for b in blocks:
+        if b["type"] == "p":
+            out.append("<p>%s</p>" % _runs_with_urls(b["runs"]))
+        else:
+            out.append("<%s>%s</%s>" % (b["type"], "".join("<li>%s</li>" % _runs_with_urls(it) for it in b["items"]), b["type"]))
+    return "".join(out)
+
+
+def api_forms_preview(body):
+    texts = body.get("texts")
+    if not isinstance(texts, list) or len(texts) > 50:
+        raise AppError("Send 'texts' as a list of up to 50 strings.")
+    out = []
+    for t in texts:
+        w = []
+        blocks = parse_rich(str(t)[:MAX_TEXT], w)
+        out.append({"blocks": blocks, "warnings": list(dict.fromkeys(w)), "links": [{"text": a, "url": b} for a, b in blocks_links(blocks)]})
+    return {"previews": out}
+
+
+# ---------- validation and normalisation of a submitted spec ----------
+def _logic_clean(raw, kind):
+    raw = raw if isinstance(raw, dict) else {}
+    on = bool(raw.get("enabled"))
+    out = {"enabled": on, "junction": "OR" if raw.get("junction") == "OR" else "AND", "conditions": []}
+    if kind == "skip":
+        out["skip_to"] = ""
+    if not on:
+        return out
+    for c in raw.get("conditions") or []:
+        c = c if isinstance(c, dict) else {}
+        op = c.get("operator")
+        out["conditions"].append({"field_id": str(c.get("field_id") or ""), "operator": op if op in LOGIC_OPERATORS else "",
+                                  "value": "" if op in NO_VALUE_OPERATORS else str(c.get("value") or "")[:2000]})
+    if kind == "skip":
+        out["skip_to"] = str(raw.get("skip_to") or "")
+    return out
+
+
+def normalize_form(conn, body):
+    """Validate a submitted form. Returns (meta, spec, flat items). Raises AppError listing the problems (up to 12)."""
+    problems = []
+
+    def bad(msg):
+        if len(problems) < 12:
+            problems.append(msg)
+    form = body.get("form") if isinstance(body.get("form"), dict) else {}
+    form_id = str(form.get("form_id") or "").strip()
+    form_name = str(form.get("form_name") or "").strip()
+    if not FORM_KEY_OK.match(form_id):
+        bad("The form key must be 1 to 100 letters, digits, spaces, dots, dashes or underscores.")
+    if not form_name or len(form_name) > 200:
+        bad("Give the form a name (up to 200 characters).")
+    view_id = str(form.get("view_id") or "").strip()
+    base_id = str(form.get("base_id") or "").strip()
+    table_id = str(form.get("table_id") or "").strip()
+    if view_id:
+        v = conn.execute("SELECT base_id, table_id FROM airtable_views WHERE view_id=?", (view_id,)).fetchone()
+        if not v:
+            bad("The Airtable view %s is not in the database. Ingest that base's schema first, or clear the view." % view_id)
+        else:
+            base_id, table_id = v["base_id"], v["table_id"]
+    if not base_id:
+        bad("Choose the base this form belongs to.")
+    fields = {}
+    if base_id:
+        for r in conn.execute("SELECT field_id, table_id, table_name, field_name FROM airtable_fields WHERE base_id=?", (base_id,)):
+            fields[r["field_id"]] = r
+        if not fields:
+            bad("Base %s has no fields in the database. Ingest its schema in Stage 1 first." % base_id)
+        elif table_id and not any(f["table_id"] == table_id for f in fields.values()):
+            bad("Table %s is not in base %s." % (table_id, base_id))
+    prior = conn.execute("SELECT base_id FROM form_specs WHERE form_id=? ORDER BY version_no DESC LIMIT 1", (form_id,)).fetchone()
+    if prior and prior["base_id"] and base_id and prior["base_id"] != base_id:
+        bad("The form key %s is already used by a form in base %s. Choose another key." % (form_id, prior["base_id"]))
+
+    def text(raw, limit, label, where):
+        s = "" if raw is None else str(raw)
+        if len(s) > limit:
+            bad("%s: %s is too long (limit %d characters)." % (where, label, limit))
+        return s[:limit]
+
+    def rich(raw, label, where):
+        md = text(raw, MAX_TEXT, label, where)
+        w = []
+        blocks = parse_rich(md, w)
+        for m in dict.fromkeys(w):
+            bad("%s: %s has an %s. Links must start with http://, https://, mailto: or tel:." % (where, label, m))
+        return md, blocks
+
+    flat, seen_ids, placed = [], set(), {}
+
+    def walk(raw_items, parent_id, parent_path):
+        out = []
+        for idx, it in enumerate(raw_items if isinstance(raw_items, list) else []):
+            if len(flat) >= MAX_ITEMS:
+                bad("A form can have at most %d items." % MAX_ITEMS)
+                return out
+            it = it if isinstance(it, dict) else {}
+            path = (parent_path + "." if parent_path else "") + str(idx + 1)
+            where = "Item %s" % path
+            typ = it.get("type")
+            iid = str(it.get("id") or "")
+            if typ not in ITEM_TYPES:
+                bad("%s has an unknown type." % where)
+                continue
+            if not ITEM_ID_OK.match(iid) or iid in seen_ids:
+                bad("%s has a missing or repeated id (reload the page and try again)." % where)
+                continue
+            seen_ids.add(iid)
+            n = {"id": iid, "type": typ}
+            rec = {"item": n, "path": path, "parent": parent_id, "order": len(flat)}
+            flat.append(rec)
+            if typ == "section":
+                n["title"] = text(it.get("title"), 300, "the title", where).strip()
+                if not n["title"]:
+                    bad("%s is a section with no title." % where)
+                n["description_md"], n["description_blocks"] = rich(it.get("description_md"), "the description", where)
+                n["display_logic"] = _logic_clean(it.get("display_logic"), "display")
+                n["skip_logic"] = _logic_clean(it.get("skip_logic"), "skip")
+                n["items"] = walk(it.get("items"), iid, path)
+            elif typ in ("field", "hidden_field"):
+                fid = str(it.get("field_id") or "")
+                n["field_id"] = fid
+                f = fields.get(fid)
+                if not f:
+                    bad("%s uses a field that is not in base %s (%s)." % (where, base_id, fid or "none chosen"))
+                elif table_id and f["table_id"] != table_id:
+                    bad("%s: field %s is in table %s, but this form's table is %s." % (where, f["field_name"], f["table_name"], table_id))
+                if fid in placed:
+                    bad("%s: field %s already appears at item %s. A field can be placed once." % (where, f["field_name"] if f else fid, placed[fid]))
+                elif fid:
+                    placed[fid] = path
+                if typ == "field":
+                    n["label"] = text(it.get("label"), 300, "the label", where).strip()
+                    n["required"] = bool(it.get("required"))
+                    n["help_md"], n["help_blocks"] = rich(it.get("help_md"), "the help text", where)
+                    n["display_logic"] = _logic_clean(it.get("display_logic"), "display")
+                else:
+                    n["preset_value"] = text(it.get("preset_value"), 2000, "the preset value", where)
+                    n["preset_source"] = text(it.get("preset_source"), 300, "the value source", where).strip()
+                    n["note"] = text(it.get("note"), 2000, "the note", where)
+            elif typ == "heading":
+                n["text"] = text(it.get("text"), 300, "the heading", where).strip()
+                if not n["text"]:
+                    bad("%s is a heading with no text." % where)
+                n["display_logic"] = _logic_clean(it.get("display_logic"), "display")
+            else:
+                n["content_md"], n["content_blocks"] = rich(it.get("content_md"), "the text", where)
+                if not n["content_md"].strip():
+                    bad("%s is %s with no text." % (where, "help text" if typ == "help_text" else "a text block"))
+                n["display_logic"] = _logic_clean(it.get("display_logic"), "display")
+            out.append(n)
+        return out
+    items = walk(body.get("items"), None, "")
+    d_md, d_blocks = rich(form.get("description_md"), "the form description", "Form")
+    # logic: controlling fields must be fields or hidden fields placed EARLIER in the form
+    order_of = {r["item"]["id"]: r["order"] for r in flat}
+    field_item_order = {r["item"]["field_id"]: r["order"] for r in flat if r["item"]["type"] in ("field", "hidden_field")}
+
+    def last_order(n):
+        o = order_of[n["id"]]
+        for c in n.get("items", []):
+            o = max(o, last_order(c))
+        return o
+    section_end = {r["item"]["id"]: last_order(r["item"]) for r in flat if r["item"]["type"] == "section"}
+    for r in flat:
+        n = r["item"]
+        for kind, key in (("display", "display_logic"), ("skip", "skip_logic")):
+            lg = n.get(key)
+            if not lg or not lg["enabled"]:
+                continue
+            where = "%s on item %s" % ("Display logic" if kind == "display" else "Skip logic", r["path"])
+            if not lg["conditions"]:
+                bad("%s has no conditions. Add one or switch it off." % where)
+            for c in lg["conditions"]:
+                if not c["operator"]:
+                    bad("%s has a condition with no operator." % where)
+                fo = field_item_order.get(c["field_id"])
+                if fo is None:
+                    bad("%s: a condition uses a field that is not placed on this form (visible or hidden)." % where)
+                elif fo >= r["order"]:
+                    nm = fields[c["field_id"]]["field_name"] if c["field_id"] in fields else c["field_id"]
+                    bad("%s: field %s does not appear before it. Logic can only use earlier fields." % (where, nm))
+            if kind == "skip":
+                st = lg.get("skip_to") or ""
+                if st and st != "END" and (st not in section_end or order_of[st] <= section_end[n["id"]]):
+                    bad("%s: 'skip to' must be a later section or the end of the form." % where)
+    if problems:
+        raise AppError(" ".join(problems), extra={"problems": problems})
+    meta = {"form_id": form_id, "form_name": form_name, "base_id": base_id, "table_id": table_id or None, "view_id": view_id or None}
+    spec = {"format": SPEC_FORMAT, "form": dict(meta, description_md=d_md, description_blocks=d_blocks), "items": items}
+    return meta, spec, flat
+
+
+def _canon_spec(spec):
+    return json.dumps(spec, sort_keys=True, separators=(",", ":"))
+
+
+def api_forms_save(body):
+    note = str(body.get("note") or "").strip()[:500]
+    with db() as conn:
+        meta, spec, flat = normalize_form(conn, body)
+        last = conn.execute("SELECT spec_id, version_no, spec_json FROM form_specs WHERE form_id=? ORDER BY version_no DESC LIMIT 1",
+                            (meta["form_id"],)).fetchone()
+        if last and _canon_spec(json.loads(last["spec_json"])) == _canon_spec(spec):
+            return {"unchanged": True, "version_no": last["version_no"], "form_id": meta["form_id"]}
+        ver = (last["version_no"] if last else 0) + 1
+        with conn:
+            cur = conn.execute("""INSERT INTO form_specs(form_id, version_no, form_name, base_id, table_id, view_id, version_note, spec_json, created_at)
+                                  VALUES (?,?,?,?,?,?,?,?,?)""",
+                               (meta["form_id"], ver, meta["form_name"], meta["base_id"], meta["table_id"], meta["view_id"], note,
+                                json.dumps(spec), utc_now()[:19]))
+            sid = cur.lastrowid
+            for r in flat:
+                n = r["item"]
+                title = n.get("title") or n.get("text") or n.get("label") or None
+                content = n.get("description_md") or n.get("help_md") or n.get("content_md") or None
+                conn.execute("""INSERT INTO form_items(spec_id, item_id, parent_item_id, item_order, path, item_type, title, content_md,
+                                airtable_field_id, is_required, preset_value, preset_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                             (sid, n["id"], r["parent"], r["order"], r["path"], n["type"], title, content, n.get("field_id"),
+                              1 if n.get("required") else 0, n.get("preset_value"), n.get("preset_source")))
+                for kind, key in (("display", "display_logic"), ("skip", "skip_logic")):
+                    lg = n.get(key)
+                    if lg and lg["enabled"]:
+                        for k, c in enumerate(lg["conditions"]):
+                            conn.execute("""INSERT INTO form_logic(spec_id, owner_item_id, logic_kind, junction, cond_order, controlling_field_id,
+                                            operator, value, skip_to_item_id) VALUES (?,?,?,?,?,?,?,?,?)""",
+                                         (sid, n["id"], kind, lg["junction"], k, c["field_id"], c["operator"], c["value"],
+                                          (lg.get("skip_to") or None) if kind == "skip" else None))
+                for role, key in (("description", "description_blocks"), ("help", "help_blocks"), ("content", "content_blocks")):
+                    for k, (t, u) in enumerate(blocks_links(n.get(key) or [])):
+                        conn.execute("INSERT INTO form_links(spec_id, item_id, text_role, ordinal, link_text, url) VALUES (?,?,?,?,?,?)",
+                                     (sid, n["id"], role, k, t, u))
+            for k, (t, u) in enumerate(blocks_links(spec["form"]["description_blocks"])):
+                conn.execute("INSERT INTO form_links(spec_id, item_id, text_role, ordinal, link_text, url) VALUES (?,'form','description',?,?,?)",
+                             (sid, k, t, u))
+    return {"unchanged": False, "version_no": ver, "form_id": meta["form_id"], "items": len(flat)}
+
+
+def api_forms_list(_q=None):
+    with db() as conn:
+        rows = conn.execute("""SELECT s.form_id, s.form_name, s.base_id, s.table_id, s.view_id, s.version_no AS latest_version,
+                                      s.created_at, (SELECT COUNT(*) FROM form_specs x WHERE x.form_id = s.form_id) AS versions
+                               FROM form_specs s WHERE s.version_no = (SELECT MAX(version_no) FROM form_specs WHERE form_id = s.form_id)
+                               ORDER BY lower(s.form_name), s.form_id""").fetchall()
+    return {"forms": [dict(r) for r in rows]}
+
+
+def _load_spec(conn, q):
+    form_id = (q.get("form_id") or [""])[0]
+    ver = (q.get("version") or [""])[0]
+    if ver:
+        try:
+            ver = int(ver)
+        except ValueError:
+            raise AppError("version must be a number.")
+        row = conn.execute("SELECT * FROM form_specs WHERE form_id=? AND version_no=?", (form_id, ver)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM form_specs WHERE form_id=? ORDER BY version_no DESC LIMIT 1", (form_id,)).fetchone()
+    if not row:
+        raise AppError("That form or version was not found.", 404)
+    return row
+
+
+def api_forms_spec(q):
+    with db() as conn:
+        row = _load_spec(conn, q)
+        versions = conn.execute("SELECT version_no, version_note, created_at FROM form_specs WHERE form_id=? ORDER BY version_no DESC",
+                                (row["form_id"],)).fetchall()
+    return {"form_id": row["form_id"], "version_no": row["version_no"], "created_at": row["created_at"],
+            "version_note": row["version_note"], "spec": json.loads(row["spec_json"]), "versions": [dict(v) for v in versions]}
+
+
+# ---------- field usage across forms ----------
+USAGE_COLUMNS = ["base_id", "form_id", "form_name", "version_no", "field_id", "field_name", "table_name", "data_type", "role",
+                 "item_path", "detail", "workfront_dev_field_id", "workfront_prod_field_id"]
+ROLE_LABELS = {"placed": "placed on the form", "required": "required", "hidden_preset": "hidden / preset",
+               "display_logic": "controls display logic", "skip_logic": "controls skip logic"}
+
+
+def form_usage_rows(conn, q):
+    all_versions = (q.get("all_versions") or [""])[0] == "1"
+    field_id = (q.get("field_id") or [""])[0]
+    text_q = (q.get("q") or [""])[0].strip().lower()
+    form_id = (q.get("form_id") or [""])[0]
+    base_id = (q.get("base_id") or [""])[0]
+    role_f = (q.get("role") or [""])[0]
+    cur = "" if all_versions else " AND s.version_no = (SELECT MAX(version_no) FROM form_specs WHERE form_id = s.form_id)"
+    cw = {}
+    for r in conn.execute("SELECT airtable_field_id, workfront_dev_field_id, workfront_prod_field_id FROM field_crosswalk ORDER BY crosswalk_id DESC"):
+        cw[r["airtable_field_id"]] = r
+    finfo = {r["field_id"]: r for r in conn.execute("SELECT field_id, field_name, table_name, data_type FROM airtable_fields")}
+    items = {}
+    for r in conn.execute("""SELECT i.*, s.form_id, s.form_name, s.version_no, s.base_id FROM form_items i JOIN form_specs s USING (spec_id)
+                             WHERE 1=1 %s""" % cur):
+        items[(r["spec_id"], r["item_id"])] = r
+    raw = []   # (item row, field id, role, detail)
+    for r in items.values():
+        if r["airtable_field_id"]:
+            if r["item_type"] == "hidden_field":
+                raw.append((r, r["airtable_field_id"], "hidden_preset",
+                            "value: %s%s" % (r["preset_value"] or "(empty)", " (%s)" % r["preset_source"] if r["preset_source"] else "")))
+            else:
+                raw.append((r, r["airtable_field_id"], "placed", ("label: %s" % r["title"]) if r["title"] else ""))
+                if r["is_required"]:
+                    raw.append((r, r["airtable_field_id"], "required", ""))
+    for lg in conn.execute("SELECT * FROM form_logic ORDER BY spec_id, owner_item_id, logic_kind, cond_order"):
+        owner = items.get((lg["spec_id"], lg["owner_item_id"]))
+        if not owner:
+            continue
+        what = "%s %s" % ("section" if owner["item_type"] == "section" else owner["item_type"].replace("_", " "), owner["title"] or owner["path"])
+        raw.append((owner, lg["controlling_field_id"], lg["logic_kind"] + "_logic",
+                    "%s %s %s" % (what, LOGIC_OPERATORS.get(lg["operator"], lg["operator"]),
+                                  '"%s"' % lg["value"] if lg["operator"] not in NO_VALUE_OPERATORS else "")))
+    out = []
+    for it, fid, role, detail in raw:
+        f = finfo.get(fid)
+        name = f["field_name"] if f else fid
+        if (field_id and fid != field_id) or (form_id and it["form_id"] != form_id) or (base_id and it["base_id"] != base_id) \
+                or (role_f and role != role_f):
+            continue
+        if text_q and text_q not in name.lower() and text_q not in fid.lower():
+            continue
+        c = cw.get(fid)
+        out.append({"base_id": it["base_id"], "form_id": it["form_id"], "form_name": it["form_name"], "version_no": it["version_no"],
+                    "field_id": fid, "field_name": name, "table_name": f["table_name"] if f else "", "data_type": f["data_type"] if f else "",
+                    "role": role, "item_path": it["path"], "detail": detail.strip(),
+                    "workfront_dev_field_id": (c["workfront_dev_field_id"] or "") if c else "",
+                    "workfront_prod_field_id": (c["workfront_prod_field_id"] or "") if c else ""})
+    out.sort(key=lambda r: (r["field_name"].lower(), r["field_id"], r["form_name"].lower(), r["form_id"], -r["version_no"], r["role"], r["item_path"]))
+    return out
+
+
+def api_forms_usage(q):
+    with db() as conn:
+        rows = form_usage_rows(conn, q)
+    return {"rows": rows[:2000], "total": len(rows), "truncated": len(rows) > 2000, "roles": ROLE_LABELS}
+
+
+def api_export_form_usage(q):
+    with db() as conn:
+        rows = form_usage_rows(conn, q)
+    return (_csv_bytes(USAGE_COLUMNS, [[r[c] for c in USAGE_COLUMNS] for r in rows]), "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="form_field_usage_%s.csv"' % _stamp()})
+
+
+def api_export_form_links(q):
+    form_id = (q.get("form_id") or [""])[0]
+    all_versions = (q.get("all_versions") or [""])[0] == "1"
+    cur = "" if all_versions else " AND s.version_no = (SELECT MAX(version_no) FROM form_specs WHERE form_id = s.form_id)"
+    sql = """SELECT s.base_id, s.form_id, s.form_name, s.version_no, COALESCE(i.path, 'form') AS path, l.text_role, l.ordinal, l.link_text, l.url
+             FROM form_links l JOIN form_specs s USING (spec_id) LEFT JOIN form_items i ON i.spec_id = l.spec_id AND i.item_id = l.item_id
+             WHERE 1=1 %s %s ORDER BY lower(s.form_name), s.form_id, s.version_no, COALESCE(i.item_order, -1), l.text_role, l.ordinal"""
+    with db() as conn:
+        rows = conn.execute(sql % (cur, " AND s.form_id = ?" if form_id else ""), (form_id,) if form_id else ()).fetchall()
+    cols = ["base_id", "form_id", "form_name", "version_no", "path", "text_role", "ordinal", "link_text", "url"]
+    return (_csv_bytes(cols, [[r[c] for c in cols] for r in rows]), "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="form_links_%s.csv"' % _stamp()})
+
+
+# ---------- form report (source = Airtable fields, or target = Workfront Planning fields via the crosswalk) ----------
+FORM_REPORT_CSS = REPORT_CSS + """
+.item{border:1px solid #d5d9e2;border-radius:6px;padding:7px 11px;margin:6px 0;background:#fff}
+.item.sec{background:#f4f6fb;border-color:#b9c3dc}
+.item.hid{background:#fff9ec;border-color:#ecd2a6}
+.item.unm{background:#fdeceb;border-color:#f0b8b3}
+.num{font-weight:700;color:#1f5fd1;margin-right:6px}
+.kind{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:0 7px;border-radius:8px;background:#e9ecf3;margin-right:6px}
+.src{color:#7b8498;font-size:12px}
+.url{color:#5d667a;font-size:12px;word-break:break-all}
+.logic{margin:6px 0 2px;padding:5px 9px;border-left:3px solid #1f5fd1;background:#eef2fb;font-size:12.5px}
+.logic.skip{border-left-color:#c0392b;background:#fdf0ee}
+.logic ul{margin:2px 0 2px 18px;padding:0}
+.kids{margin-left:18px}
+.item p{margin:4px 0}.item ul,.item ol{margin:4px 0 4px 22px}
+"""
+
+
+def form_target_lookup(conn, env):
+    """airtable field id -> target field info for 'DEV' or 'PROD' (fields with no crosswalk entry are absent)."""
+    col = "workfront_dev_field_id" if env == "DEV" else "workfront_prod_field_id"
+    wf = {r["field_id"]: r for r in conn.execute("SELECT * FROM workfront_fields WHERE environment=?", (env,))}
+    out = {}
+    for r in conn.execute("SELECT airtable_field_id, %s AS wid FROM field_crosswalk ORDER BY crosswalk_id DESC" % col):
+        if r["wid"]:
+            w = wf.get(r["wid"])
+            out[r["airtable_field_id"]] = {"id": r["wid"], "name": w["field_name"] if w else "", "type": w["data_type"] if w else "",
+                                           "known": bool(w), "where": ("%s / %s" % (w["workspace_name"], w["record_type"])) if w else ""}
+    return out
+
+
+def build_form_report(form_id, version, env):
+    q = {"form_id": [form_id], "version": [str(version)] if version else []}
+    with db() as conn:
+        row = _load_spec(conn, q)
+        versions = conn.execute("SELECT version_no, version_note, created_at FROM form_specs WHERE form_id=? ORDER BY version_no",
+                                (row["form_id"],)).fetchall()
+        finfo = {r["field_id"]: r for r in conn.execute("SELECT field_id, field_name, table_name, data_type FROM airtable_fields")}
+        tmap = form_target_lookup(conn, env) if env else {}
+        view = conn.execute("SELECT view_name FROM airtable_views WHERE view_id=?", (row["view_id"],)).fetchone() if row["view_id"] else None
+    spec = json.loads(row["spec_json"])
+    flat = []
+
+    def walk(items, path):
+        for i, n in enumerate(items):
+            p = (path + "." if path else "") + str(i + 1)
+            flat.append((p, n))
+            walk(n.get("items", []), p)
+    walk(spec["items"], "")
+    paths = {n["id"]: p for p, n in flat}
+    titles = {n["id"]: n.get("title", "") for p, n in flat if n["type"] == "section"}
+    hidden_ids = {n["field_id"] for p, n in flat if n["type"] == "hidden_field"}
+    unmapped = []
+
+    def fref(fid):
+        """(display name, id to show, type, extra html, mapped ok)"""
+        f = finfo.get(fid)
+        src_name = f["field_name"] if f else "(unknown field)"
+        if not env:
+            return src_name, fid, f["data_type"] if f else "", "", True
+        extra = '<div class="src">Source: Airtable field %s %s</div>' % (esc(src_name), _code(fid))
+        t = tmap.get(fid)
+        if not t:
+            return "UNMAPPED: " + src_name, "", "", extra, False
+        if not t["known"]:
+            return "%s (name not in workfront_fields)" % t["id"], t["id"], "", extra, False
+        return t["name"], t["id"], t["type"], extra, True
+
+    def logic_html(lg, kind):
+        if not lg or not lg.get("enabled") or not lg.get("conditions"):
+            return ""
+        mode = "ALL" if lg["junction"] == "AND" else "ANY"
+        lis = []
+        for c in lg["conditions"]:
+            nm, ident, _t, _x, _ok = fref(c["field_id"])
+            lis.append("<li><b>%s</b>%s%s %s%s</li>" % (
+                esc(nm), " " + _code(ident) if ident else "", " <i>(hidden field)</i>" if c["field_id"] in hidden_ids else "",
+                LOGIC_OPERATORS.get(c["operator"], esc(c["operator"])),
+                "" if c["operator"] in NO_VALUE_OPERATORS else " <b>&ldquo;%s&rdquo;</b>" % esc(c["value"])))
+        if kind == "display":
+            return '<div class="logic">Show this only when <b>%s</b> of these are true:<ul>%s</ul></div>' % (mode, "".join(lis))
+        st = lg.get("skip_to") or ""
+        if st and st != "END":
+            dest = "then skip to <b>Section %s: %s</b>" % (esc(paths.get(st, "?")), esc(titles.get(st, "")))
+        elif st == "END":
+            dest = "then skip to <b>the end of the form</b>"
+        else:
+            dest = "then skip <b>this section</b>"
+        return '<div class="logic skip">Skip rule: when <b>%s</b> of these are true, %s:<ul>%s</ul></div>' % (mode, dest, "".join(lis))
+
+    def tag(txt, cls=""):
+        return ' <span class="tag%s">%s</span>' % (" " + cls if cls else "", esc(txt)) if txt else ""
+
+    def render(items, path, depth):
+        out = []
+        for i, n in enumerate(items):
+            p = (path + "." if path else "") + str(i + 1)
+            t = n["type"]
+            num = '<span class="num">%s</span>' % p
+            if t == "section":
+                out.append('<div class="item sec"><h3 style="margin:2px 0">%s<span class="kind">%s</span>%s</h3>%s%s%s<div class="kids">%s</div></div>' % (
+                    num, "Section" if depth == 0 else "Subsection", esc(n["title"]), blocks_html(n.get("description_blocks") or []),
+                    logic_html(n.get("display_logic"), "display"), logic_html(n.get("skip_logic"), "skip"), render(n["items"], p, depth + 1)))
+            elif t == "field":
+                nm, ident, typ, extra, ok = fref(n["field_id"])
+                if not ok:
+                    unmapped.append((p, n["field_id"], nm))
+                label = '<div class="src">Shown to respondents as: <b>%s</b></div>' % esc(n["label"]) if n.get("label") else ""
+                out.append('<div class="item%s">%s<span class="kind">Field</span><b>%s</b>%s%s%s%s%s%s%s</div>' % (
+                    "" if ok else " unm", num, esc(nm), " " + _code(ident) if ident else "", tag(typ),
+                    tag("Required", "warn") if n.get("required") else "", label, extra,
+                    blocks_html(n.get("help_blocks") or []), logic_html(n.get("display_logic"), "display")))
+            elif t == "hidden_field":
+                nm, ident, typ, extra, ok = fref(n["field_id"])
+                if not ok:
+                    unmapped.append((p, n["field_id"], nm))
+                out.append('<div class="item hid%s">%s<span class="kind">Hidden / preset field</span><b>%s</b>%s%s<div>Preset value: <b>%s</b>%s</div>%s%s</div>' % (
+                    "" if ok else " unm", num, esc(nm), " " + _code(ident) if ident else "", tag(typ),
+                    esc(n.get("preset_value") or "(empty)"), " &mdash; set by: %s" % esc(n["preset_source"]) if n.get("preset_source") else "",
+                    "<div>%s</div>" % esc(n["note"]) if n.get("note") else "", extra))
+            elif t == "heading":
+                out.append('<div class="item">%s<span class="kind">Heading</span><b style="font-size:15px">%s</b>%s</div>' % (
+                    num, esc(n["text"]), logic_html(n.get("display_logic"), "display")))
+            else:
+                out.append('<div class="item">%s<span class="kind">%s</span>%s%s</div>' % (
+                    num, "Help text" if t == "help_text" else "Text block", blocks_html(n.get("content_blocks") or []),
+                    logic_html(n.get("display_logic"), "display")))
+        return "".join(out)
+    body_html = render(spec["items"], "", 0)
+    used = {}
+    for p, n in flat:
+        if n["type"] in ("field", "hidden_field"):
+            used.setdefault(n["field_id"], {"roles": [], "logic": []})["roles"].append(
+                ("Hidden / preset" if n["type"] == "hidden_field" else "Required" if n.get("required") else "Shown") + " (" + p + ")")
+    for p, n in flat:
+        for kind, key in (("display", "display_logic"), ("skip", "skip_logic")):
+            lg = n.get(key)
+            if lg and lg.get("enabled"):
+                for c in lg["conditions"]:
+                    used.setdefault(c["field_id"], {"roles": [], "logic": []})["logic"].append("%s logic of %s" % (kind, p))
+    frows = []
+    for fid, u in sorted(used.items(), key=lambda kv: (fref(kv[0])[0].lower(), kv[0])):
+        nm, ident, typ, extra, ok = fref(fid)
+        frows.append(_tr([_td(esc(nm) + extra), _td(_code(ident) if ident else "&mdash;"), _td(esc(typ)),
+                          _td(esc("; ".join(u["roles"]) or "not placed")), _td(esc("; ".join(dict.fromkeys(u["logic"]))) or "&mdash;")],
+                         "" if ok else "second"))
+    link_rows = [("Form", "description", t, u) for t, u in blocks_links(spec["form"].get("description_blocks") or [])]
+    for p, n in flat:
+        for key, label in (("description_blocks", "description"), ("help_blocks", "help text"), ("content_blocks", "text")):
+            link_rows += [(p, label, t, u) for t, u in blocks_links(n.get(key) or [])]
+    env_label = {"DEV": "Workfront Planning (DEV)", "PROD": "Workfront Planning (PROD)"}.get(env, "Airtable (source)")
+    verdict = ""
+    if env:
+        verdict = ('<div class="box err"><b>Not ready to copy.</b> %d field(s) have no usable target mapping (items %s). '
+                   'Fill the field crosswalk and the Workfront field list, then regenerate this report.</div>'
+                   % (len(unmapped), esc(", ".join(u[0] for u in unmapped)))) if unmapped else \
+            '<div class="box"><b>Every field on this form is mapped to a %s field.</b></div>' % esc(env_label)
+    scope = ["Base " + _code(row["base_id"] or "")]
+    if row["table_id"]:
+        scope.append("table " + _code(row["table_id"]))
+    if row["view_id"]:
+        scope.append("Airtable view %s%s" % (esc(view["view_name"]) + " " if view else "", _code(row["view_id"])))
+    desc = blocks_html(spec["form"].get("description_blocks") or [])
+    link_table = ("<table><thead>%s</thead><tbody>%s</tbody></table>" % (
+        _th(["Item", "Where", "Visible text", "Address"]),
+        "".join(_tr([_td(esc(a)), _td(esc(b)), _td(esc(c)), _td('<span class="url">%s</span>' % esc(d))]) for a, b, c, d in link_rows))
+        if link_rows else "<p>The form contains no links.</p>")
+    ver_rows = "".join(_tr([_td(str(v["version_no"]) + (" (this report)" if v["version_no"] == row["version_no"] else "")),
+                            _td(_ts(v["created_at"])), _td(esc(v["version_note"] or ""))]) for v in versions)
+    parts = [
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>%s</title><style>%s</style></head><body><main>" % (
+            esc("Form specification: %s (version %d)" % (row["form_name"], row["version_no"])), FORM_REPORT_CSS),
+        "<h1>%s</h1>" % esc(row["form_name"]),
+        '<div class="meta">Form key %s &middot; Version %d &middot; Saved %s &middot; Fields shown for: <b>%s</b> &middot; Generated %s</div>' % (
+            _code(row["form_id"]), row["version_no"], _ts(row["created_at"]), esc(env_label), _ts(utc_now())),
+        '<div class="meta">%s</div>' % " &middot; ".join(scope), verdict,
+        "<h2>1. About this document</h2>",
+        "<p>A structural record of the form, captured by hand because Airtable does not expose form layout or logic. "
+        "Items are listed in the order they appear, so the form can be rebuilt one-to-one. Text and links are copied verbatim, and "
+        "each link prints its real address beside the visible text. Logic values are the values used in the source form: "
+        "if a choice is renamed in the target, change the value there too. Hidden / preset fields are not seen by respondents but can drive logic.</p>",
+        "<h2>2. Version history</h2>", "<table><thead>%s</thead><tbody>%s</tbody></table>" % (_th(["Version", "Saved (UTC)", "Note"]), ver_rows),
+        "<h2>3. Form structure</h2>", ('<div class="item"><span class="kind">Form description</span>%s</div>' % desc) if desc else "",
+        body_html or "<p>The form has no items.</p>",
+        "<h2>4. Fields used</h2>", "<table><thead>%s</thead><tbody>%s</tbody></table>" % (
+            _th(["Target field" if env else "Airtable field", "Field ID", "Type", "Placed as", "Used in logic of"]), "".join(frows)),
+        "<h2>5. Links</h2>", link_table,
+        "<h2>6. Review</h2><table class=\"sign\"><thead>%s</thead><tbody><tr><td></td><td></td><td></td><td></td></tr>"
+        "<tr><td></td><td></td><td></td><td></td></tr></tbody></table>" % _th(["Reviewer", "Role", "Date", "Comment"]),
+        "</main></body></html>"]
+    return "".join(parts), row, len(unmapped)
+
+
+def _form_report_args(q):
+    env = (q.get("target") or [""])[0].upper()
+    if env not in ("", "DEV", "PROD"):
+        raise AppError("target must be DEV, PROD or empty.")
+    return (q.get("form_id") or [""])[0], (q.get("version") or [""])[0], env
+
+
+def _form_report_name(row, env, ext):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", row["form_id"]).strip("_")[:60] or "form"
+    return "Form_%s_v%d_%s_%s.%s" % (safe, row["version_no"], env or "Airtable", _stamp(), ext)
+
+
+def api_form_report_html(q):
+    fid, ver, env = _form_report_args(q)
+    text, row, _n = build_form_report(fid, ver, env)
+    headers = {}
+    if (q.get("download") or [""])[0]:
+        headers["Content-Disposition"] = 'attachment; filename="%s"' % _form_report_name(row, env, "html")
+    return (scrub(text).encode("utf-8"), "text/html; charset=utf-8", headers)
+
+
+def api_form_report_mhtml(q):
+    fid, ver, env = _form_report_args(q)
+    text, row, _n = build_form_report(fid, ver, env)
+    return (to_mhtml(scrub(text), "Form specification: %s" % row["form_name"]), "application/x-mimearchive",
+            {"Content-Disposition": 'attachment; filename="%s"' % _form_report_name(row, env, "mhtml")})
+
+
+def api_form_report_status(q):
+    """Counts only, for the page: how many fields still lack a target mapping for DEV and PROD."""
+    fid, ver, _env = _form_report_args(q)
+    out = {}
+    row = None
+    for env in ("DEV", "PROD"):
+        _t, row, n = build_form_report(fid, ver, env)
+        out[env.lower()] = n
+    return {"unmapped": out, "version_no": row["version_no"]}
+
+
+# --------------------------------------------------------------------------
+# Stage 3: automation recorder. Like Stage 2, an automation is recorded by hand because Airtable's API does not return
+# automations. The record is a trigger plus an ordered tree of steps (actions, if/else-if/else blocks, repeating groups).
+# Conditions are nested AND/OR groups. One immutable JSON spec per saved version is the audit record; automation_items,
+# automation_logic, automation_field_refs and automation_links are rebuilt from it on every save for querying.
+# Text uses the same Markdown subset (and parser) as Stage 2.
+# --------------------------------------------------------------------------
+AUTO_FORMAT = "automation-spec/1"
+TRIGGER_TYPES = {"record_created": "When a record is created", "record_updated": "When a record is updated",
+                 "record_matches": "When a record matches conditions", "record_enters_view": "When a record enters a view",
+                 "form_submitted": "When a form is submitted", "button_clicked": "When a button is clicked",
+                 "scheduled": "At a scheduled time", "webhook": "When a webhook is received", "other": "Other trigger"}
+ACTION_TYPES = {"create_record": "Create record", "update_record": "Update record", "find_records": "Find records",
+                "send_email": "Send email", "send_message": "Send message", "run_script": "Run script",
+                "send_request": "Send request (webhook / API call)", "delay": "Wait / delay", "other": "Other action"}
+STEP_KINDS = ("action", "conditional", "repeat")
+AUTO_OPERATORS = {"equals": "is exactly", "notEquals": "is not", "contains": "contains", "doesNotContain": "does not contain",
+                  "isEmpty": "is empty", "isNotEmpty": "is not empty", "greaterThan": "is greater than",
+                  "greaterOrEqual": "is greater than or equal to", "lessThan": "is less than",
+                  "lessOrEqual": "is less than or equal to", "isAnyOf": "is any of", "isNoneOf": "is none of",
+                  "isBefore": "is before", "isAfter": "is after"}
+PRODUCING_TYPES = ("create_record", "update_record", "find_records", "repeat")   # steps whose record later steps can read
+FIELD_ROLES = ("set", "read", "use")
+MAX_STEPS = 2000
+MAX_DEPTH = 8
+MAX_COND_NODES = 800
+
+
+def _auto_group_clean(raw, bad, where, depth=0, counter=None):
+    """A nested condition group {"type":"group","junction","items":[condition | group]}. Structure only."""
+    counter = counter if counter is not None else [0]
+    raw = raw if isinstance(raw, dict) else {}
+    g = {"type": "group", "junction": "OR" if raw.get("junction") == "OR" else "AND", "items": []}
+    for it in raw.get("items") or []:
+        counter[0] += 1
+        if counter[0] > MAX_COND_NODES:
+            bad("%s has too many conditions (limit %d)." % (where, MAX_COND_NODES))
+            break
+        it = it if isinstance(it, dict) else {}
+        if it.get("type") == "group":
+            if depth >= MAX_DEPTH:
+                bad("%s nests condition groups too deeply (limit %d)." % (where, MAX_DEPTH))
+                continue
+            g["items"].append(_auto_group_clean(it, bad, where, depth + 1, counter))
+        else:
+            left = it.get("left") if isinstance(it.get("left"), dict) else {}
+            op = it.get("operator")
+            if op not in AUTO_OPERATORS:
+                bad("%s has a condition with no operator." % where)
+                op = ""
+            if left.get("kind") == "text":
+                lf = {"kind": "text", "text": str(left.get("text") or "")[:300].strip()}
+                if not lf["text"]:
+                    bad("%s has a condition with nothing to test (empty text)." % where)
+            else:
+                lf = {"kind": "field", "field_id": str(left.get("field_id") or ""), "source": str(left.get("source") or "")}
+            g["items"].append({"type": "condition", "left": lf, "operator": op,
+                               "value": "" if op in NO_VALUE_OPERATORS else str(it.get("value") or "")[:2000]})
+    return g
+
+
+def _group_leaves(g):
+    for it in g["items"]:
+        if it["type"] == "group":
+            yield from _group_leaves(it)
+        else:
+            yield it
+
+
+def walk_automation(spec):
+    """Document-order records: {"item","kind","path","parent","order"}. The trigger is order 0, path '0'."""
+    out = [{"item": spec["trigger"], "kind": "trigger", "path": "0", "parent": None, "order": 0}]
+
+    def steps(items, prefix, parent):
+        for i, st in enumerate(items):
+            path = (prefix + "." if prefix else "") + str(i + 1)
+            out.append({"item": st, "kind": "step", "path": path, "parent": parent, "order": len(out)})
+            if st["type"] == "conditional":
+                for j, br in enumerate(st["branches"]):
+                    bp = path + "." + str(j + 1)
+                    out.append({"item": br, "kind": "branch", "path": bp, "parent": st["id"], "order": len(out)})
+                    steps(br["steps"], bp, br["id"])
+            elif st["type"] == "repeat":
+                steps(st["steps"], path, st["id"])
+    steps(spec["steps"], "", None)
+    return out
+
+
+def _item_groups(it):
+    """The condition groups an item owns: [(label, group)]."""
+    gs = []
+    if it.get("conditions"):
+        gs.append(("conditions", it["conditions"]))
+    return gs
+
+
+def normalize_automation(conn, body):
+    """Validate a submitted automation. Returns (meta, spec). Raises AppError listing the problems (up to 12)."""
+    problems = []
+
+    def bad(msg):
+        if len(problems) < 12:
+            problems.append(msg)
+    a = body.get("automation") if isinstance(body.get("automation"), dict) else {}
+    auto_id = str(a.get("automation_id") or "").strip()
+    name = str(a.get("automation_name") or "").strip()
+    base_id = str(a.get("base_id") or "").strip()
+    if not FORM_KEY_OK.match(auto_id):
+        bad("The automation key must be 1 to 100 letters, digits, spaces, dots, dashes or underscores.")
+    if not name or len(name) > 200:
+        bad("Give the automation a name (up to 200 characters).")
+    fields, tables = {}, {}
+    if not base_id:
+        bad("Choose the base this automation belongs to.")
+    else:
+        for r in conn.execute("SELECT field_id, table_id, table_name, field_name FROM airtable_fields WHERE base_id=?", (base_id,)):
+            fields[r["field_id"]] = r
+            tables[r["table_id"]] = r["table_name"]
+        if not fields:
+            bad("Base %s has no fields in the database. Ingest its schema in Stage 1 first." % base_id)
+    prior = conn.execute("SELECT base_id FROM automation_specs WHERE automation_id=? ORDER BY version_no DESC LIMIT 1", (auto_id,)).fetchone()
+    if prior and prior["base_id"] and base_id and prior["base_id"] != base_id:
+        bad("The automation key %s is already used by an automation in base %s. Choose another key." % (auto_id, prior["base_id"]))
+
+    def text(raw, limit, label, where):
+        s = "" if raw is None else str(raw)
+        if len(s) > limit:
+            bad("%s: %s is too long (limit %d characters)." % (where, label, limit))
+        return s[:limit]
+
+    def rich(raw, label, where):
+        md = text(raw, MAX_TEXT, label, where)
+        w = []
+        blocks = parse_rich(md, w)
+        for m in dict.fromkeys(w):
+            bad("%s: %s has an %s. Links must start with http://, https://, mailto: or tel:." % (where, label, m))
+        return md, blocks
+
+    seen_ids = {"trigger"}
+    count = [0]
+
+    def new_id(raw, where):
+        iid = str(raw or "")
+        if not ITEM_ID_OK.match(iid) or iid in seen_ids:
+            bad("%s has a missing or repeated id (reload the page and try again)." % where)
+            return None
+        seen_ids.add(iid)
+        return iid
+
+    def clean_settings(raw, where):
+        out = []
+        for s in (raw if isinstance(raw, list) else [])[:40]:
+            s = s if isinstance(s, dict) else {}
+            nm = text(s.get("name"), 100, "a setting name", where).strip()
+            if not nm:
+                continue
+            fmt = "plain" if s.get("format") == "plain" else "rich"
+            item = {"name": nm, "format": fmt}
+            if fmt == "rich":
+                item["value_md"], item["value_blocks"] = rich(s.get("value_md"), "the setting '%s'" % nm, where)
+            else:
+                item["value"] = text(s.get("value"), 100000, "the setting '%s'" % nm, where)
+            out.append(item)
+        return out
+
+    def clean_field_refs(raw, where, table_id):
+        out = []
+        for r in (raw if isinstance(raw, list) else [])[:200]:
+            r = r if isinstance(r, dict) else {}
+            fid = str(r.get("field_id") or "")
+            role = r.get("role") if r.get("role") in FIELD_ROLES else "use"
+            f = fields.get(fid)
+            if not f:
+                bad("%s uses a field that is not in base %s (%s)." % (where, base_id, fid or "none chosen"))
+            elif table_id and role in ("set", "read") and f["table_id"] != table_id:
+                bad("%s: field %s is in table %s, not the step's table %s." % (where, f["field_name"], f["table_name"], tables.get(table_id, table_id)))
+            out.append({"field_id": fid, "role": role, "value": text(r.get("value"), 2000, "a field value", where)})
+        return out
+
+    def check_table(tid, where, required=False):
+        tid = str(tid or "").strip()
+        if tid and tid not in tables:
+            bad("%s uses table %s, which is not in base %s." % (where, tid, base_id))
+        if required and not tid:
+            bad("%s needs a table." % where)
+        return tid
+
+    def clean_steps(raw_steps, prefix, depth):
+        out = []
+        for i, st in enumerate(raw_steps if isinstance(raw_steps, list) else []):
+            count[0] += 1
+            if count[0] > MAX_STEPS:
+                bad("An automation can have at most %d steps." % MAX_STEPS)
+                return out
+            st = st if isinstance(st, dict) else {}
+            path = (prefix + "." if prefix else "") + str(i + 1)
+            where = "Step %s" % path
+            kind = st.get("type")
+            if kind not in STEP_KINDS:
+                bad("%s has an unknown type." % where)
+                continue
+            if depth > MAX_DEPTH:
+                bad("%s is nested too deeply (limit %d levels)." % (where, MAX_DEPTH))
+                continue
+            sid = new_id(st.get("id"), where)
+            if sid is None:
+                continue
+            n = {"id": sid, "type": kind, "title": text(st.get("title"), 200, "the title", where).strip()}
+            if not n["title"]:
+                bad("%s has no title." % where)
+            n["description_md"], n["description_blocks"] = rich(st.get("description_md"), "the description", where)
+            if kind == "action":
+                at = st.get("action_type")
+                if at not in ACTION_TYPES:
+                    bad("%s has an unknown action type." % where)
+                    at = "other"
+                n["action_type"] = at
+                n["table_id"] = check_table(st.get("table_id"), where, required=at in ("create_record", "update_record", "find_records"))
+                n["field_refs"] = clean_field_refs(st.get("field_refs"), where, n["table_id"])
+                n["settings"] = clean_settings(st.get("settings"), where)
+                if at == "update_record":
+                    n["record_source"] = str(st.get("record_source") or "")
+                if at == "find_records":
+                    n["conditions"] = _auto_group_clean(st.get("conditions"), bad, where)
+            elif kind == "repeat":
+                n["over_text"] = text(st.get("over_text"), 300, "what it repeats over", where).strip()
+                n["over_source"] = str(st.get("over_source") or "")
+                n["table_id"] = check_table(st.get("table_id"), where)
+                n["steps"] = clean_steps(st.get("steps"), path, depth + 1)
+            else:
+                n["branches"] = []
+                raw_br = st.get("branches") if isinstance(st.get("branches"), list) else []
+                if not raw_br:
+                    bad("%s is a conditional with no branches." % where)
+                for j, br in enumerate(raw_br):
+                    br = br if isinstance(br, dict) else {}
+                    bpath = path + "." + str(j + 1)
+                    bid = new_id(br.get("id"), "Branch %s" % bpath)
+                    if bid is None:
+                        continue
+                    is_else = bool(br.get("is_else"))
+                    b = {"id": bid, "type": "branch", "is_else": is_else, "label": text(br.get("label"), 200, "the branch label", "Branch " + bpath).strip()}
+                    if is_else:
+                        if j != len(raw_br) - 1:
+                            bad("Branch %s: only the last branch can be the 'else' branch." % bpath)
+                        if j == 0:
+                            bad("Branch %s: a conditional needs an 'if' branch before 'else'." % bpath)
+                    else:
+                        b["conditions"] = _auto_group_clean(br.get("conditions"), bad, "Branch " + bpath)
+                        if not list(_group_leaves(b["conditions"])):
+                            bad("Branch %s has no conditions. Add one, or make it the 'else' branch." % bpath)
+                    b["steps"] = clean_steps(br.get("steps"), bpath, depth + 1)
+                    n["branches"].append(b)
+            out.append(n)
+        return out
+    # trigger
+    t = body.get("trigger") if isinstance(body.get("trigger"), dict) else {}
+    ttype = t.get("trigger_type")
+    if ttype not in TRIGGER_TYPES:
+        bad("Choose the trigger type.")
+        ttype = "other"
+    trig = {"id": "trigger", "type": "trigger", "trigger_type": ttype, "table_id": check_table(t.get("table_id"), "The trigger"),
+            "view_id": str(t.get("view_id") or "").strip(), "schedule_text": text(t.get("schedule_text"), 300, "the schedule", "The trigger").strip()}
+    trig["description_md"], trig["description_blocks"] = rich(t.get("description_md"), "the description", "The trigger")
+    if trig["view_id"]:
+        v = conn.execute("SELECT base_id, table_id FROM airtable_views WHERE view_id=?", (trig["view_id"],)).fetchone()
+        if not v or v["base_id"] != base_id:
+            bad("The trigger's view %s is not in base %s." % (trig["view_id"], base_id))
+    if ttype in ("record_created", "record_updated", "record_matches", "record_enters_view", "form_submitted", "button_clicked") and not trig["table_id"]:
+        bad("The trigger needs a table.")
+    watched = []
+    for fid in (t.get("watched_field_ids") if isinstance(t.get("watched_field_ids"), list) else [])[:200]:
+        fid = str(fid)
+        f = fields.get(fid)
+        if not f:
+            bad("The trigger watches a field that is not in base %s (%s)." % (base_id, fid))
+        elif trig["table_id"] and f["table_id"] != trig["table_id"]:
+            bad("The trigger watches %s, which is not in the trigger's table." % f["field_name"])
+        watched.append(fid)
+    trig["watched_field_ids"] = list(dict.fromkeys(watched))
+    if ttype == "record_matches":
+        trig["conditions"] = _auto_group_clean(t.get("conditions"), bad, "The trigger")
+        if not list(_group_leaves(trig["conditions"])):
+            bad("The trigger 'record matches conditions' needs at least one condition.")
+    steps = clean_steps(body.get("steps"), "", 0)
+    d_md, d_blocks = rich(a.get("description_md"), "the automation description", "Automation")
+    meta = {"automation_id": auto_id, "automation_name": name, "base_id": base_id, "trigger_type": ttype,
+            "target_scenario_name": text(a.get("target_scenario_name"), 200, "the target scenario name", "Automation").strip()}
+    spec = {"format": AUTO_FORMAT, "automation": dict(meta, description_md=d_md, description_blocks=d_blocks, enabled_in_source=bool(a.get("enabled_in_source", True))),
+            "trigger": trig, "steps": steps}
+    # phase 2: things that depend on document order
+    recs = walk_automation(spec)
+    order_of = {r["item"]["id"]: r["order"] for r in recs}
+    kind_of = {r["item"]["id"]: (r["item"].get("action_type") or r["item"]["type"]) for r in recs}
+    producing = {i for i, k in kind_of.items() if k in PRODUCING_TYPES}
+    tbl_of = {r["item"]["id"]: r["item"].get("table_id") for r in recs}
+    for r in recs:
+        it, where = r["item"], ("The trigger" if r["kind"] == "trigger" else "%s %s" % ("Branch" if r["kind"] == "branch" else "Step", r["path"]))
+
+        def source_ok(src, what):
+            if not src:
+                return
+            if src not in producing or order_of[src] >= r["order"]:
+                bad("%s: %s must be an earlier step that creates, updates or finds records." % (where, what))
+        for label, g in _item_groups(it):
+            for leaf in _group_leaves(g):
+                lf = leaf["left"]
+                if lf["kind"] != "field":
+                    continue
+                f = fields.get(lf["field_id"])
+                if not f:
+                    bad("%s: a condition uses a field that is not in base %s (%s)." % (where, base_id, lf["field_id"] or "none chosen"))
+                    continue
+                if r["kind"] == "trigger" and lf["source"]:
+                    bad("%s: trigger conditions can only read the trigger record." % where)
+                if it.get("action_type") == "find_records":
+                    if lf["source"]:
+                        bad("%s: the conditions of a 'find records' step test the records being searched, so they take no record source." % where)
+                    src_tbl = it.get("table_id")   # the candidate records are in the step's own table
+                else:
+                    source_ok(lf["source"], "a condition's record source")
+                    src_tbl = tbl_of.get(lf["source"]) if lf["source"] else trig["table_id"]
+                if src_tbl and f["table_id"] != src_tbl:
+                    bad("%s: field %s is in table %s, but the record it is read from is in table %s." % (where, f["field_name"], f["table_name"], tables.get(src_tbl, src_tbl)))
+        if it.get("type") == "action" and it.get("action_type") == "update_record":
+            source_ok(it.get("record_source"), "the record to update")
+        if it.get("type") == "repeat" and it.get("over_source"):
+            if it["over_source"] not in producing or order_of[it["over_source"]] >= r["order"] or kind_of.get(it["over_source"]) != "find_records":
+                bad("%s: 'repeat over' must be an earlier 'find records' step." % where)
+    if problems:
+        raise AppError(" ".join(problems), extra={"problems": problems})
+    return meta, spec
+
+
+def _auto_index_rows(spec):
+    """Everything the index tables hold, derived from the spec: (items, logic, refs, links)."""
+    recs = walk_automation(spec)
+    items, logic, refs, links = [], [], [], []
+
+    def add_links(item_id, role, blocks):
+        for k, (t, u) in enumerate(blocks_links(blocks or [])):
+            links.append((item_id, role, k, t, u))
+
+    def add_group(owner, g, path):
+        logic.append((owner, path, "group", g["junction"], None, None, None, None, None))
+        for k, it in enumerate(g["items"]):
+            p = "%s.%d" % (path, k)
+            if it["type"] == "group":
+                add_group(owner, it, p)
+            else:
+                lf = it["left"]
+                logic.append((owner, p, "condition", None, lf.get("field_id") if lf["kind"] == "field" else None,
+                              (lf.get("source") or None) if lf["kind"] == "field" else None,
+                              lf.get("text") if lf["kind"] == "text" else None, it["operator"], it["value"]))
+    for r in recs:
+        it = r["item"]
+        iid = it["id"]
+        stype = it.get("action_type") or it.get("trigger_type") or it["type"]
+        if r["kind"] == "trigger":
+            title = TRIGGER_TYPES.get(it.get("trigger_type"), "")
+        elif r["kind"] == "branch":
+            title = it.get("label") or ("Else" if it["is_else"] else "If")
+        else:
+            title = it.get("title") or ""
+        items.append((iid, r["parent"], r["order"], r["path"], r["kind"], stype, title, it.get("description_md"),
+                      it.get("table_id") or None, (it.get("record_source") or None) if it.get("action_type") == "update_record" else None))
+        for label, g in _item_groups(it):
+            add_group(iid, g, "0")
+            for leaf in _group_leaves(g):
+                if leaf["left"]["kind"] == "field":
+                    refs.append((iid, "condition", leaf["left"]["field_id"], "%s %s" % (AUTO_OPERATORS.get(leaf["operator"], leaf["operator"]),
+                                                                                        '"%s"' % leaf["value"] if leaf["operator"] not in NO_VALUE_OPERATORS else "")))
+        for fid in it.get("watched_field_ids") or []:
+            refs.append((iid, "watch", fid, "trigger watches this field"))
+        for fr in it.get("field_refs") or []:
+            refs.append((iid, fr["role"], fr["field_id"], fr.get("value") or ""))
+        add_links(iid, "description", it.get("description_blocks"))
+        for s in it.get("settings") or []:
+            if s["format"] == "rich":
+                add_links(iid, "setting:" + s["name"], s.get("value_blocks"))
+    add_links("automation", "description", spec["automation"].get("description_blocks"))
+    return items, logic, refs, links
+
+
+def api_automations_save(body):
+    note = str(body.get("note") or "").strip()[:500]
+    with db() as conn:
+        meta, spec = normalize_automation(conn, body)
+        last = conn.execute("SELECT version_no, spec_json FROM automation_specs WHERE automation_id=? ORDER BY version_no DESC LIMIT 1",
+                            (meta["automation_id"],)).fetchone()
+        if last and _canon_spec(json.loads(last["spec_json"])) == _canon_spec(spec):
+            return {"unchanged": True, "version_no": last["version_no"], "automation_id": meta["automation_id"]}
+        ver = (last["version_no"] if last else 0) + 1
+        items, logic, refs, links = _auto_index_rows(spec)
+        with conn:
+            cur = conn.execute("""INSERT INTO automation_specs(automation_id, version_no, automation_name, base_id, trigger_type, target_scenario_name,
+                                  version_note, spec_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+                               (meta["automation_id"], ver, meta["automation_name"], meta["base_id"], meta["trigger_type"],
+                                meta["target_scenario_name"] or None, note, json.dumps(spec), utc_now()[:19]))
+            sid = cur.lastrowid
+            conn.executemany("""INSERT INTO automation_items(spec_id, item_id, parent_item_id, item_order, path, item_kind, step_type, title, content_md,
+                                table_id, record_source) VALUES (?,?,?,?,?,?,?,?,?,?,?)""", [(sid,) + x for x in items])
+            conn.executemany("""INSERT INTO automation_logic(spec_id, owner_item_id, node_path, node_kind, junction, controlling_field_id, source_item_id,
+                                left_text, operator, value) VALUES (?,?,?,?,?,?,?,?,?,?)""", [(sid,) + x for x in logic])
+            conn.executemany("INSERT INTO automation_field_refs(spec_id, item_id, ref_order, field_id, role, detail) VALUES (?,?,?,?,?,?)",
+                             [(sid, x[0], k, x[2], x[1], x[3]) for k, x in enumerate(refs)])
+            conn.executemany("INSERT INTO automation_links(spec_id, item_id, text_role, ordinal, link_text, url) VALUES (?,?,?,?,?,?)", [(sid,) + x for x in links])
+    return {"unchanged": False, "version_no": ver, "automation_id": meta["automation_id"], "items": len(items)}
+
+
+def api_automations_list(_q=None):
+    with db() as conn:
+        rows = conn.execute("""SELECT s.automation_id, s.automation_name, s.base_id, s.trigger_type, s.target_scenario_name, s.version_no AS latest_version,
+                                      s.created_at, (SELECT COUNT(*) FROM automation_specs x WHERE x.automation_id = s.automation_id) AS versions
+                               FROM automation_specs s WHERE s.version_no = (SELECT MAX(version_no) FROM automation_specs WHERE automation_id = s.automation_id)
+                               ORDER BY lower(s.automation_name), s.automation_id""").fetchall()
+    return {"automations": [dict(r) for r in rows]}
+
+
+def _load_auto_spec(conn, q):
+    aid = (q.get("automation_id") or [""])[0]
+    ver = (q.get("version") or [""])[0]
+    if ver:
+        try:
+            ver = int(ver)
+        except ValueError:
+            raise AppError("version must be a number.")
+        row = conn.execute("SELECT * FROM automation_specs WHERE automation_id=? AND version_no=?", (aid, ver)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM automation_specs WHERE automation_id=? ORDER BY version_no DESC LIMIT 1", (aid,)).fetchone()
+    if not row:
+        raise AppError("That automation or version was not found.", 404)
+    return row
+
+
+def api_automations_spec(q):
+    with db() as conn:
+        row = _load_auto_spec(conn, q)
+        versions = conn.execute("SELECT version_no, version_note, created_at FROM automation_specs WHERE automation_id=? ORDER BY version_no DESC",
+                                (row["automation_id"],)).fetchall()
+    return {"automation_id": row["automation_id"], "version_no": row["version_no"], "created_at": row["created_at"],
+            "version_note": row["version_note"], "spec": json.loads(row["spec_json"]), "versions": [dict(v) for v in versions]}
+
+
+# ---------- field usage across automations ----------
+AUTO_USAGE_COLUMNS = ["base_id", "automation_id", "automation_name", "version_no", "field_id", "field_name", "table_name", "data_type", "role",
+                      "item_path", "item_title", "detail", "workfront_dev_field_id", "workfront_prod_field_id"]
+AUTO_ROLE_LABELS = {"condition": "tested in a condition", "set": "written (set)", "read": "read", "use": "used (e.g. in an email or request)",
+                    "watch": "watched by the trigger"}
+
+
+def automation_usage_rows(conn, q):
+    all_versions = (q.get("all_versions") or [""])[0] == "1"
+    field_id = (q.get("field_id") or [""])[0]
+    text_q = (q.get("q") or [""])[0].strip().lower()
+    aid = (q.get("automation_id") or [""])[0]
+    base_id = (q.get("base_id") or [""])[0]
+    role_f = (q.get("role") or [""])[0]
+    cur = "" if all_versions else " AND s.version_no = (SELECT MAX(version_no) FROM automation_specs WHERE automation_id = s.automation_id)"
+    cw = {}
+    for r in conn.execute("SELECT airtable_field_id, workfront_dev_field_id, workfront_prod_field_id FROM field_crosswalk ORDER BY crosswalk_id DESC"):
+        cw[r["airtable_field_id"]] = r
+    finfo = {r["field_id"]: r for r in conn.execute("SELECT field_id, field_name, table_name, data_type FROM airtable_fields")}
+    out = []
+    for r in conn.execute("""SELECT f.field_id, f.role, f.detail, f.ref_order, i.path, i.title, i.item_kind, i.step_type, s.automation_id, s.automation_name,
+                                    s.version_no, s.base_id
+                             FROM automation_field_refs f JOIN automation_specs s USING (spec_id)
+                             JOIN automation_items i ON i.spec_id = f.spec_id AND i.item_id = f.item_id WHERE 1=1 %s""" % cur):
+        fi = finfo.get(r["field_id"])
+        name = fi["field_name"] if fi else r["field_id"]
+        if (field_id and r["field_id"] != field_id) or (aid and r["automation_id"] != aid) or (base_id and r["base_id"] != base_id) or (role_f and r["role"] != role_f):
+            continue
+        if text_q and text_q not in name.lower() and text_q not in r["field_id"].lower():
+            continue
+        c = cw.get(r["field_id"])
+        out.append({"base_id": r["base_id"], "automation_id": r["automation_id"], "automation_name": r["automation_name"], "version_no": r["version_no"],
+                    "field_id": r["field_id"], "field_name": name, "table_name": fi["table_name"] if fi else "", "data_type": fi["data_type"] if fi else "",
+                    "role": r["role"], "item_path": r["path"] if r["item_kind"] != "trigger" else "Trigger", "item_title": r["title"] or "", "detail": (r["detail"] or "").strip(),
+                    "workfront_dev_field_id": (c["workfront_dev_field_id"] or "") if c else "",
+                    "workfront_prod_field_id": (c["workfront_prod_field_id"] or "") if c else "", "_order": r["ref_order"]})
+    out.sort(key=lambda r: (r["field_name"].lower(), r["field_id"], r["automation_name"].lower(), r["automation_id"], -r["version_no"], r["role"], r["item_path"], r.pop("_order")))
+    return out
+
+
+def api_automations_usage(q):
+    with db() as conn:
+        rows = automation_usage_rows(conn, q)
+    return {"rows": rows[:2000], "total": len(rows), "truncated": len(rows) > 2000, "roles": AUTO_ROLE_LABELS}
+
+
+def api_export_automation_usage(q):
+    with db() as conn:
+        rows = automation_usage_rows(conn, q)
+    return (_csv_bytes(AUTO_USAGE_COLUMNS, [[r[c] for c in AUTO_USAGE_COLUMNS] for r in rows]), "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="automation_field_usage_%s.csv"' % _stamp()})
+
+
+def api_export_automation_links(q):
+    aid = (q.get("automation_id") or [""])[0]
+    all_versions = (q.get("all_versions") or [""])[0] == "1"
+    cur = "" if all_versions else " AND s.version_no = (SELECT MAX(version_no) FROM automation_specs WHERE automation_id = s.automation_id)"
+    sql = """SELECT s.base_id, s.automation_id, s.automation_name, s.version_no, COALESCE(i.path, 'automation') AS path, l.text_role, l.ordinal, l.link_text, l.url
+             FROM automation_links l JOIN automation_specs s USING (spec_id) LEFT JOIN automation_items i ON i.spec_id = l.spec_id AND i.item_id = l.item_id
+             WHERE 1=1 %s %s ORDER BY lower(s.automation_name), s.automation_id, s.version_no, COALESCE(i.item_order, -1), l.text_role, l.ordinal"""
+    with db() as conn:
+        rows = conn.execute(sql % (cur, " AND s.automation_id = ?" if aid else ""), (aid,) if aid else ()).fetchall()
+    cols = ["base_id", "automation_id", "automation_name", "version_no", "path", "text_role", "ordinal", "link_text", "url"]
+    return (_csv_bytes(cols, [[r[c] for c in cols] for r in rows]), "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="automation_links_%s.csv"' % _stamp()})
+
+
+# ---------- automation report (source = Airtable, or target = Workfront Planning via the crosswalk) ----------
+AUTO_REPORT_CSS = FORM_REPORT_CSS + """
+.item.step{background:#fff}.item.cond{background:#f4f6fb;border-color:#b9c3dc}.item.rep{background:#f2f8f3;border-color:#b7d6bd}
+.item.br{background:#fbfbfd;border-style:dashed}
+.cg{margin:4px 0 4px 6px;padding:3px 0 3px 10px;border-left:3px solid #9fb2d9;font-size:12.5px}
+.cg .cg{border-left-color:#c7a8d9}
+.cg ul{margin:2px 0;padding-left:16px}
+pre.code{background:#f3f4f7;border:1px solid #d5d9e2;border-radius:4px;padding:6px 8px;font-size:12px;white-space:pre-wrap;word-break:break-word;margin:4px 0}
+.setting{margin:3px 0}.setting b{color:#3a4560}
+"""
+
+
+def build_automation_report(aid, version, env):
+    q = {"automation_id": [aid], "version": [str(version)] if version else []}
+    with db() as conn:
+        row = _load_auto_spec(conn, q)
+        versions = conn.execute("SELECT version_no, version_note, created_at FROM automation_specs WHERE automation_id=? ORDER BY version_no", (row["automation_id"],)).fetchall()
+        finfo = {r["field_id"]: r for r in conn.execute("SELECT field_id, field_name, table_id, table_name, data_type FROM airtable_fields")}
+        tnames = {r["table_id"]: r["table_name"] for r in conn.execute("SELECT table_id, table_name FROM airtable_tables")}
+        vname = {r["view_id"]: r["view_name"] for r in conn.execute("SELECT view_id, view_name FROM airtable_views")}
+        tmap = form_target_lookup(conn, env) if env else {}
+    spec = json.loads(row["spec_json"])
+    recs = walk_automation(spec)
+    unmapped = {}
+    titles = {r["item"]["id"]: ("Trigger" if r["kind"] == "trigger" else "Step %s: %s" % (r["path"], r["item"].get("title") or "")) for r in recs}
+
+    for f in finfo.values():
+        tnames.setdefault(f["table_id"], f["table_name"])
+
+    def tname(tid):
+        return tnames.get(tid, tid)
+
+    def fref(fid, where=None):
+        """(display name, id to show, type). Passing where records an unmapped field for the report's verdict."""
+        f = finfo.get(fid)
+        src = f["field_name"] if f else "(unknown field)"
+        if not env:
+            return src, fid, f["data_type"] if f else ""
+        t = tmap.get(fid)
+        if not t or not t["known"]:
+            if where:
+                unmapped.setdefault(fid, []).append(where)
+            return "UNMAPPED: " + src, "", ""
+        return t["name"], t["id"], t["type"]
+
+    def fhtml(fid, where):
+        nm, ident, typ = fref(fid, where)
+        src = ""
+        if env:
+            f = finfo.get(fid)
+            src = ' <span class="src">(Airtable: %s %s)</span>' % (esc(f["field_name"] if f else "?"), _code(fid))
+        return "<b>%s</b>%s%s%s" % (esc(nm), " " + _code(ident) if ident else "", (' <span class="tag">%s</span>' % esc(typ)) if typ else "", src)
+
+    def group_html(g, where):
+        parts = []
+        for it in g["items"]:
+            if it["type"] == "group":
+                parts.append("<li>%s</li>" % group_html(it, where))
+            else:
+                lf = it["left"]
+                left = fhtml(lf["field_id"], where) if lf["kind"] == "field" else "<b>%s</b>" % esc(lf["text"])
+                if lf["kind"] == "field" and lf.get("source"):
+                    left += ' <span class="src">from %s</span>' % esc(titles.get(lf["source"], "?"))
+                elif lf["kind"] == "field":
+                    left += ' <span class="src">from the trigger record</span>'
+                parts.append("<li>%s %s%s</li>" % (left, AUTO_OPERATORS.get(it["operator"], esc(it["operator"])),
+                                                   "" if it["operator"] in NO_VALUE_OPERATORS else " <b>&ldquo;%s&rdquo;</b>" % esc(it["value"])))
+        return '<div class="cg"><b>%s</b> of these are true:<ul>%s</ul></div>' % ("ALL" if g["junction"] == "AND" else "ANY", "".join(parts) or "<li><i>(no conditions)</i></li>")
+
+    def settings_html(it):
+        out = []
+        for s in it.get("settings") or []:
+            if s["format"] == "plain":
+                out.append('<div class="setting"><b>%s:</b><pre class="code">%s</pre></div>' % (esc(s["name"]), esc(s.get("value") or "")))
+            else:
+                out.append('<div class="setting"><b>%s:</b> %s</div>' % (esc(s["name"]), blocks_html(s.get("value_blocks") or [])))
+        return "".join(out)
+
+    def refs_html(it, where):
+        if not it.get("field_refs"):
+            return ""
+        lis = []
+        for fr in it["field_refs"]:
+            verb = {"set": "Set", "read": "Read", "use": "Uses"}[fr["role"]]
+            lis.append("<li>%s %s%s</li>" % (verb, fhtml(fr["field_id"], where), (" to <b>%s</b>" % esc(fr["value"])) if fr.get("value") else ""))
+        return "<div class=\"logic\">Fields:<ul>%s</ul></div>" % "".join(lis)
+
+    def table_html(tid):
+        if not tid:
+            return ""
+        extra = ""
+        if env:
+            where = {tmap[fid]["where"] for fid in tmap if finfo.get(fid) and finfo[fid]["table_id"] == tid and tmap[fid].get("where")}
+            extra = " &rarr; Workfront: %s" % esc("; ".join(sorted(where))) if where else " &rarr; Workfront record type not yet known"
+        return '<div class="src">Table: <b>%s</b> %s%s</div>' % (esc(tname(tid)), _code(tid), extra)
+
+    def render_steps(steps, prefix):
+        out = []
+        for i, st in enumerate(steps):
+            p = (prefix + "." if prefix else "") + str(i + 1)
+            num = '<span class="num">%s</span>' % p
+            where = "step %s" % p
+            desc = blocks_html(st.get("description_blocks") or [])
+            if st["type"] == "action":
+                out.append('<div class="item step">%s<span class="kind">%s</span><b>%s</b>%s%s%s%s%s%s</div>' % (
+                    num, esc(ACTION_TYPES.get(st["action_type"], st["action_type"])), esc(st["title"]), table_html(st.get("table_id")),
+                    ('<div class="src">Updates the record from <b>%s</b></div>' % esc(titles.get(st["record_source"], "?")) if st.get("record_source")
+                     else '<div class="src">Updates the trigger record</div>' if st["action_type"] == "update_record" else ""),
+                    desc, ("<div class=\"logic\">Find records where:%s</div>" % group_html(st["conditions"], where)) if st.get("conditions") and st["conditions"]["items"] else "",
+                    refs_html(st, where), settings_html(st)))
+            elif st["type"] == "repeat":
+                over = esc(st["over_text"]) if st.get("over_text") else ""
+                over_src = ("records found in <b>%s</b>" % esc(titles.get(st["over_source"], "?"))) if st.get("over_source") else ""
+                out.append('<div class="item rep">%s<span class="kind">Repeat for each</span><b>%s</b><div class="src">%s</div>%s<div class="kids">%s</div></div>' % (
+                    num, esc(st["title"]), " &middot; ".join(x for x in (over_src, over) if x) or "(not described)", desc + table_html(st.get("table_id")),
+                    render_steps(st["steps"], p)))
+            else:
+                brs = []
+                for j, br in enumerate(st["branches"]):
+                    bp = "%s.%d" % (p, j + 1)
+                    label = ("Else" if br["is_else"] else ("If" if j == 0 else "Else if")) + ((": " + br["label"]) if br.get("label") else "")
+                    cond = "" if br["is_else"] else group_html(br["conditions"], "branch %s" % bp)
+                    brs.append('<div class="item br"><span class="num">%s</span><span class="kind">%s</span>%s<div class="kids">%s</div></div>' % (
+                        bp, esc(label), cond or ("<div class=\"src\">Runs when no earlier branch matched.</div>"), render_steps(br["steps"], bp)))
+                out.append('<div class="item cond">%s<span class="kind">Conditional</span><b>%s</b>%s%s</div>' % (num, esc(st["title"]), desc, "".join(brs)))
+        return "".join(out)
+    trig = spec["trigger"]
+    tdesc = blocks_html(trig.get("description_blocks") or [])
+    twatch = ""
+    if trig.get("watched_field_ids"):
+        twatch = '<div class="logic">Watches:<ul>%s</ul></div>' % "".join("<li>%s</li>" % fhtml(f, "trigger") for f in trig["watched_field_ids"])
+    trig_html = '<div class="item"><span class="num">T</span><span class="kind">Trigger</span><b>%s</b>%s%s%s%s%s%s</div>' % (
+        esc(TRIGGER_TYPES.get(trig["trigger_type"], trig["trigger_type"])), table_html(trig.get("table_id")),
+        ('<div class="src">View: <b>%s</b> %s</div>' % (esc(vname.get(trig["view_id"], "")), _code(trig["view_id"]))) if trig.get("view_id") else "",
+        ('<div class="src">Schedule: %s</div>' % esc(trig["schedule_text"])) if trig.get("schedule_text") else "", tdesc, twatch,
+        ("<div class=\"logic\">Runs when:%s</div>" % group_html(trig["conditions"], "trigger")) if trig.get("conditions") else "")
+    steps_html = render_steps(spec["steps"], "")
+    # fields-used table from the same index the queries use
+    items, logic, refs, links = _auto_index_rows(spec)
+    path_of = {x[0]: x[3] for x in items}
+    by_field = {}
+    for iid, role, fid, detail in refs:
+        by_field.setdefault(fid, []).append("%s (%s)" % (AUTO_ROLE_LABELS[role].split(" (")[0], "trigger" if iid == "trigger" else path_of.get(iid, "?")))
+    frows = []
+    for fid, uses in sorted(by_field.items(), key=lambda kv: (fref(kv[0])[0].lower(), kv[0])):
+        nm, ident, typ = fref(fid)
+        f = finfo.get(fid)
+        frows.append(_tr([_td(esc(nm) + ((' <span class="src">(Airtable: %s)</span>' % esc(f["field_name"] if f else "?")) if env else "")),
+                          _td(_code(ident) if ident else "&mdash;"), _td(esc(typ)), _td(esc(f["table_name"] if f else "")), _td(esc("; ".join(uses)))],
+                         "" if (not env or ident) else "second"))
+    unmapped_ids = unmapped
+    link_rows = [("Automation", "description", t, u) for t, u in blocks_links(spec["automation"].get("description_blocks") or [])]
+    for r in recs:
+        it = r["item"]
+        pth = "Trigger" if r["kind"] == "trigger" else r["path"]
+        link_rows += [(pth, "description", t, u) for t, u in blocks_links(it.get("description_blocks") or [])]
+        for s in it.get("settings") or []:
+            if s["format"] == "rich":
+                link_rows += [(pth, s["name"], t, u) for t, u in blocks_links(s.get("value_blocks") or [])]
+    env_label = {"DEV": "Workfront Planning (DEV)", "PROD": "Workfront Planning (PROD)"}.get(env, "Airtable (source)")
+    verdict = ""
+    if env:
+        if unmapped_ids:
+            names = ", ".join(sorted((finfo.get(f) or {"field_name": f})["field_name"] for f in unmapped_ids))
+            verdict = ('<div class="box err"><b>Not ready to rebuild.</b> %d field(s) have no usable target mapping: %s. Fill the field crosswalk and the '
+                       'Workfront field list, then regenerate this report.</div>' % (len(unmapped_ids), esc(names)))
+        else:
+            verdict = '<div class="box"><b>Every field in this automation is mapped to a %s field.</b></div>' % esc(env_label)
+    scenario = spec["automation"].get("target_scenario_name")
+    link_table = ("<table><thead>%s</thead><tbody>%s</tbody></table>" % (
+        _th(["Item", "Where", "Visible text", "Address"]),
+        "".join(_tr([_td(esc(a)), _td(esc(b)), _td(esc(c)), _td('<span class="url">%s</span>' % esc(d))]) for a, b, c, d in link_rows))
+        if link_rows else "<p>The automation contains no links.</p>")
+    ver_rows = "".join(_tr([_td(str(v["version_no"]) + (" (this report)" if v["version_no"] == row["version_no"] else "")),
+                            _td(_ts(v["created_at"])), _td(esc(v["version_note"] or ""))]) for v in versions)
+    desc = blocks_html(spec["automation"].get("description_blocks") or [])
+    parts = [
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>%s</title><style>%s</style></head><body><main>" % (
+            esc("Automation specification: %s (version %d)" % (row["automation_name"], row["version_no"])), AUTO_REPORT_CSS),
+        "<h1>%s</h1>" % esc(row["automation_name"]),
+        '<div class="meta">Automation key %s &middot; Version %d &middot; Saved %s &middot; Fields shown for: <b>%s</b> &middot; Generated %s</div>' % (
+            _code(row["automation_id"]), row["version_no"], _ts(row["created_at"]), esc(env_label), _ts(utc_now())),
+        '<div class="meta">Base %s%s &middot; Status in Airtable: %s</div>' % (
+            _code(row["base_id"] or ""), (" &middot; Target Workfront Fusion scenario: <b>%s</b>" % esc(scenario)) if scenario else "",
+            "on" if spec["automation"].get("enabled_in_source", True) else "off"), verdict,
+        "<h2>1. About this document</h2>",
+        "<p>A structural record of the automation, captured by hand because Airtable does not expose automations through its API. The trigger comes first, "
+        "then the steps in the order they run. Conditional blocks list their branches in order, and conditions are written out with their nesting "
+        "(ALL / ANY). Text and links are copied verbatim, and each link prints its real address beside the visible text. Values in conditions and field "
+        "assignments are those used in Airtable: if a choice is renamed in the target, change the value there too.</p>",
+        ("<div class=\"item\"><span class=\"kind\">Description</span>%s</div>" % desc) if desc else "",
+        "<h2>2. Version history</h2>", "<table><thead>%s</thead><tbody>%s</tbody></table>" % (_th(["Version", "Saved (UTC)", "Note"]), ver_rows),
+        "<h2>3. Trigger and steps</h2>", trig_html, steps_html or "<p>The automation has no steps.</p>",
+        "<h2>4. Fields used</h2>", "<table><thead>%s</thead><tbody>%s</tbody></table>" % (
+            _th(["Target field" if env else "Airtable field", "Field ID", "Type", "Airtable table", "Used by"]), "".join(frows)),
+        "<h2>5. Links</h2>", link_table,
+        "<h2>6. Review</h2><table class=\"sign\"><thead>%s</thead><tbody><tr><td></td><td></td><td></td><td></td></tr>"
+        "<tr><td></td><td></td><td></td><td></td></tr></tbody></table>" % _th(["Reviewer", "Role", "Date", "Comment"]),
+        "</main></body></html>"]
+    return "".join(parts), row, len(unmapped_ids)
+
+
+def _auto_report_args(q):
+    env = (q.get("target") or [""])[0].upper()
+    if env not in ("", "DEV", "PROD"):
+        raise AppError("target must be DEV, PROD or empty.")
+    return (q.get("automation_id") or [""])[0], (q.get("version") or [""])[0], env
+
+
+def _auto_report_name(row, env, ext):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", row["automation_id"]).strip("_")[:60] or "automation"
+    return "Automation_%s_v%d_%s_%s.%s" % (safe, row["version_no"], env or "Airtable", _stamp(), ext)
+
+
+def api_auto_report_html(q):
+    aid, ver, env = _auto_report_args(q)
+    text, row, _n = build_automation_report(aid, ver, env)
+    headers = {}
+    if (q.get("download") or [""])[0]:
+        headers["Content-Disposition"] = 'attachment; filename="%s"' % _auto_report_name(row, env, "html")
+    return (scrub(text).encode("utf-8"), "text/html; charset=utf-8", headers)
+
+
+def api_auto_report_mhtml(q):
+    aid, ver, env = _auto_report_args(q)
+    text, row, _n = build_automation_report(aid, ver, env)
+    return (to_mhtml(scrub(text), "Automation specification: %s" % row["automation_name"]), "application/x-mimearchive",
+            {"Content-Disposition": 'attachment; filename="%s"' % _auto_report_name(row, env, "mhtml")})
+
+
+def api_auto_report_status(q):
+    aid, ver, _env = _auto_report_args(q)
+    out, row = {}, None
+    for env in ("DEV", "PROD"):
+        _t, row, n = build_automation_report(aid, ver, env)
+        out[env.lower()] = n
+    return {"unmapped": out, "version_no": row["version_no"]}
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
-STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
-          "/index.html": ("index.html", "text/html; charset=utf-8"),
+HTML = "text/html; charset=utf-8"
+JS = "application/javascript; charset=utf-8"
+# Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
+STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML),
+          "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
-          "/scripts.js": ("scripts.js", "application/javascript; charset=utf-8")}
+          "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
               "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
@@ -2667,10 +4300,20 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
               "/api/export/field_options.csv": api_export_field_options,
               "/api/export/attachment_stats.csv": api_export_attachment_stats, "/api/attachments/stats": api_attachment_stats,
-              "/api/export/views.csv": api_export_views, "/api/export/tables.csv": api_export_tables}
+              "/api/export/views.csv": api_export_views, "/api/export/tables.csv": api_export_tables,
+              "/api/forms/list": api_forms_list, "/api/forms/spec": api_forms_spec, "/api/forms/usage": api_forms_usage,
+              "/api/forms/report.html": api_form_report_html, "/api/forms/report.mhtml": api_form_report_mhtml,
+              "/api/forms/report/status": api_form_report_status,
+              "/api/export/form_usage.csv": api_export_form_usage, "/api/export/form_links.csv": api_export_form_links,
+              "/api/automations/list": api_automations_list, "/api/automations/spec": api_automations_spec,
+              "/api/automations/usage": api_automations_usage, "/api/automations/report.html": api_auto_report_html,
+              "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
+              "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
-               "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel}
+               "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
+               "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
+               "/api/automations/save": api_automations_save}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2727,6 +4370,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard(False):
             return
         u = urlparse(self.path)
+        if u.path in REDIRECTS:
+            self._send(302, b"", "text/plain; charset=utf-8", {"Location": REDIRECTS[u.path]})
+            return
         if u.path in STATIC:
             name, ctype = STATIC[u.path]
             try:

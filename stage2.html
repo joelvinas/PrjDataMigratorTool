@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 2: Forms - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="stage2">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="baseStrip">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+  </div>
+  <p class="hint">Stage 2 records each form by hand, because Airtable's API does not return form layout or logic. The base's schema must already be ingested in <a href="/stage1">Stage 1</a>, so fields can be chosen from the list.</p>
+</section>
+
+<!-- A: choose a form -->
+<section class="card" id="pickCard">
+  <h2><span class="num">A</span> Choose a form</h2>
+  <div class="row">
+    <label for="savedForms">Recorded forms</label>
+    <select id="savedForms"></select>
+    <label for="openVersion">Version</label>
+    <select id="openVersion"></select>
+    <button id="btnOpen" type="button">Open in the editor</button>
+  </div>
+  <div class="row">
+    <label for="viewPick">Airtable form views in this base</label>
+    <select id="viewPick"></select>
+    <button id="btnNewView" type="button">Record this form view</button>
+  </div>
+  <div class="row">
+    <label for="freeName">Or a form with no Airtable view</label>
+    <input id="freeName" type="text" class="wide" placeholder="Form name" autocomplete="off">
+    <select id="freeTable" title="Table the form collects data into"></select>
+    <button id="btnNewFree" type="button">Start this form</button>
+  </div>
+  <p class="hint">A form view is recorded under its Airtable view ID. A form with no view gets a key made from its name. The form's table decides which fields can be chosen. Each save creates a new version; earlier versions are never changed.</p>
+  <div id="pickMessage" class="msg"></div>
+</section>
+
+<!-- B: editor -->
+<section class="card" id="editorCard" hidden>
+  <h2><span class="num">B</span> Record the form</h2>
+  <div class="row">
+    <label for="formName">Form name</label>
+    <input id="formName" type="text" class="wide" autocomplete="off">
+  </div>
+  <div class="row">
+    <label for="formKey">Form key</label>
+    <input id="formKey" type="text" autocomplete="off">
+    <span id="formScope" class="hint"></span>
+  </div>
+  <div id="formDescBox"></div>
+  <h3>Form contents, in the order they appear</h3>
+  <p class="hint">Add sections, fields, headings, help text, text blocks and hidden or preset fields. Logic can use any field placed earlier on the form, including hidden ones. Text supports <strong>bold</strong>, <em>italic</em> and links; use the buttons above each text box.</p>
+  <div id="tree"></div>
+  <div id="rootAdd" class="row addrow"></div>
+  <div class="row">
+    <label for="versionNote">Note for this version</label>
+    <input id="versionNote" type="text" class="wide" maxlength="500" placeholder="What changed, or where this was recorded from">
+    <button id="btnSave" type="button" class="primary">Save as a new version</button>
+  </div>
+  <div id="saveMessage" class="msg"></div>
+  <div id="saveProblems" class="note err" hidden></div>
+</section>
+
+<!-- C: versions and reports -->
+<section class="card" id="reportCard" hidden>
+  <h2><span class="num">C</span> Documentation and rebuild report</h2>
+  <p class="hint">The <strong>Airtable</strong> report is the audit record. A <strong>Workfront Planning</strong> report shows the same form with each Airtable field replaced by its target field from the field crosswalk, so a person can build the mirror form. It says plainly when a field has no mapping yet.</p>
+  <div class="row">
+    <label for="repVersion">Version</label>
+    <select id="repVersion"></select>
+    <label for="repTarget">Show fields as</label>
+    <select id="repTarget">
+      <option value="">Airtable (source)</option>
+      <option value="DEV">Workfront Planning (DEV)</option>
+      <option value="PROD">Workfront Planning (PROD)</option>
+    </select>
+    <button id="btnRepPreview" type="button">Preview</button>
+    <a id="lnkRepHtml" class="btnlink" href="#">Download .html</a>
+    <a id="lnkRepMhtml" class="btnlink" href="#">Download .mhtml</a>
+    <a id="lnkLinksCsv" class="btnlink" href="#">Links .csv</a>
+  </div>
+  <div id="repStatus" class="msg"></div>
+  <iframe id="repFrame" class="reportframe" title="Form report preview" sandbox hidden></iframe>
+</section>
+
+<!-- D: field usage -->
+<section class="card" id="usageCard">
+  <h2><span class="num">D</span> Which fields do the forms use?</h2>
+  <div class="row">
+    <label for="useQ">Field</label>
+    <input id="useQ" type="text" placeholder="Field name or ID (blank = all)" autocomplete="off">
+    <label for="useRole">Role</label>
+    <select id="useRole">
+      <option value="">any</option>
+      <option value="placed">placed on the form</option>
+      <option value="required">required</option>
+      <option value="hidden_preset">hidden / preset</option>
+      <option value="display_logic">controls display logic</option>
+      <option value="skip_logic">controls skip logic</option>
+    </select>
+    <label><input id="useAll" type="checkbox"> include earlier versions</label>
+    <button id="btnUsage" type="button">Search</button>
+    <a id="lnkUsageCsv" class="btnlink" href="#">Download .csv</a>
+    <a id="lnkAllLinksCsv" class="btnlink" href="#">All links .csv</a>
+  </div>
+  <div id="usageSummary" class="msg"></div>
+  <div class="scroll" id="usageScroll" hidden>
+    <table class="grid compact" id="usageTable">
+      <thead><tr><th>Field</th><th>Table</th><th>Form</th><th class="num">Ver.</th><th>Role</th><th>Item</th><th>Detail</th><th>Workfront DEV</th><th>Workfront PROD</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/editor-kit.js"></script>
+<script src="/stage2.js"></script>
+</body>
+</html>
