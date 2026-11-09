@@ -150,3 +150,18 @@ button.tb.add { background: #f3f6fd; }
 .logicbox.skip { border-left-color: var(--err); background: #fdf3f2; }
 .logic-head { font-weight: 600; font-size: 13.5px; }
 .row.cond { gap: 6px; }
+
+/* Stage 3: automation recorder */
+.fitem.t-trigger { background: #eef6ff; border-color: #a9c6ee; }
+.fitem.t-conditional { background: #f4f6fb; border-color: #b9c3dc; }
+.fitem.t-repeat { background: #f2f8f3; border-color: #b7d6bd; }
+.branchbox { border: 1px dashed #9fb2d9; border-radius: 8px; padding: 6px 10px 8px; margin: 8px 0; background: #fbfcff; }
+.branchbox.else { background: #fafafa; border-color: #c9cdd6; }
+.branch-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cgroup { margin: 6px 0; padding: 4px 0 4px 10px; border-left: 3px solid #9fb2d9; }
+.cgroup .cgroup { border-left-color: #c7a8d9; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip { padding: 1px 8px; font-size: 12.5px; border-radius: 10px; background: #e9eefb; border-color: #c3cfee; }
+.setting-row { margin: 6px 0; padding: 4px 0; border-top: 1px solid var(--line); }
+textarea.code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; width: 100%; }
+.addsel { min-width: 240px; }

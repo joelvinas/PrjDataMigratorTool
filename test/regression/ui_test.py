@@ -21,7 +21,7 @@ with sync_playwright() as p:
     nb=pg.eval_on_selector("#sidenav","e=>{const r=e.getBoundingClientRect();return r.bottom}")
     check("API call log link sits at the bottom of the side panel, below Stage 4", box("#sidenav a[href='/log']")[0]>box("#sidenav .planned")[1] and nb-box("#sidenav a[href='/log']")[1]<40, (box("#sidenav a[href='/log']"),nb))
     check("database badge shows connected on Setup", "connected" in pg.inner_text("#dbBadge") and "not" not in pg.inner_text("#dbBadge"), pg.inner_text("#dbBadge"))
-    check("Setup lists the connected database's tables", pg.query_selector_all("#countsTable tbody tr") and len(pg.query_selector_all("#countsTable tbody tr"))==15)
+    check("Setup lists the connected database's tables", pg.query_selector_all("#countsTable tbody tr") and len(pg.query_selector_all("#countsTable tbody tr"))==18)
     check("token shown only as yes/no", pg.inner_text("#tokenYesNo")=="yes" and "patMOCK" not in pg.content())
     check("hidden rows are really hidden (no stray empty button on Setup)", not pg.is_visible("#dbActions"))
     pg.fill("#baseId","appSampleBase001"); pg.wait_for_timeout(200)
@@ -77,11 +77,10 @@ with sync_playwright() as p:
     pg.check("#logFail"); pg.wait_for_timeout(600)
     check("failures filter works on the log page", "Matching calls" in pg.inner_text("#logSummary"))
     # ---- placeholders ----
-    for path,label,needs in [("/stage3","Stage 3: Automations","automation_catalog")]:
-        pg.click("#sidenav a[href='%s']"%path); pg.wait_for_timeout(700)
-        check("%s placeholder"%label, pg.inner_text("#sidenav a.current .nav-label")==label and "Not built yet" in pg.inner_text("main") and needs in pg.inner_text("main"))
     pg.click("#sidenav a[href='/stage2']"); pg.wait_for_timeout(900)
     check("Stage 2 is the form recorder, not a placeholder", pg.inner_text("#sidenav a.current .nav-label")=="Stage 2: Forms" and "Not built yet" not in pg.inner_text("main") and pg.query_selector("#pickCard") is not None)
+    pg.click("#sidenav a[href='/stage3']"); pg.wait_for_timeout(900)
+    check("Stage 3 is the automation recorder, not a placeholder", pg.inner_text("#sidenav a.current .nav-label")=="Stage 3: Automations" and "Not built yet" not in pg.inner_text("main") and pg.query_selector("#pickCard") is not None and pg.query_selector("#triggerBox") is not None)
     # ---- old address and a fresh tab: base choice survives within the tab, and the old URL lands on Setup ----
     pg.goto(B+"/index.html"); pg.wait_for_timeout(800)
     check("/index.html lands on Setup", pg.url.rstrip("/")==B and pg.inner_text("#sidenav a.current .nav-label")=="Setup", pg.url)

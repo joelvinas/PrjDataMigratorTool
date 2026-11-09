@@ -13,8 +13,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "test", "regression")
 TOKEN = "patMOCK.0000000000000000000000"
 # (name, scripts run in order against ONE server, MOCK_FILES)
-SUITES = [("e2e2", ["e2e2", "report_test"], "0"), ("views", ["views_test"], "0"), ("forms", ["forms_test"], "0"), ("extract", ["extract_test"], "0"),
-          ("attach", ["attach_test"], "1"), ("attstats", ["attstats_test"], "1"), ("ui", ["ui_test"], "1"), ("formsui", ["forms_ui_test"], "0")]
+SUITES = [("e2e2", ["e2e2", "report_test"], "0"), ("views", ["views_test"], "0"), ("forms", ["forms_test"], "0"), ("automations", ["automations_test"], "0"), ("extract", ["extract_test"], "0"),
+          ("attach", ["attach_test"], "1"), ("attstats", ["attstats_test"], "1"), ("ui", ["ui_test"], "1"), ("formsui", ["forms_ui_test"], "0"), ("autoui", ["automations_ui_test"], "0")]
 
 
 def wait_port(port, secs=10):
