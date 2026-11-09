@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.9"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.10"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -65,8 +65,9 @@ async function loadStatus() {
   tb.textContent = "Token: " + (s.token_configured ? "configured" : "not configured");
   tb.className = "badge " + (s.token_configured ? "ok" : "bad");
   $("tokenYesNo").textContent = s.token_configured ? "yes" : "no";
-  baseChoices = s.bases || [];
-  if (baseChoices.length === 1 && !$("baseId").value) $("baseId").value = baseChoices[0].baseId;
+  cfgBases = s.bases || [];
+  refreshBaseChoices();
+  if (cfgBases.length === 1 && !$("baseId").value) $("baseId").value = cfgBases[0].baseId;
   const sb = $("setupBanner");
   sb.hidden = s.token_configured;
   sb.textContent = s.token_configured ? "" : ("Setup needed: " + (s.config_problem || "No token configured."));
@@ -210,11 +211,13 @@ function fillScopeSelectors() {
   const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [st.value, rt.value];
   for (const n of [sb, rb, cb, eb]) { clear(n); if (n !== sb) n.appendChild(el("option", { value: "", text: "All bases" })); }
   for (const n of [st, rt]) { clear(n); if (n === rt) n.appendChild(el("option", { value: "", text: "All tables" })); }
+  refreshBaseChoices();
+  // Base lists come from the database (the bases actually ingested); names come from config.json when it has them.
   for (const b of state.schema) {
-    for (const n of [sb, rb, cb, eb]) n.appendChild(el("option", { value: b.base_id, text: b.base_id }));
+    for (const n of [sb, rb, cb, eb]) n.appendChild(el("option", { value: b.base_id, text: baseLabel(b.base_id) }));
     for (const t of b.tables) {
       if (t.stale) continue;
-      for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: b.base_id + " / " + t.table_name }));
+      for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: baseLabel(b.base_id) + " / " + t.table_name }));
     }
   }
   sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; st.value = keepT[0]; rt.value = keepT[1];
@@ -229,6 +232,59 @@ function updateScopeVisibility() {
 /* ---------- step 4: dependency graph ---------- */
 function note(kind, title, items) {
   return el("div", { class: "note " + kind }, el("strong", { text: title }), items && items.length ? el("ul", {}, items.map((i) => el("li", { text: i }))) : null);
+}
+
+const MODE_HELP = {
+  literal: "Literal: every link field counts as a dependency, exactly as Airtable defines it. Airtable creates a link on both tables for each relationship, so linked tables usually depend on each other and end up in cycles that load together, with a second pass to fill in the links. Pick this to see the worst case or to check the other mode against it.",
+  collapse: "Resolve two-way link pairs: for each pair of linked fields that point at each other, if exactly one side is set to allow a single linked record, that table is the child and only its field is a dependency; the other side is just the reverse view. Many-to-many pairs, and pairs with no hint, stay as cycles. Pick this for the load plan: it gives the fewest cycles that are still correct.",
+};
+function syncModeHelp() { $("depModeHelp").textContent = MODE_HELP[$("depMode").value] || ""; }
+
+/* ---------- download just the dependency graph (SVG or PNG), built in the browser from the drawing above ---------- */
+const GRAPH_CSS = "text{font:12px system-ui,Segoe UI,Arial,sans-serif;fill:#1d2330}.node rect{fill:#fff;stroke:#7b8498;stroke-width:1.2;rx:5}" +
+  ".node.cyc rect{stroke:#b3261e;stroke-width:2;fill:#fff6f5}.edge{fill:none;stroke:#8a93a6;stroke-width:1.2}.edge.cyc{stroke:#b3261e}";
+function graphSvgText() {
+  const src = $("graphBox").querySelector("svg");
+  if (!src) throw new Error("There is no graph to download yet. Recompute the load order first.");
+  const svg = src.cloneNode(true);
+  svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const w = Number(svg.getAttribute("width")), h = Number(svg.getAttribute("height"));
+  const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = GRAPH_CSS;
+  svg.insertBefore(style, svg.firstChild);
+  const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bg.setAttribute("width", w); bg.setAttribute("height", h); bg.setAttribute("fill", "#ffffff");
+  svg.insertBefore(bg, style.nextSibling);
+  return { text: '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg), w, h };
+}
+function graphFileName(ext) {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return "DependencyGraph_" + ($("depMode").value === "literal" ? "Literal" : "Resolve") + "_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + "." + ext;
+}
+function saveBlob(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function downloadGraphSvg() {
+  try { saveBlob(new Blob([graphSvgText().text], { type: "image/svg+xml" }), graphFileName("svg")); setMsg("depMessage", "", ""); }
+  catch (e) { setMsg("depMessage", e.message, "err"); }
+}
+function downloadGraphPng() {
+  let g;
+  try { g = graphSvgText(); } catch (e) { setMsg("depMessage", e.message, "err"); return; }
+  const scale = 2, img = new Image();
+  img.onload = () => {
+    const cv = document.createElement("canvas");
+    cv.width = Math.min(g.w * scale, 16000); cv.height = Math.min(g.h * scale, 16000);
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    cv.toBlob((b) => b ? saveBlob(b, graphFileName("png")) : setMsg("depMessage", "The browser could not make a PNG of this graph. Use the SVG instead.", "err"), "image/png");
+  };
+  img.onerror = () => setMsg("depMessage", "The browser could not make a PNG of this graph. Use the SVG instead.", "err");
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(g.text);
 }
 
 async function recompute() {
@@ -338,8 +394,18 @@ function drawGraph(g, selfTables) {
 }
 
 /* ---------- base picker: dropdown from config.json, typing still allowed ---------- */
-let baseChoices = [];
+let baseChoices = [];   // what the Base ID picker offers: config.json bases plus any base already in the database
+let cfgBases = [];      // bases listed in config.json (the only place a base name comes from)
 let baseActive = -1;
+/* One label for a base everywhere: "Name - ID" when config.json knows the name, otherwise just the ID. */
+function baseLabel(id) {
+  const c = cfgBases.find((b) => b.baseId === id);
+  return c && c.name ? c.name + " - " + id : id;
+}
+function refreshBaseChoices() {
+  const inDb = (state.schema || []).map((b) => b.base_id).filter((id) => !cfgBases.some((b) => b.baseId === id));
+  baseChoices = cfgBases.concat(inDb.map((id) => ({ name: "", baseId: id, fromDb: true })));
+}
 function baseMatches(filter) {
   const f = (filter || "").trim().toLowerCase();
   return f ? baseChoices.filter((b) => b.baseId.toLowerCase().includes(f) || (b.name || "").toLowerCase().includes(f)) : baseChoices;
@@ -349,13 +415,13 @@ function openBaseMenu(filter) {
   clear(menu);
   baseActive = -1;
   if (!baseChoices.length) {
-    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json. Type a base ID instead." }));
+    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json or the database. Type a base ID instead." }));
   } else if (!list.length) {
     menu.appendChild(el("li", { class: "combo-empty", text: "No configured base matches. The text you typed will be used as the base ID." }));
   }
   list.forEach((b, i) => {
     const li = el("li", { role: "option", "data-id": b.baseId },
-      el("span", { class: "combo-name", text: b.name || "(no name)" }), el("code", { text: b.baseId }));
+      el("span", { class: "combo-name", text: b.name || (b.fromDb ? "(in database, not in config.json)" : "(no name)") }), el("code", { text: b.baseId }));
     li.addEventListener("mousedown", (ev) => { ev.preventDefault(); chooseBase(b.baseId); });
     menu.appendChild(li);
   });
@@ -602,6 +668,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btnExtractDelete").addEventListener("click", deleteExtract);
   $("btnExtractRefresh").addEventListener("click", guard(loadExtractFiles));
   $("btnAttRefresh").addEventListener("click", guard(loadAttachmentStats));
+  $("btnGraphSvg").addEventListener("click", downloadGraphSvg);
+  $("btnGraphPng").addEventListener("click", downloadGraphPng);
+  $("depMode").addEventListener("change", syncModeHelp);
+  syncModeHelp();
   const syncSave = () => {
     const on = $("saveRecords").checked;
     $("saveNote").hidden = !on;

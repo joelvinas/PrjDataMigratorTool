@@ -89,3 +89,5 @@ td.bad { color: var(--err); font-weight: 600; } td.good { color: var(--ok); }
 td.settings { color: var(--muted); font-size: 12.5px; max-width: 520px; overflow-wrap: anywhere; }
 
 .tablemeta { margin: 6px 10px; overflow-wrap: anywhere; }
+
+.modehelp { font-style: italic; color: #1b3f80; background: #eaf1fd; border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13.5px; }

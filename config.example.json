@@ -7,6 +7,6 @@
       "baseId": "appXXXXXXXXXXXXXX"
     }
   ],
-  "db_path": "migration.db",
+  "db_path": "db/migration.db",
   "requests_per_second": 4.5
 }

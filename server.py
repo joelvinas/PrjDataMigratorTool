@@ -66,7 +66,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.9"
+APP_VERSION = "1.10"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -514,6 +514,11 @@ def api_db_create(body):
     if os.path.isdir(path):
         raise AppError("That path is a folder. Enter the full path of a file.")
     parent = os.path.dirname(path)
+    if not os.path.isdir(parent) and os.path.abspath(parent) == os.path.join(BASE_DIR, "db"):
+        try:
+            os.makedirs(parent, exist_ok=True)   # the app's own db folder is created for you
+        except OSError as e:
+            raise AppError("Could not create the folder %s: %s" % (parent, scrub(e)))
     if not os.path.isdir(parent):
         raise AppError("The folder %s does not exist. Create it first or choose another path." % parent)
     try:
@@ -2531,8 +2536,11 @@ def api_export_profile(q):
             for r in data if not r["stale"]]
     body = _csv_bytes(["base_id", "table", "field", "field_type", "row_count", "null_count", "cardinality",
                        "cardinality_capped"], rows)
-    return (body, "text/csv; charset=utf-8",
-            {"Content-Disposition": 'attachment; filename="profile_%s.csv"' % _stamp()})
+    def part(key, plural):   # the ID the user chose, or "Bases" / "Tables" for all
+        v = (q.get(key) or [""])[0]
+        return v if ID_SAFE_RE.match(v) else plural
+    name = "%s_%s_Profile_%s.csv" % (part("base_id", "Bases"), part("table_id", "Tables"), _stamp())
+    return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="%s"' % name})
 
 
 ATT_SUMMARY_SQL = ("SELECT s.base_id, s.table_id, COALESCE(t.table_name, s.table_id) AS table_name, s.field_id, "

@@ -24,7 +24,7 @@
   <h2><span class="num">1</span> Connect to database</h2>
   <p class="hint">Enter the path of a SQLite file. A relative path is resolved next to <code>server.py</code>.</p>
   <div class="row">
-    <input id="dbPath" type="text" class="wide" placeholder="migration.db" autocomplete="off">
+    <input id="dbPath" type="text" class="wide" placeholder="db/migration.db" autocomplete="off">
     <button id="btnConnect" class="primary">Connect</button>
   </div>
   <div id="dbMessage" class="msg"></div>
@@ -86,6 +86,7 @@
     </select>
     <button id="btnRecompute" class="primary">Recompute load order</button>
   </div>
+  <p id="depModeHelp" class="modehelp"></p>
   <div id="depMessage" class="msg"></div>
   <div id="depNotes"></div>
   <table id="orderTable" class="grid" hidden>
@@ -94,6 +95,11 @@
   </table>
   <h3>Dependency graph</h3>
   <p class="hint">Parents on the left, children on the right. Arrows point from parent to child. Red outline: table is in a cycle. &#8635; marks a self-link.</p>
+  <div class="row">
+    <button id="btnGraphSvg">Download graph .svg</button>
+    <button id="btnGraphPng">Download graph .png</button>
+    <span class="hint">Just the dependency graph, as drawn above, for slides and documents. SVG stays sharp at any size; PNG is a 2x image.</span>
+  </div>
   <div id="graphBox" class="graphbox"></div>
   <h3>Load order report</h3>
   <p class="hint">A self-contained report for auditors and for whoever runs the next stage. It shows where each schema came from and when it was captured, every base, table and field, the load order, which links wait for a second pass, and the dependency graph. It is built from the database and contains no record data. It uses the link handling selected above.</p>
@@ -115,7 +121,7 @@
 <!-- STEP 5 -->
 <section class="card" id="step5">
   <h2><span class="num">5</span> Run profiling</h2>
-  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them; it never saves values (step 6 is the only step that does).</p>
+  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them. Values are written to disk only if you tick "Also save every record" below (see step 6).</p>
   <div class="row">
     <label for="scope">Run</label>
     <select id="scope">
@@ -149,8 +155,8 @@
     <select id="resTable"><option value="">All tables</option></select>
     <button id="btnResults">Show results</button>
   </div>
-  <div class="row"><a id="lnkProfileCsv" class="btnlink" href="/api/export/profile.csv">Download results .csv</a>
-    <span class="hint">Uses the base and table chosen above. Metadata only (counts, no values).</span></div>
+  <div class="row"><a id="lnkProfileCsv" class="btnlink" href="/api/export/profile.csv">Download results .csv</a></div>
+  <p class="hint">One row per field, giving its <strong>row count</strong>, <strong>null count</strong> and <strong>cardinality</strong> (distinct values; a capped value is a lower bound) for every table in the base and table selected above. This is the data-quality summary to share with support or use to plan field mapping. The file name shows your selection, for example <code>Bases_Tables_Profile_&lt;date&gt;.csv</code> for everything. It contains counts only, no record values.</p>
   <p class="hint">Null = missing, empty text or empty list. Zero and unchecked boxes count as real values. A cardinality marked "capped" is a lower bound: the field has more distinct values than the cap.</p>
   <div class="scroll"><table id="resultsTable" class="grid" hidden>
     <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>

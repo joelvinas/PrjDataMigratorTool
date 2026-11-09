@@ -81,7 +81,7 @@ airtable-migration-control/
      "token": "PASTE_WRITE_TOKEN_HERE",
      "scopes": ["data.records:read", "schema.bases:read"],
      "bases": [ { "name": "PASTE_BASE_NAME_HERE", "baseId": "appXXXXXXXXXXXXXX" } ],
-     "db_path": "migration.db",
+     "db_path": "db/migration.db",
      "requests_per_second": 4.5
    }
    ```
@@ -103,7 +103,7 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 1. **Connect to a database.** Opens an existing SQLite file or creates one from the schema, checks that all expected tables and columns exist, and shows row counts.
 2. **Confirm token and enter a base ID.** The page shows only whether a token is configured (yes/no).
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
-4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
+4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph that can be downloaded on its own as an SVG or PNG. Each link-handling option has a short explanation under the dropdown. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
 5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field. An optional toggle also saves every record to JSON files during the same pass.
 6. **Saved record files.** Lists, checks and deletes the JSON files (and attachment files) written by the toggles in step 5.
 7. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
@@ -300,6 +300,8 @@ Two metadata-only CSV downloads let you check a run against an answer key or han
 
 - **Load order .csv** (step 4, with a base picker): `base_id, table, table_id, load_no, depth, parent_tables, in_cycle`. `load_no` counts within the base. It uses the link handling selected in step 4.
 - **Results .csv** (step 5, uses the base and table pickers above the results grid): `base_id, table, field, field_type, row_count, null_count, cardinality, cardinality_capped`. Fields no longer in the source are left out. A capped field shows the cap and `cardinality_capped = yes`; raise the cap if you need an exact value.
+
+Profile CSV downloads are named `{Base}_{Table}_Profile_{date}.csv`, using the base or table ID you selected, or `Bases` / `Tables` for all (for example `Bases_Tables_Profile_20261108-1840.csv`). Every base dropdown shows `Name - ID`; the list of bases comes from the database, and the name comes from `config.json` when it has one (the database stores base IDs only).
 
 The headers are accepted by the reference `compare.py`. Export one base at a time and name its label, for example `python src/compare.py --profile profile.csv --load-order load-order.csv --mode resolve --base ff_main` (use `--mode literal` for a Literal-mode export).
 
