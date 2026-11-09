@@ -4,6 +4,7 @@
   --okbg: #e6f4ec; --warnbg: #fff3df; --errbg: #fdeceb;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* so a hidden .row (display:flex) is really hidden */
 body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, "Segoe UI", Roboto, sans-serif; }
 code { background: #eef0f4; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
 .topbar { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center;
@@ -91,3 +92,28 @@ td.settings { color: var(--muted); font-size: 12.5px; max-width: 520px; overflow
 .tablemeta { margin: 6px 10px; overflow-wrap: anywhere; }
 
 .modehelp { font-style: italic; color: #1b3f80; background: #eaf1fd; border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13.5px; }
+
+/* ---------- multi-page layout: left navigation + content ---------- */
+.shell { display: flex; align-items: stretch; min-height: calc(100vh - 52px); }
+.sidenav { flex: 0 0 220px; display: flex; flex-direction: column; background: #fff; border-right: 1px solid var(--line); padding: 12px 0; position: sticky; top: 0; align-self: flex-start; height: calc(100vh - 52px); overflow-y: auto; }
+.sidenav ul { list-style: none; margin: 0; padding: 0; }
+.sidenav .nav-main { flex: 1; }
+.sidenav .nav-bottom { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.nav-link { display: flex; flex-direction: column; padding: 8px 18px; color: var(--ink); text-decoration: none; border-left: 3px solid transparent; }
+a.nav-link:hover { background: #eef2fb; }
+.nav-link.current { background: #eaf1fd; border-left-color: var(--accent); }
+.nav-link.current .nav-label { color: var(--accent); }
+.nav-label { font-weight: 600; font-size: 14px; }
+.nav-sub { font-size: 12px; color: var(--muted); }
+.nav-link.planned { color: var(--muted); cursor: default; }
+.nav-link.planned .nav-label { font-weight: 500; }
+.content { flex: 1; min-width: 0; }
+.banner.warn { background: var(--warnbg); color: #6b3d00; border-bottom: 1px solid #ecd2a6; }
+.banner a { color: inherit; font-weight: 600; }
+.card.context { padding-top: 10px; padding-bottom: 6px; }
+table.stages td:first-child { white-space: nowrap; }
+@media (max-width: 760px) {
+  .shell { flex-direction: column; }
+  .sidenav { position: static; flex: none; height: auto; width: 100%; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sidenav .nav-bottom { margin-top: 0; }
+}

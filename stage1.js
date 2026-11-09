@@ -1,146 +1,5 @@
 "use strict";
-/* Airtable migration control plane: front end. No frameworks. All data is inserted with
-   textContent (never innerHTML) so table or field names cannot inject markup. */
-
-const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.10"; // must match APP_VERSION in server.py
-const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
-
-function el(tag, attrs, ...kids) {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v === null || v === undefined || v === false) continue;
-    if (k === "class") n.className = v;
-    else if (k === "text") n.textContent = v;
-    else n.setAttribute(k, v === true ? "" : v);
-  }
-  for (const kid of kids.flat()) {
-    if (kid === null || kid === undefined || kid === false) continue;
-    n.appendChild(typeof kid === "string" || typeof kid === "number" ? document.createTextNode(String(kid)) : kid);
-  }
-  return n;
-}
-const clear = (n) => { while (n.firstChild) n.removeChild(n.firstChild); };
-const fmt = (n) => (n === null || n === undefined ? "" : Number(n).toLocaleString());
-
-function setMsg(id, text, kind) {
-  const n = $(id);
-  n.textContent = text || "";
-  n.className = "msg" + (kind ? " " + kind : "");
-}
-function showGlobalError(text) {
-  const n = $("globalError");
-  n.textContent = text || "";
-  n.hidden = !text;
-}
-
-async function api(method, path, body) {
-  const opts = { method, headers: {} };
-  if (method === "POST") {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body || {});
-  }
-  let res;
-  try {
-    res = await fetch(path, opts);
-  } catch (e) {
-    throw new Error("Could not reach the local server. Is python server.py still running?");
-  }
-  let data = {};
-  try { data = await res.json(); } catch (e) { /* non-JSON error */ }
-  if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
-  return data;
-}
-
-/* ---------- status / step 1 ---------- */
-async function loadStatus() {
-  const s = await api("GET", "/api/status");
-  state.status = s;
-  if (s.version !== EXPECTED_SERVER_VERSION) {
-    showGlobalError("The server is running an older version of server.py than this page (" + (s.version || "unknown") +
-      " instead of " + EXPECTED_SERVER_VERSION + "). Some buttons will not work. Close the window or terminal running the server " +
-      "(Ctrl+C), start it again with start.bat or python server.py, then reload this page.");
-  }
-  const tb = $("tokenBadge");
-  tb.textContent = "Token: " + (s.token_configured ? "configured" : "not configured");
-  tb.className = "badge " + (s.token_configured ? "ok" : "bad");
-  $("tokenYesNo").textContent = s.token_configured ? "yes" : "no";
-  cfgBases = s.bases || [];
-  refreshBaseChoices();
-  if (cfgBases.length === 1 && !$("baseId").value) $("baseId").value = cfgBases[0].baseId;
-  const sb = $("setupBanner");
-  sb.hidden = s.token_configured;
-  sb.textContent = s.token_configured ? "" : ("Setup needed: " + (s.config_problem || "No token configured."));
-  if (!$("dbPath").value && s.default_db_path) $("dbPath").value = s.default_db_path;
-  if (s.db_path) {
-    $("dbPath").value = s.db_path;
-    await connectDb();
-  }
-  applyReady();
-}
-
-function applyReady() {
-  const dbBadge = $("dbBadge");
-  dbBadge.textContent = "Database: " + (state.ready ? "connected" : "not connected");
-  dbBadge.className = "badge " + (state.ready ? "ok" : "");
-  for (const id of ["btnIngest", "btnRecompute", "btnProfile", "btnReloadSchema", "btnResults", "btnLog", "btnExtractDelete", "btnExtractRefresh"]) $(id).disabled = !state.ready;
-  if (typeof syncReportLinks === "function") syncReportLinks();
-  $("btnIngest").disabled = !state.ready;
-}
-
-function renderCounts(counts) {
-  const t = $("countsTable");
-  const body = t.querySelector("tbody");
-  clear(body);
-  const names = Object.keys(counts);
-  names.forEach((n) => body.appendChild(el("tr", {}, el("td", { text: n }), el("td", { class: "num", text: fmt(counts[n]) }))));
-  t.hidden = names.length === 0;
-}
-
-function renderDbResult(r) {
-  state.ready = !!r.ready;
-  const actions = $("dbActions");
-  actions.hidden = true;
-  if (r.counts) renderCounts(r.counts); else $("countsTable").hidden = true;
-  if (r.exists === false) {
-    setMsg("dbMessage", r.message || "That file does not exist yet.", "warn");
-    $("btnCreate").textContent = "Create new database here";
-    $("btnCreate").dataset.mode = "create";
-    actions.hidden = false;
-  } else if (r.missing_tables && r.missing_tables.length) {
-    setMsg("dbMessage", "Connected, but these expected tables are missing: " + r.missing_tables.join(", "), "warn");
-    $("btnCreate").textContent = "Create the missing tables";
-    $("btnCreate").dataset.mode = "create";
-    actions.hidden = false;
-  } else if (r.column_problems && r.column_problems.length) {
-    const detail = r.column_problems.map((p) => p.table + " lacks " + p.missing_columns.join(", ")).join("; ");
-    setMsg("dbMessage", (r.message || "Some tables do not match the expected structure.") + " (" + detail + ")", "err");
-  } else if (r.ready) {
-    let msg = "Connected. All " + Object.keys(r.counts).length + " expected tables are present. Foreign keys are " + (r.foreign_keys ? "on." : "OFF.");
-    if (r.created_tables && r.created_tables.length) msg = "Created " + r.created_tables.length + " table(s). " + msg;
-    setMsg("dbMessage", msg, "ok");
-  }
-  applyReady();
-}
-
-async function connectDb() {
-  showGlobalError("");
-  try {
-    renderDbResult(await api("POST", "/api/db/connect", { path: $("dbPath").value }));
-    if (state.ready) await afterConnect();
-  } catch (e) {
-    state.ready = false; applyReady(); setMsg("dbMessage", e.message, "err");
-  }
-}
-async function createDb() {
-  try {
-    renderDbResult(await api("POST", "/api/db/create", { path: $("dbPath").value }));
-    if (state.ready) await afterConnect();
-  } catch (e) { setMsg("dbMessage", e.message, "err"); }
-}
-async function afterConnect() {
-  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
-}
+/* Stage 1: Data (steps 3 to 6). Schema, load order, profiling, saved record files. */
 
 /* ---------- step 3: ingest + schema view ---------- */
 function currentSource() { return document.querySelector("input[name=src]:checked").value; }
@@ -157,12 +16,10 @@ async function ingest() {
     let kind = "ok";
     if (r.no_longer_in_source) { msg += " " + r.no_longer_in_source + " previously known field(s) are no longer in the source (kept, flagged below)."; kind = "warn"; }
     setMsg("ingestMessage", msg, kind);
-    await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook()]);
-    const c = await api("GET", "/api/db/counts");
-    renderCounts(c.counts);
+    await Promise.all([loadSchema(), loadDepgraph(), loadRunbook()]);
   } catch (e) {
     setMsg("ingestMessage", e.message, "err");
-    loadLog(); loadRunbook();
+    loadRunbook();
   } finally { applyReady(); }
 }
 
@@ -392,76 +249,6 @@ function drawGraph(g, selfTables) {
   });
   box.appendChild(svg);
 }
-
-/* ---------- base picker: dropdown from config.json, typing still allowed ---------- */
-let baseChoices = [];   // what the Base ID picker offers: config.json bases plus any base already in the database
-let cfgBases = [];      // bases listed in config.json (the only place a base name comes from)
-let baseActive = -1;
-/* One label for a base everywhere: "Name - ID" when config.json knows the name, otherwise just the ID. */
-function baseLabel(id) {
-  const c = cfgBases.find((b) => b.baseId === id);
-  return c && c.name ? c.name + " - " + id : id;
-}
-function refreshBaseChoices() {
-  const inDb = (state.schema || []).map((b) => b.base_id).filter((id) => !cfgBases.some((b) => b.baseId === id));
-  baseChoices = cfgBases.concat(inDb.map((id) => ({ name: "", baseId: id, fromDb: true })));
-}
-function baseMatches(filter) {
-  const f = (filter || "").trim().toLowerCase();
-  return f ? baseChoices.filter((b) => b.baseId.toLowerCase().includes(f) || (b.name || "").toLowerCase().includes(f)) : baseChoices;
-}
-function openBaseMenu(filter) {
-  const menu = $("baseMenu"), list = baseMatches(filter);
-  clear(menu);
-  baseActive = -1;
-  if (!baseChoices.length) {
-    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json or the database. Type a base ID instead." }));
-  } else if (!list.length) {
-    menu.appendChild(el("li", { class: "combo-empty", text: "No configured base matches. The text you typed will be used as the base ID." }));
-  }
-  list.forEach((b, i) => {
-    const li = el("li", { role: "option", "data-id": b.baseId },
-      el("span", { class: "combo-name", text: b.name || (b.fromDb ? "(in database, not in config.json)" : "(no name)") }), el("code", { text: b.baseId }));
-    li.addEventListener("mousedown", (ev) => { ev.preventDefault(); chooseBase(b.baseId); });
-    menu.appendChild(li);
-  });
-  menu.hidden = false;
-  $("baseId").setAttribute("aria-expanded", "true");
-}
-function closeBaseMenu() {
-  $("baseMenu").hidden = true;
-  $("baseId").setAttribute("aria-expanded", "false");
-  baseActive = -1;
-}
-function chooseBase(id) {
-  $("baseId").value = id;
-  closeBaseMenu();
-  $("baseId").dispatchEvent(new Event("input", { bubbles: true }));
-}
-function moveBaseActive(step) {
-  const items = Array.from($("baseMenu").querySelectorAll("li[data-id]"));
-  if (!items.length) return;
-  baseActive = (baseActive + step + items.length) % items.length;
-  items.forEach((li, i) => li.classList.toggle("active", i === baseActive));
-  items[baseActive].scrollIntoView({ block: "nearest" });
-}
-function initBaseCombo() {
-  const inp = $("baseId");
-  $("baseToggle").addEventListener("click", () => { if ($("baseMenu").hidden) { openBaseMenu(""); inp.focus(); } else closeBaseMenu(); });
-  inp.addEventListener("focus", () => { if (!inp.value) openBaseMenu(""); });
-  inp.addEventListener("input", () => openBaseMenu(inp.value));
-  inp.addEventListener("keydown", (ev) => {
-    if (ev.key === "ArrowDown") { ev.preventDefault(); if ($("baseMenu").hidden) openBaseMenu(""); moveBaseActive(1); }
-    else if (ev.key === "ArrowUp") { ev.preventDefault(); moveBaseActive(-1); }
-    else if (ev.key === "Enter" && !$("baseMenu").hidden && baseActive >= 0) {
-      ev.preventDefault();
-      const li = $("baseMenu").querySelectorAll("li[data-id]")[baseActive];
-      if (li) chooseBase(li.getAttribute("data-id"));
-    } else if (ev.key === "Escape") closeBaseMenu();
-  });
-  document.addEventListener("mousedown", (ev) => { if (!$("baseCombo").contains(ev.target)) closeBaseMenu(); });
-}
-
 /* ---------- step 4: report ---------- */
 function reportUrl(kind, extra) {
   return "/api/report." + kind + "?mode=" + encodeURIComponent($("depMode").value) + (extra || "");
@@ -555,15 +342,10 @@ async function loadProfileStatus(quiet) {
   $("btnCancel").hidden = !running;
   $("btnProfile").disabled = !state.ready || running;
   if (running && !state.pollTimer) state.pollTimer = setInterval(() => loadProfileStatus(true).catch(() => {}), 1000);
-  if (running) loadLog().catch(() => {});
   if (!running && state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook(), loadExtractFiles(), loadAttachmentStats()]); }
+  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadRunbook(), loadExtractFiles(), loadAttachmentStats()]); }
   if (job) { state.lastJobId = job.id; state.lastJobStatus = job.status; }
-  if (job && !quiet) loadLog();
 }
-
-/* ---------- step 6: record extraction (values go to files on disk; this page only shows counts) ---------- */
-const fmtBytes = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
 
 async function deleteExtract() {
   const base = $("exBase").value;
@@ -621,33 +403,21 @@ async function loadResults() {
   t.hidden = data.rows.length === 0;
 }
 
-/* ---------- API call log ---------- */
-async function loadLog() {
-  const q = new URLSearchParams({ failures: $("logFail").checked ? "1" : "", table_id: $("logTable").value, purpose: $("logPurpose").value, limit: "100" });
-  const data = await api("GET", "/api/calllog?" + q.toString());
-  const fillSel = (sel, values, allLabel) => {
-    const keep = sel.value; clear(sel); sel.appendChild(el("option", { value: "", text: allLabel }));
-    values.forEach((v) => sel.appendChild(el("option", { value: v, text: v })));
-    sel.value = values.includes(keep) ? keep : "";
-  };
-  fillSel($("logTable"), data.table_ids, "All tables");
-  fillSel($("logPurpose"), data.purposes, "All purposes");
-  const s = data.summary;
-  setMsg("logSummary", "Matching calls: " + fmt(s.total) + " (" + fmt(s.success) + " succeeded, " + fmt(s.failure) + " failed). Showing the latest " + data.rows.length + ".", s.failure ? "warn" : "");
-  const body = $("logTableEl").querySelector("tbody");
-  clear(body);
-  data.rows.forEach((r) => body.appendChild(el("tr", {}, el("td", { text: (r.timestamp || "").slice(0, 19) }), el("td", { text: r.purpose }), el("td", { text: r.endpoint }), el("td", { text: r.table_id || "" }),
-    el("td", { class: "num", text: r.attempt }), el("td", { class: "num", text: r.http_status === null ? "none" : r.http_status }), el("td", { class: r.success ? "good" : "bad", text: r.success ? "yes" : "no" }),
-    el("td", { class: "num", text: fmt(r.duration_ms) }), el("td", { class: "num", text: fmt(r.records_returned) }), el("td", { text: r.error_message || "" }))));
-}
-
 /* ---------- wiring ---------- */
 function guard(fn) { return () => fn().catch((e) => showGlobalError(e.message)); }
 
-window.addEventListener("DOMContentLoaded", () => {
-  $("btnConnect").addEventListener("click", connectDb);
-  $("dbPath").addEventListener("keydown", (e) => { if (e.key === "Enter") connectDb(); });
-  $("btnCreate").addEventListener("click", createDb);
+/* Everything on this page that needs a database is switched off until one is connected on Setup. */
+function onReadyChange() {
+  for (const id of ["btnIngest", "btnRecompute", "btnReloadSchema", "btnResults", "btnExtractDelete", "btnExtractRefresh"]) $(id).disabled = !state.ready;
+  if (!state.pollTimer) $("btnProfile").disabled = !state.ready;
+  syncReportLinks();
+}
+
+async function afterConnect() {
+  await Promise.all([loadSchema(), loadDepgraph(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
+}
+
+startPage("stage1", { onReadyChange, afterConnect }, () => {
   document.querySelectorAll("input[name=src]").forEach((r) => r.addEventListener("change", () => { $("jsonBox").hidden = currentSource() !== "json"; }));
   $("schemaFile").addEventListener("change", (e) => {
     const f = e.target.files[0];
@@ -686,8 +456,4 @@ window.addEventListener("DOMContentLoaded", () => {
   $("resBase").addEventListener("change", syncReportLinks);
   $("csvBase").addEventListener("change", syncReportLinks);
   $("resTable").addEventListener("change", syncReportLinks);
-  $("btnLog").addEventListener("click", guard(loadLog));
-  for (const id of ["logFail", "logTable", "logPurpose"]) $(id).addEventListener("change", guard(loadLog));
-  applyReady();
-  loadStatus().catch((e) => showGlobalError(e.message));
 });

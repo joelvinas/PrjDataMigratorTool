@@ -1,4 +1,6 @@
-# Airtable → Workfront Planning Migration Control Plane (Stage 1)
+# Airtable → Workfront Planning Migration Control Plane
+
+Current state: **Stage 1 (Data) is built and working** (version 1.11), inside a **multi-page site** with a left navigation panel: Setup, Stage 1: Data, placeholder pages for Stage 2 (Forms) and Stage 3 (Automations), a slot for Stage 4 (Map and load), and the API call log pinned at the bottom. Stages 2 to 4 are **not built**; see "Roadmap and structure" below.
 
 A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to Adobe Workfront Planning.
 
@@ -48,10 +50,15 @@ The only non-deterministic parts are incidental: timestamps in logs, the timing 
 ```
 airtable-migration-control/
 ├── server.py                    backend: DB, Airtable calls, graph, profiling, JSON endpoints
-├── index.html  style.css  scripts.js
+├── setup.html  setup.js         Setup (home page, steps 1 and 2) and the list of stages
+├── stage1.html  stage1.js       Stage 1: Data (steps 3 to 6)
+├── stage2.html  stage3.html     placeholders for Forms and Automations (no script of their own)
+├── log.html  log.js             API call log (its own page, last in the side panel)
+├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
+├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
 ├── start.bat                    Windows launcher (finds Python, creates config.json, opens the browser)
 ├── config.example.json          copy to config.json and add your token
-├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/
+├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/ (databases live in db/)
 ├── LICENSE                      MIT
 ├── README.md
 ├── sql/
@@ -60,12 +67,14 @@ airtable-migration-control/
 │   ├── migration_002_add_field_options.sql   field settings columns
 │   ├── migration_003_add_tables_and_views.sql   the airtable_tables and airtable_views tables
 │   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
-│   └── apply_migrations.py             applies all three to an existing database (safe to repeat)
+│   └── apply_migrations.py             applies all four to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
     ├── sample_schema_field_options.json   one field of nearly every type, with settings
     ├── mock_airtable.py             fake Airtable so you can test with no real data
+    ├── run_regression.py            runs every suite below against the mock, in throwaway copies of the project
+    ├── regression/                  the suites: e2e2, report_test, views_test, extract_test, attach_test, attstats_test, ui_test
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
 ```
 
@@ -91,8 +100,10 @@ airtable-migration-control/
    - `db_path`: the SQLite file offered in Step 1.
    - `requests_per_second`: pacing per base, between 0.5 and 5 (Airtable's limit). 4.5 leaves a small margin.
 2. In a terminal in this folder: `python server.py` (on Mac you may need `python3 server.py`).
-3. Open **http://127.0.0.1:8765**. For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
+3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
 4. Stop with Ctrl+C.
+
+Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms), `/stage3` (Automations), `/log` (API call log). The left panel links them; Stage 4 appears as a greyed "planned" entry. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
 
 Without `config.json`, or with an empty token, the page shows a setup message and still works for everything that does not call Airtable (for example, pasted schema JSON).
 
@@ -100,13 +111,15 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 
 ## What it does
 
+Steps 1 and 2 are on **Setup**; steps 3 to 6 are on **Stage 1: Data**; the call log is its own page.
+
 1. **Connect to a database.** Opens an existing SQLite file or creates one from the schema, checks that all expected tables and columns exist, and shows row counts.
 2. **Confirm token and enter a base ID.** The page shows only whether a token is configured (yes/no).
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
 4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph that can be downloaded on its own as an SVG or PNG. Each link-handling option has a short explanation under the dropdown. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
 5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field. An optional toggle also saves every record to JSON files during the same pass.
 6. **Saved record files.** Lists, checks and deletes the JSON files (and attachment files) written by the toggles in step 5.
-7. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
+7. **API call log page.** Every attempt, including retries, with filters for failures, table and purpose. It is the audit trail: every call to the Airtable API is written to it (see the exception for attachment files in CLAUDE.md).
 
 ## SQL schema changes
 
@@ -315,11 +328,17 @@ python test/answer_key_check.py path/to/out/answer_key
 
 It rebuilds the schema from the key, loads it into a scratch database, and compares load number, depth and second-pass treatment for every table and link field in both modes. Against the Fictional Fashionwear key (39 tables, 130 link fields) it reports `checked=416 fail=0`. This checks the ordering logic only; profile counts have to be checked against a real run.
 
+## Automated regression suites (no real data, about a minute)
+
+`python test/run_regression.py` starts the mock Airtable and the app in a throwaway copy of the project, runs every suite (about 250 checks: API and security behavior, the database schema, load order, reports, record saving, attachment download and statistics, and a browser test of the UI) and prints one line per suite. It never touches your `config.json` or databases. `ui_test` needs Playwright and is skipped without it. Run it after every change. A single suite: `python test/run_regression.py attach`.
+
 ## Test plan (no real data, about 5 minutes)
 
 **A. Logic only (no Airtable, no token needed)**
 
-1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 13 tables, all with 0 rows, and foreign keys on.
+Steps 1 and 2 are on Setup (`/setup`); steps 3 to 6 are on Stage 1 (`/stage1`), where the Base ID picker is repeated at the top. The base you pick on either page is kept as you move between them.
+
+1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 13 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -346,7 +365,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
    - **Flaky**: two 429 rows (attempts 1 and 2), then success (attempt 3) in the call log.
    - **WideCardinality**: `Bucket` has cardinality 4 (exact); `Unique Key` shows **capped (more than 500)**.
 5. Profile WideCardinality again with the default cap (1,000). `Unique Key` has exactly 1,000 distinct values, which does not exceed the cap, so it is now exact (1,000, not capped).
-6. In the API log panel, tick "Failures only" (3 rows) and try the table and purpose filters.
+6. On the API call log page, tick "Failures only" (3 rows) and try the table and purpose filters.
 
 **B2. Saving records and downloading attachments against the mock**
 
@@ -387,11 +406,36 @@ Create a SQLite file from the original schema, connect to it in step 1, and note
 
 ## Troubleshooting
 
-**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`index.html`, `scripts.js`, `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
+**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
 
 **"Port 8765 is already in use."** Another copy is running. Close it, or use another port (`PORT=8800 python server.py`, or `start.bat 8800`).
 
 **"No database is connected yet."** Complete step 1 first. The server forgets the connection when it restarts, so connect again after a restart.
+
+## Roadmap and structure
+
+**Status.** Stage 1 is complete and verified against a mock Airtable and an answer key. It has not yet been run end to end against the real Airtable bases (the mock cannot show how the real attachment file host, rollup settings or very large tables behave). The multi-page site is built (version 1.11, a layout change only: no new routes, API calls or schema changes). Stages 2 and 3 are not started; Joel is working out the Forms and Automations designs separately.
+
+| Page | URL | Purpose | Status |
+|---|---|---|---|
+| Setup (home) | `/`, `/setup` | Database (step 1), token and base (step 2), and the list of stages. Shared by every stage. | Built |
+| Stage 1: Data | `/stage1` | Schema, load order, profiling, record and attachment capture (steps 3 to 6, plus the open runbook items) | Built |
+| Stage 2: Forms | `/stage2` | Capture Airtable forms (form views, their sections and fields) for rebuilding in Workfront Planning | Placeholder; tables `form_sections` and `form_fields` exist, empty |
+| Stage 3: Automations | `/stage3` | Catalog Airtable automations and their steps for rebuilding as Workfront Fusion scenarios | Placeholder; tables `automation_catalog` and `automation_steps` exist, empty |
+| Stage 4 (anticipated): Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning | Slot in the side panel only; `workfront_fields` and `field_crosswalk` exist, empty |
+| API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
+
+Decisions made:
+- **Names.** "Data" (parallel with Forms and Automations, the kinds of thing being migrated). Only the navigation label and page headings carry the name; the URLs are `/stage1` to `/stage3` so a rename never breaks them.
+- **Step numbers.** Stage 1 keeps steps 3 to 6; Setup holds steps 1 and 2.
+- **Index.** Setup is the home page. `/index.html` redirects to `/`.
+- **Technical shape.** Standard-library Python plus plain HTML, CSS and JavaScript, no build step and no dependencies. Separate `.html` files share one stylesheet and `common.js` (API helper, base labels, base picker, version check, navigation, connection check), each with its own script. The server serves them from a fixed list of names in `STATIC`; nothing from a request is joined into a file path.
+- **Shared state.** The server holds the database connection and every page re-checks it on load. The chosen base ID is remembered per browser tab. Neither the token nor any record value is ever kept in the browser.
+- **Audit.** Every call to the Airtable API goes through one function that logs each attempt to `api_call_log`; the log has its own page. New calls must do the same.
+
+Open for later: where the open runbook items belong once Forms and Automations add their own entries (today they are at the end of step 4 on Stage 1).
+
+Rules that carry into every stage are in `CLAUDE.md`.
 
 ## Assumptions and scope
 

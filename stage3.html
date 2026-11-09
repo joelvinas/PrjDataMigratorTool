@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage 3: Automations - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="stage3" data-plain>
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<main>
+<section class="card" id="stage3Card">
+  <h2>Stage 3: Automations</h2>
+  <p class="note info"><strong>Not built yet.</strong> This stage will catalog Airtable automations and their steps so they can be rebuilt as Workfront Fusion scenarios.</p>
+  <p>The database already has the tables this stage will fill: <code>automation_catalog</code> and <code>automation_steps</code>. They are empty today.</p>
+  <p class="hint">Automations are not part of the schema response either; the capture method is still being designed.</p>
+  <p><a class="btnlink" href="/stage1">Go to Stage 1: Data</a> <a class="btnlink" href="/setup">Setup</a></p>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+</body>
+</html>

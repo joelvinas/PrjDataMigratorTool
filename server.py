@@ -66,7 +66,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -2655,10 +2655,16 @@ def api_export_field_options(q):
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
-STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
-          "/index.html": ("index.html", "text/html; charset=utf-8"),
+HTML = "text/html; charset=utf-8"
+JS = "application/javascript; charset=utf-8"
+# Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
+STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML),
+          "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
-          "/scripts.js": ("scripts.js", "application/javascript; charset=utf-8")}
+          "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
+          "/stage1.js": ("stage1.js", JS), "/log.js": ("log.js", JS)}
+REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
               "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
@@ -2727,6 +2733,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard(False):
             return
         u = urlparse(self.path)
+        if u.path in REDIRECTS:
+            self._send(302, b"", "text/plain; charset=utf-8", {"Location": REDIRECTS[u.path]})
+            return
         if u.path in STATIC:
             name, ctype = STATIC[u.path]
             try:

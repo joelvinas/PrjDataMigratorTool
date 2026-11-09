@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API call log - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="log">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card" id="logCard">
+  <h2>API call log</h2>
+  <p class="hint">Every attempt to call Airtable, including retries: time, purpose, endpoint, table, status, duration and record <em>count</em>. It never holds headers, the token or record values. Each run on Stage 1 adds to it.</p>
+  <div class="row">
+    <label><input type="checkbox" id="logFail"> Failures only</label>
+    <select id="logTable"><option value="">All tables</option></select>
+    <select id="logPurpose"><option value="">All purposes</option></select>
+    <button id="btnLog">Refresh</button>
+  </div>
+  <div id="logSummary" class="msg"></div>
+  <div class="scroll"><table id="logTableEl" class="grid compact">
+    <thead><tr><th>Time (UTC)</th><th>Purpose</th><th>Endpoint</th><th>Table</th><th class="num">Try</th><th class="num">Status</th><th>OK</th><th class="num">ms</th><th class="num">Records</th><th>Error</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/log.js"></script>
+</body>
+</html>
