@@ -24,6 +24,7 @@ Saved in the SQLite file:
 
 - Schema metadata: base, table and field IDs and names, field types, which tables each link field points to, the settings that define each field (select choices, formula text, rollup and lookup definitions, currency symbol and precision, date and time formats, rating scale, number precision, descriptions), 
 - Table-level details (description, primary field) and every view the schema reports (name, type, visible fields).
+- Attachment statistics from profiling: per table, field and file type, the number of files, their total, smallest and largest size, and a size-band count. No filenames, links or file contents.
 - Aggregate statistics per field: `row_count`, `null_count`, `cardinality`, and whether the cardinality is capped.
 - The computed load order (`dependency_matrix`).
 - An API call log: timestamp, endpoint path, HTTP status, duration, record *count*, and error text. Never headers, the token, or response bodies.
@@ -58,6 +59,7 @@ airtable-migration-control/
 │   ├── migration_001_add_columns.sql   link handling and capped cardinality columns
 │   ├── migration_002_add_field_options.sql   field settings columns
 │   ├── migration_003_add_tables_and_views.sql   the airtable_tables and airtable_views tables
+│   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
 │   └── apply_migrations.py             applies all three to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
@@ -79,7 +81,7 @@ airtable-migration-control/
      "token": "PASTE_WRITE_TOKEN_HERE",
      "scopes": ["data.records:read", "schema.bases:read"],
      "bases": [ { "name": "PASTE_BASE_NAME_HERE", "baseId": "appXXXXXXXXXXXXXX" } ],
-     "db_path": "migration.db",
+     "db_path": "db/migration.db",
      "requests_per_second": 4.5
    }
    ```
@@ -101,14 +103,14 @@ Without `config.json`, or with an empty token, the page shows a setup message an
 1. **Connect to a database.** Opens an existing SQLite file or creates one from the schema, checks that all expected tables and columns exist, and shows row counts.
 2. **Confirm token and enter a base ID.** The page shows only whether a token is configured (yes/no).
 3. **Ingest schema.** From the Airtable Metadata API or pasted/uploaded JSON. Re-ingesting is idempotent (upsert on `field_id`) and never wipes profiled statistics.
-4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
+4. **Review load order.** A parent-first table order built from link fields, with cycles detected and logged, plus a readable dependency graph that can be downloaded on its own as an SVG or PNG. Each link-handling option has a short explanation under the dropdown. The step also produces a **load order report** you can preview in the page and download as `.mhtml` or `.html` (see [Load order report](#load-order-report)).
 5. **Run profiling.** Pages through every table (100 records per request, about 5 requests per second per base) and records `row_count`, `null_count` and `cardinality` per field. An optional toggle also saves every record to JSON files during the same pass.
-6. **Saved record files.** Lists, checks and deletes the JSON files written by the toggle in step 5.
+6. **Saved record files.** Lists, checks and deletes the JSON files (and attachment files) written by the toggles in step 5.
 7. **API call log panel.** Every attempt, including retries, with filters for failures, table and purpose.
 
 ## SQL schema changes
 
-The schema is the original `DatabaseSchemaLibrary.sql` with **new columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged. There have been three rounds: link handling and capped cardinality (migration 001), field settings (migration 002), and two new tables for table-level details and views (migration 003).
+The schema is the original `DatabaseSchemaLibrary.sql` with **new columns added to `airtable_fields`**. Nothing was renamed or removed, and every other table is unchanged. There have been four rounds: link handling and capped cardinality (migration 001), field settings (migration 002), two new tables for table-level details and views (migration 003), and one new table for attachment statistics (migration 004).
 
 ### Updated `airtable_fields` definition
 
@@ -193,6 +195,31 @@ CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
 
 The complete schema is in `sql/DatabaseSchemaLibrary.sql`. A new database created by the app already has every column and table.
 
+### New table: `airtable_attachment_stats`
+
+Attachment storage (SharePoint, Workfront Core, AEM and Box each have different limits and prices) depends on how many files there are, how large they are and what types they are. Every profiling run records this from the attachment details that Airtable already returns with each record, so it needs no download and no extra API calls, and it works with "save records" on or off.
+
+```sql
+CREATE TABLE airtable_attachment_stats (
+    base_id TEXT NOT NULL,  table_id TEXT NOT NULL,  field_id TEXT NOT NULL,
+    file_extension TEXT NOT NULL,   -- from the filename, else the MIME type, else 'bin'
+    mime_type TEXT NOT NULL,        -- as reported by Airtable, lower case, 'unknown' if none
+    file_count INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    min_bytes INTEGER,  max_bytes INTEGER,
+    unknown_size_count INTEGER NOT NULL DEFAULT 0,   -- attachments with no size reported
+    size_lt_1mb INTEGER, size_1_10mb INTEGER, size_10_100mb INTEGER, size_100mb_1gb INTEGER, size_ge_1gb INTEGER,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (field_id, file_extension, mime_type)
+);
+```
+
+One row per attachment field and file type. A profiling run replaces all the rows for the tables it profiles, so running it again never double counts. The size bands use 1 MB = 1,048,576 bytes. It holds no filenames, links or file contents.
+
+Where to see it: step 5 has an **Attachments** panel (totals, size bands, by file type, by table) and **Download attachment stats .csv**, and the load order report has section 3c. The same numbers are at `/api/attachments/stats`.
+
+What it counts: an attachment is counted once for each cell it appears in. The size is the size Airtable reports for the original file; Airtable keeps thumbnails separately and they are not counted. File-version history (if any) is not part of the API and is not counted.
+
 ### Upgrading an existing database
 
 Easiest, with Python only (no SQLite client needed):
@@ -201,7 +228,7 @@ Easiest, with Python only (no SQLite client needed):
 python sql/apply_migrations.py path/to/your.db
 ```
 
-It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql` and `sql/migration_003_add_tables_and_views.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
+It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
 ### What the new columns mean
 
@@ -234,9 +261,22 @@ The migration has to move the actual rows, so the profiling pass can also write 
 - **Manifest.** `data_extract/manifest.json` lists each file with its record count, size, SHA-256 and capture time. It holds no values. Step 6 shows it, including whether each file's record count matches the table's latest profile.
 - **Where values go.** Only into these files. Never into SQLite, the API call log (which records counts only), runbook entries, error messages, the report, any CSV export or any response to the browser; the page shows counts, sizes and checksums. The tests check this by searching every one of those places for values taken from the files.
 - **Deleting.** Step 6 has **Delete saved record files** (all bases, or one). Deleting the folder by hand has the same effect.
-- **Limits.** Attachment URLs in the data are temporary links from Airtable and expire after a few hours; the attached files themselves are not downloaded. Each file is loaded whole by whatever reads it next, which is fine for thousands of rows and needs care for millions.
+- **Limits.** Each file is loaded whole by whatever reads it next, which is fine for thousands of rows and needs care for millions. Attachment links inside the JSON are temporary links from Airtable and expire after a few hours (see the next section for downloading the files).
 
 The files hold real record values. Keep them in a location that suits your organisation's data-handling rules, and delete them when the migration no longer needs them.
+
+### Downloading attachment files (optional)
+
+Airtable's attachment links are signed and expire after a few hours, so the files have to be fetched in the same pass that reads the records. Under "Also save every record", step 5 shows a second box, **Also download the attachment files**. It is off by default and only available when saving records is ticked, because the files are matched to records through the saved JSON.
+
+- **Where and what name.** `data_extract/<base id>/attachments/<attachment id>.<extension>`, for example `attAbc123.jpg`. The extension is taken from the attachment's filename (`Photo.JPG` becomes `jpg`). If the filename has no usable extension (none at all, or a name such as `.jfif`), it is taken from the MIME type Airtable reports, and as a last resort it is `bin`. Attachment IDs are unique, so every file in a base has its own name.
+- **Index file.** For each table, `data_extract/<base id>/<table id>.attachments.json` lists every attachment with its record ID, field ID, attachment ID, original filename, type, size, saved file, byte count, SHA-256 and status (`downloaded`, `existing` or `failed`, with a reason). This is how the original filenames and the record each file belongs to are kept, since the saved file name is just the ID. It does not contain the Airtable links.
+- **Checks.** A file is accepted only if the number of bytes received equals the size Airtable reported. Files are written to a `.part` name and renamed when complete.
+- **Failures don't stop the run.** An expired or missing link (HTTP 401, 403, 404 or 410) is recorded as failed and not retried. Network errors and server errors are retried up to three times. The table still finishes, the failure count shows in the progress table and in step 6, and the reason is in the index file.
+- **Re-running a table.** Files already saved with the right size are kept and not downloaded again, so running the table again fetches only what failed or is new.
+- **Security.** The Airtable token is never sent to the file host, only https links on `airtableusercontent.com` or `airtable.com` are fetched, and the links are never written to the database, the call log, error messages or the browser (the browser sees counts and sizes). The index file holds filenames, which can be sensitive, so the folder deserves the same care as the record files.
+- **Cost.** Downloading uses no Airtable API calls beyond the paging that profiling already does, but it can take a long time and a lot of disk space. Estimate the total from the attachment sizes in one table's index before running a big base.
+- **Deleting.** Step 6's delete button removes the attachment files and index files together with the JSON files.
 
 ## Load order report
 
@@ -261,6 +301,8 @@ Two metadata-only CSV downloads let you check a run against an answer key or han
 - **Load order .csv** (step 4, with a base picker): `base_id, table, table_id, load_no, depth, parent_tables, in_cycle`. `load_no` counts within the base. It uses the link handling selected in step 4.
 - **Results .csv** (step 5, uses the base and table pickers above the results grid): `base_id, table, field, field_type, row_count, null_count, cardinality, cardinality_capped`. Fields no longer in the source are left out. A capped field shows the cap and `cardinality_capped = yes`; raise the cap if you need an exact value.
 
+Profile CSV downloads are named `{Base}_{Table}_Profile_{date}.csv`, using the base or table ID you selected, or `Bases` / `Tables` for all (for example `Bases_Tables_Profile_20261108-1840.csv`). Every base dropdown shows `Name - ID`; the list of bases comes from the database, and the name comes from `config.json` when it has one (the database stores base IDs only).
+
 The headers are accepted by the reference `compare.py`. Export one base at a time and name its label, for example `python src/compare.py --profile profile.csv --load-order load-order.csv --mode resolve --base ff_main` (use `--mode literal` for a Literal-mode export).
 
 ### Checking against an answer key
@@ -277,7 +319,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 **A. Logic only (no Airtable, no token needed)**
 
-1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 12 tables, all with 0 rows, and foreign keys on.
+1. Start the app. In step 1 enter `test.db`, click Connect, then "Create new database here". Expect 13 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -305,6 +347,13 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
    - **WideCardinality**: `Bucket` has cardinality 4 (exact); `Unique Key` shows **capped (more than 500)**.
 5. Profile WideCardinality again with the default cap (1,000). `Unique Key` has exactly 1,000 distinct values, which does not exceed the cap, so it is now exact (1,000, not capped).
 6. In the API log panel, tick "Failures only" (3 rows) and try the table and purpose filters.
+
+**B2. Saving records and downloading attachments against the mock**
+
+1. Start the mock with real downloadable files: `MOCK_FILES=1 python test/mock_airtable.py` (Windows cmd: `set MOCK_FILES=1 && python test/mock_airtable.py`), and the app as in B.
+2. Ingest `appSampleBase001`. In step 5 choose scope "One table", pick Customers, tick **Also save every record** and **Also download the attachment files**, and start. Expected: 3 API calls, `data_extract/appSampleBase001/attachments/` with 125 files named like `attR4A0.jpg`, and 1 failed file (the mock simulates an expired link). Step 6 shows 125 attachment files and 1 failed; `Customers`'s `.attachments.json` lists the failure with its reason.
+3. Run the same table again: the 125 files are kept, and only the failed link is tried again.
+4. Delete from step 6; the whole `data_extract` folder disappears.
 
 **C. Upgrading an older database (optional)**
 

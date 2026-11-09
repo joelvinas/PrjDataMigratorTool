@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the migrations (001, 002 and 003) to an existing database. Standard library only.
+"""Apply the migrations (001 to 004) to an existing database. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
@@ -27,6 +27,7 @@ def main():
                 added.append(m.group(1))
     tables_before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.executescript(open(os.path.join(HERE, "migration_003_add_tables_and_views.sql"), encoding="utf-8").read())
+    conn.executescript(open(os.path.join(HERE, "migration_004_add_attachment_stats.sql"), encoding="utf-8").read())
     new_tables = sorted({r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} - tables_before)
     conn.commit()
     conn.close()

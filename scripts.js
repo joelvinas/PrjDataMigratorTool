@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.7"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.10"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -65,8 +65,9 @@ async function loadStatus() {
   tb.textContent = "Token: " + (s.token_configured ? "configured" : "not configured");
   tb.className = "badge " + (s.token_configured ? "ok" : "bad");
   $("tokenYesNo").textContent = s.token_configured ? "yes" : "no";
-  baseChoices = s.bases || [];
-  if (baseChoices.length === 1 && !$("baseId").value) $("baseId").value = baseChoices[0].baseId;
+  cfgBases = s.bases || [];
+  refreshBaseChoices();
+  if (cfgBases.length === 1 && !$("baseId").value) $("baseId").value = cfgBases[0].baseId;
   const sb = $("setupBanner");
   sb.hidden = s.token_configured;
   sb.textContent = s.token_configured ? "" : ("Setup needed: " + (s.config_problem || "No token configured."));
@@ -138,7 +139,7 @@ async function createDb() {
   } catch (e) { setMsg("dbMessage", e.message, "err"); }
 }
 async function afterConnect() {
-  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true), loadExtractFiles()]);
+  await Promise.all([loadSchema(), loadDepgraph(), loadLog(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
 }
 
 /* ---------- step 3: ingest + schema view ---------- */
@@ -210,11 +211,13 @@ function fillScopeSelectors() {
   const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [st.value, rt.value];
   for (const n of [sb, rb, cb, eb]) { clear(n); if (n !== sb) n.appendChild(el("option", { value: "", text: "All bases" })); }
   for (const n of [st, rt]) { clear(n); if (n === rt) n.appendChild(el("option", { value: "", text: "All tables" })); }
+  refreshBaseChoices();
+  // Base lists come from the database (the bases actually ingested); names come from config.json when it has them.
   for (const b of state.schema) {
-    for (const n of [sb, rb, cb, eb]) n.appendChild(el("option", { value: b.base_id, text: b.base_id }));
+    for (const n of [sb, rb, cb, eb]) n.appendChild(el("option", { value: b.base_id, text: baseLabel(b.base_id) }));
     for (const t of b.tables) {
       if (t.stale) continue;
-      for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: b.base_id + " / " + t.table_name }));
+      for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: baseLabel(b.base_id) + " / " + t.table_name }));
     }
   }
   sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; st.value = keepT[0]; rt.value = keepT[1];
@@ -229,6 +232,59 @@ function updateScopeVisibility() {
 /* ---------- step 4: dependency graph ---------- */
 function note(kind, title, items) {
   return el("div", { class: "note " + kind }, el("strong", { text: title }), items && items.length ? el("ul", {}, items.map((i) => el("li", { text: i }))) : null);
+}
+
+const MODE_HELP = {
+  literal: "Literal: every link field counts as a dependency, exactly as Airtable defines it. Airtable creates a link on both tables for each relationship, so linked tables usually depend on each other and end up in cycles that load together, with a second pass to fill in the links. Pick this to see the worst case or to check the other mode against it.",
+  collapse: "Resolve two-way link pairs: for each pair of linked fields that point at each other, if exactly one side is set to allow a single linked record, that table is the child and only its field is a dependency; the other side is just the reverse view. Many-to-many pairs, and pairs with no hint, stay as cycles. Pick this for the load plan: it gives the fewest cycles that are still correct.",
+};
+function syncModeHelp() { $("depModeHelp").textContent = MODE_HELP[$("depMode").value] || ""; }
+
+/* ---------- download just the dependency graph (SVG or PNG), built in the browser from the drawing above ---------- */
+const GRAPH_CSS = "text{font:12px system-ui,Segoe UI,Arial,sans-serif;fill:#1d2330}.node rect{fill:#fff;stroke:#7b8498;stroke-width:1.2;rx:5}" +
+  ".node.cyc rect{stroke:#b3261e;stroke-width:2;fill:#fff6f5}.edge{fill:none;stroke:#8a93a6;stroke-width:1.2}.edge.cyc{stroke:#b3261e}";
+function graphSvgText() {
+  const src = $("graphBox").querySelector("svg");
+  if (!src) throw new Error("There is no graph to download yet. Recompute the load order first.");
+  const svg = src.cloneNode(true);
+  svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const w = Number(svg.getAttribute("width")), h = Number(svg.getAttribute("height"));
+  const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = GRAPH_CSS;
+  svg.insertBefore(style, svg.firstChild);
+  const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bg.setAttribute("width", w); bg.setAttribute("height", h); bg.setAttribute("fill", "#ffffff");
+  svg.insertBefore(bg, style.nextSibling);
+  return { text: '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg), w, h };
+}
+function graphFileName(ext) {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return "DependencyGraph_" + ($("depMode").value === "literal" ? "Literal" : "Resolve") + "_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + "." + ext;
+}
+function saveBlob(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function downloadGraphSvg() {
+  try { saveBlob(new Blob([graphSvgText().text], { type: "image/svg+xml" }), graphFileName("svg")); setMsg("depMessage", "", ""); }
+  catch (e) { setMsg("depMessage", e.message, "err"); }
+}
+function downloadGraphPng() {
+  let g;
+  try { g = graphSvgText(); } catch (e) { setMsg("depMessage", e.message, "err"); return; }
+  const scale = 2, img = new Image();
+  img.onload = () => {
+    const cv = document.createElement("canvas");
+    cv.width = Math.min(g.w * scale, 16000); cv.height = Math.min(g.h * scale, 16000);
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    cv.toBlob((b) => b ? saveBlob(b, graphFileName("png")) : setMsg("depMessage", "The browser could not make a PNG of this graph. Use the SVG instead.", "err"), "image/png");
+  };
+  img.onerror = () => setMsg("depMessage", "The browser could not make a PNG of this graph. Use the SVG instead.", "err");
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(g.text);
 }
 
 async function recompute() {
@@ -338,8 +394,18 @@ function drawGraph(g, selfTables) {
 }
 
 /* ---------- base picker: dropdown from config.json, typing still allowed ---------- */
-let baseChoices = [];
+let baseChoices = [];   // what the Base ID picker offers: config.json bases plus any base already in the database
+let cfgBases = [];      // bases listed in config.json (the only place a base name comes from)
 let baseActive = -1;
+/* One label for a base everywhere: "Name - ID" when config.json knows the name, otherwise just the ID. */
+function baseLabel(id) {
+  const c = cfgBases.find((b) => b.baseId === id);
+  return c && c.name ? c.name + " - " + id : id;
+}
+function refreshBaseChoices() {
+  const inDb = (state.schema || []).map((b) => b.base_id).filter((id) => !cfgBases.some((b) => b.baseId === id));
+  baseChoices = cfgBases.concat(inDb.map((id) => ({ name: "", baseId: id, fromDb: true })));
+}
 function baseMatches(filter) {
   const f = (filter || "").trim().toLowerCase();
   return f ? baseChoices.filter((b) => b.baseId.toLowerCase().includes(f) || (b.name || "").toLowerCase().includes(f)) : baseChoices;
@@ -349,13 +415,13 @@ function openBaseMenu(filter) {
   clear(menu);
   baseActive = -1;
   if (!baseChoices.length) {
-    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json. Type a base ID instead." }));
+    menu.appendChild(el("li", { class: "combo-empty", text: "No bases listed in config.json or the database. Type a base ID instead." }));
   } else if (!list.length) {
     menu.appendChild(el("li", { class: "combo-empty", text: "No configured base matches. The text you typed will be used as the base ID." }));
   }
   list.forEach((b, i) => {
     const li = el("li", { role: "option", "data-id": b.baseId },
-      el("span", { class: "combo-name", text: b.name || "(no name)" }), el("code", { text: b.baseId }));
+      el("span", { class: "combo-name", text: b.name || (b.fromDb ? "(in database, not in config.json)" : "(no name)") }), el("code", { text: b.baseId }));
     li.addEventListener("mousedown", (ev) => { ev.preventDefault(); chooseBase(b.baseId); });
     menu.appendChild(li);
   });
@@ -437,7 +503,7 @@ async function startProfile() {
   setMsg("profMessage", "Starting...", "");
   try {
     const scope = $("scope").value;
-    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked });
+    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked, download_attachments: $("saveRecords").checked && $("downloadFiles").checked });
     setMsg("profMessage", "", "");
     await loadProfileStatus(false);
   } catch (e) { setMsg("profMessage", e.message, "err"); }
@@ -462,7 +528,7 @@ function renderProgress(job) {
   const label = { running: "Running", done: "Finished", cancelled: "Cancelled", error: "Stopped by an error" }[job.status] || job.status;
   box.appendChild(el("p", {}, el("strong", { text: label }), " – " + done + " of " + total + " tables done" + (failed ? ", " + failed + " failed" : "") +
     ". API calls this run: " + job.api.calls + " (" + job.api.success + " ok, " + job.api.failure + " failed)." +
-    (job.save_records ? " Saving records to JSON files." : " Not saving records.")));
+    (job.save_records ? " Saving records to JSON files." : " Not saving records.") + (job.download_files ? " Downloading attachment files." : "")));
   box.appendChild(el("div", { class: "bar" }, el("span", { style: "width:" + Math.round((100 * (done + failed)) / total) + "%" })));
   if (job.error) box.appendChild(note("err", job.error));
   const bases = {};
@@ -478,7 +544,8 @@ function renderProgress(job) {
   box.appendChild(el("table", { class: "grid compact prog" },
     el("thead", {}, el("tr", {}, ["Table", "Status", "Pages", "Records", "Detail"].map((h, i) => el("th", { class: i === 2 || i === 3 ? "num" : "", text: h })))),
     el("tbody", {}, job.tables.map((t) => el("tr", {}, el("td", { text: t.table_name }), el("td", {}, statusTag(t.status)), el("td", { class: "num", text: fmt(t.pages) }), el("td", { class: "num", text: fmt(t.records) }),
-      el("td", {}, t.error ? el("span", { class: "tag fail", text: t.error }) : "", t.capped_fields ? el("span", { class: "tag cap", text: t.capped_fields + " field(s) over cap" }) : "", t.saved ? el("span", { class: "tag done", text: "saved to file" }) : ""))))));
+      el("td", {}, t.error ? el("span", { class: "tag fail", text: t.error }) : "", t.capped_fields ? el("span", { class: "tag cap", text: t.capped_fields + " field(s) over cap" }) : "", t.saved ? el("span", { class: "tag done", text: "saved to file" }) : "",
+        t.files || t.file_failed ? el("span", { class: "tag " + (t.file_failed ? "cap" : "done"), text: fmt(t.files) + " file(s), " + fmtBytes(t.file_bytes) + (t.file_failed ? ", " + t.file_failed + " failed" : "") }) : ""))))));
 }
 
 async function loadProfileStatus(quiet) {
@@ -490,13 +557,13 @@ async function loadProfileStatus(quiet) {
   if (running && !state.pollTimer) state.pollTimer = setInterval(() => loadProfileStatus(true).catch(() => {}), 1000);
   if (running) loadLog().catch(() => {});
   if (!running && state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook(), loadExtractFiles()]); }
+  if (job && !running && state.lastJobId === job.id && state.lastJobStatus === "running") { await Promise.all([loadResults(), loadLog(), loadRunbook(), loadExtractFiles(), loadAttachmentStats()]); }
   if (job) { state.lastJobId = job.id; state.lastJobStatus = job.status; }
   if (job && !quiet) loadLog();
 }
 
 /* ---------- step 6: record extraction (values go to files on disk; this page only shows counts) ---------- */
-const fmtBytes = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
+const fmtBytes = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
 
 async function deleteExtract() {
   const base = $("exBase").value;
@@ -518,11 +585,25 @@ async function loadExtractFiles() {
   d.files.forEach((f) => {
     const bad = f.check.startsWith("differs");
     body.appendChild(el("tr", {}, el("td", { text: f.base_id + " / " + f.table_name }), el("td", { class: "num", text: fmt(f.record_count) }), el("td", { class: "num", text: fmt(f.fields) }),
-      el("td", { class: "num", text: fmtBytes(f.bytes) }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
+      el("td", { class: "num", text: fmtBytes(f.bytes) }),
+      el("td", { class: "num", text: f.attachments ? fmt(f.attachments.files) + " (" + fmtBytes(f.attachments.bytes) + ")" + (f.attachments.failed ? ", " + f.attachments.failed + " failed" : "") : "" }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
       el("td", {}, el("span", { class: "tag " + (bad ? "cap" : f.check === "matches profile" ? "done" : ""), text: f.check })), el("td", {}, el("code", { text: f.sha256.slice(0, 12) }))));
   });
   t.hidden = d.files.length === 0;
-  setMsg("exFilesSummary", d.files.length ? d.files.length + " file(s), " + fmt(d.total_records) + " records, " + fmtBytes(d.total_bytes) + " in total." : "No extracted files yet.", "");
+  setMsg("exFilesSummary", d.files.length ? d.files.length + " file(s), " + fmt(d.total_records) + " records, " + fmtBytes(d.total_bytes) + " in total." + (d.total_attachment_files || d.total_attachment_failed ? " Attachment files: " + fmt(d.total_attachment_files) + " (" + fmtBytes(d.total_attachment_bytes) + ")" + (d.total_attachment_failed ? ", " + fmt(d.total_attachment_failed) + " failed (see the index files)." : ".") : "") : "No extracted files yet.", "");
+}
+
+async function loadAttachmentStats() {
+  const q = "?base_id=" + encodeURIComponent($("resBase").value) + "&table_id=" + encodeURIComponent($("resTable").value);
+  const d = await api("GET", "/api/attachments/stats" + q);
+  const fill = (id, rows) => { const t = $(id), b = t.querySelector("tbody"); clear(b); rows.forEach((r) => b.appendChild(el("tr", {}, ...r))); t.hidden = rows.length === 0; };
+  const T = d.total;
+  setMsg("attSummary", T.files ? fmt(T.files) + " attachment file(s), " + fmtBytes(T.bytes) + " in total; largest " + fmtBytes(T.max_bytes) + (T.unknown_size ? "; " + fmt(T.unknown_size) + " with no size reported" : "") + "." : "No attachments counted yet (run profiling in step 5).", "");
+  const bands = ["under 1 MB", "1-10 MB", "10-100 MB", "100 MB-1 GB", "1 GB or more"];
+  fill("attBandTable", T.files ? bands.map((b, i) => [el("td", { text: b }), el("td", { class: "num", text: fmt(T.buckets[i]) })]) : []);
+  fill("attTypeTable", d.by_type.map((r) => [el("td", { text: r.extension }), el("td", { class: "num", text: fmt(r.files) }), el("td", { class: "num", text: fmtBytes(r.bytes) }), el("td", { class: "num", text: fmtBytes(r.max_bytes) })]));
+  fill("attTableTable", d.by_table.map((r) => [el("td", { text: r.base_id + " / " + r.table_name }), el("td", { class: "num", text: fmt(r.files) }), el("td", { class: "num", text: fmtBytes(r.bytes) }), el("td", { class: "num", text: fmtBytes(r.max_bytes) })]));
+  $("lnkAttCsv").href = "/api/export/attachment_stats.csv" + q;
 }
 
 async function loadResults() {
@@ -586,7 +667,20 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btnCancel").addEventListener("click", cancelProfile);
   $("btnExtractDelete").addEventListener("click", deleteExtract);
   $("btnExtractRefresh").addEventListener("click", guard(loadExtractFiles));
-  $("saveRecords").addEventListener("change", () => { $("saveNote").hidden = !$("saveRecords").checked; });
+  $("btnAttRefresh").addEventListener("click", guard(loadAttachmentStats));
+  $("btnGraphSvg").addEventListener("click", downloadGraphSvg);
+  $("btnGraphPng").addEventListener("click", downloadGraphPng);
+  $("depMode").addEventListener("change", syncModeHelp);
+  syncModeHelp();
+  const syncSave = () => {
+    const on = $("saveRecords").checked;
+    $("saveNote").hidden = !on;
+    $("dlRow").hidden = !on;
+    if (!on) $("downloadFiles").checked = false;
+    $("dlNote").hidden = !(on && $("downloadFiles").checked);
+  };
+  $("saveRecords").addEventListener("change", syncSave);
+  $("downloadFiles").addEventListener("change", syncSave);
   $("btnResults").addEventListener("click", guard(loadResults));
   initBaseCombo();
   $("resBase").addEventListener("change", syncReportLinks);

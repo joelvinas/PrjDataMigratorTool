@@ -24,7 +24,7 @@
   <h2><span class="num">1</span> Connect to database</h2>
   <p class="hint">Enter the path of a SQLite file. A relative path is resolved next to <code>server.py</code>.</p>
   <div class="row">
-    <input id="dbPath" type="text" class="wide" placeholder="migration.db" autocomplete="off">
+    <input id="dbPath" type="text" class="wide" placeholder="db/migration.db" autocomplete="off">
     <button id="btnConnect" class="primary">Connect</button>
   </div>
   <div id="dbMessage" class="msg"></div>
@@ -86,6 +86,7 @@
     </select>
     <button id="btnRecompute" class="primary">Recompute load order</button>
   </div>
+  <p id="depModeHelp" class="modehelp"></p>
   <div id="depMessage" class="msg"></div>
   <div id="depNotes"></div>
   <table id="orderTable" class="grid" hidden>
@@ -94,6 +95,11 @@
   </table>
   <h3>Dependency graph</h3>
   <p class="hint">Parents on the left, children on the right. Arrows point from parent to child. Red outline: table is in a cycle. &#8635; marks a self-link.</p>
+  <div class="row">
+    <button id="btnGraphSvg">Download graph .svg</button>
+    <button id="btnGraphPng">Download graph .png</button>
+    <span class="hint">Just the dependency graph, as drawn above, for slides and documents. SVG stays sharp at any size; PNG is a 2x image.</span>
+  </div>
   <div id="graphBox" class="graphbox"></div>
   <h3>Load order report</h3>
   <p class="hint">A self-contained report for auditors and for whoever runs the next stage. It shows where each schema came from and when it was captured, every base, table and field, the load order, which links wait for a second pass, and the dependency graph. It is built from the database and contains no record data. It uses the link handling selected above.</p>
@@ -115,7 +121,7 @@
 <!-- STEP 5 -->
 <section class="card" id="step5">
   <h2><span class="num">5</span> Run profiling</h2>
-  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them; it never saves values (step 6 is the only step that does).</p>
+  <p class="hint">Reads each table page by page (100 records, about 5 requests per second per base). Profiling counts records in memory and discards them. Values are written to disk only if you tick "Also save every record" below (see step 6).</p>
   <div class="row">
     <label for="scope">Run</label>
     <select id="scope">
@@ -131,6 +137,10 @@
   <div class="row">
     <label class="toggle"><input type="checkbox" id="saveRecords"> Also save every record to JSON files during this run</label>
   </div>
+  <div class="row" id="dlRow" hidden>
+    <label class="toggle"><input type="checkbox" id="downloadFiles"> Also download the attachment files (needs the box above)</label>
+  </div>
+  <div id="dlNote" class="note warn" hidden><strong>Attachment files will be downloaded.</strong> Each file is saved as <code>&lt;attachment id&gt;.&lt;extension&gt;</code> in <code class="exFolderRef">...</code> under <code>&lt;base id&gt;/attachments/</code>, and an index file per table (<code>&lt;table id&gt;.attachments.json</code>) ties each file to its record and field. This is the only step that downloads files, and it can use a lot of disk space and time. Airtable's links expire after a few hours, so this happens in the same pass; a failed file is listed in the index and can be retried by running that table again (files already saved are kept).</div>
   <div id="saveNote" class="note warn" hidden><strong>Record data will be written to disk.</strong> The same pass that profiles each table also writes every record and every field value to <code class="exFolderRef">...</code> (one JSON file per table), so there is no second set of API calls. The values are never put in the database, the logs or this page. Leave this box unticked for a test run that keeps nothing on disk. See step 6.</div>
   <div class="row">
     <button id="btnProfile" class="primary">Start profiling</button>
@@ -145,22 +155,31 @@
     <select id="resTable"><option value="">All tables</option></select>
     <button id="btnResults">Show results</button>
   </div>
-  <div class="row"><a id="lnkProfileCsv" class="btnlink" href="/api/export/profile.csv">Download results .csv</a>
-    <span class="hint">Uses the base and table chosen above. Metadata only (counts, no values).</span></div>
+  <div class="row"><a id="lnkProfileCsv" class="btnlink" href="/api/export/profile.csv">Download results .csv</a></div>
+  <p class="hint">One row per field, giving its <strong>row count</strong>, <strong>null count</strong> and <strong>cardinality</strong> (distinct values; a capped value is a lower bound) for every table in the base and table selected above. This is the data-quality summary to share with support or use to plan field mapping. The file name shows your selection, for example <code>Bases_Tables_Profile_&lt;date&gt;.csv</code> for everything. It contains counts only, no record values.</p>
   <p class="hint">Null = missing, empty text or empty list. Zero and unchecked boxes count as real values. A cardinality marked "capped" is a lower bound: the field has more distinct values than the cap.</p>
   <div class="scroll"><table id="resultsTable" class="grid" hidden>
     <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>
     <tbody></tbody>
   </table></div>
+
+  <h3>Attachments: how many, how large, what types</h3>
+  <p class="hint">Filled in by every profiling run from the attachment details Airtable returns with each record (file name aside, only the size and type are kept). Nothing is downloaded. Use it to size storage for SharePoint, Workfront Core, AEM or Box. 1 MB = 1,048,576 bytes.</p>
+  <div class="row"><a id="lnkAttCsv" class="btnlink" href="/api/export/attachment_stats.csv">Download attachment stats .csv</a>
+    <button id="btnAttRefresh">Refresh</button></div>
+  <div id="attSummary" class="msg"></div>
+  <div class="scroll"><table id="attBandTable" class="grid compact" hidden><thead><tr><th>Size band</th><th class="num">Files</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="attTypeTable" class="grid compact" hidden><thead><tr><th>Extension</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="attTableTable" class="grid compact" hidden><thead><tr><th>Table</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
 </section>
 
 <!-- STEP 6 -->
 <section class="card" id="step6">
   <h2><span class="num">6</span> Saved record files</h2>
-  <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files themselves are not downloaded.</p>
+  <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files are downloaded only when "Also download the attachment files" was ticked in step 5, into an <code>attachments</code> folder beside the table files.</p>
   <div id="exFilesSummary" class="msg"></div>
   <div class="scroll"><table id="exFilesTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th>Captured (UTC)</th><th>Check</th><th>SHA-256</th></tr></thead>
+    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th class="num">Attachment files</th><th>Captured (UTC)</th><th>Check</th><th>SHA-256</th></tr></thead>
     <tbody></tbody>
   </table></div>
   <p class="hint">The page shows counts, sizes and checksums only. "Matches profile" compares the file's record count with the table's latest profile.</p>

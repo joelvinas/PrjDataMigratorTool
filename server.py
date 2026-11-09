@@ -24,6 +24,7 @@ import html as _html
 import quopri
 import http.client
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -65,7 +66,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.7"
+APP_VERSION = "1.10"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -141,6 +142,30 @@ CREATE TABLE airtable_views (
 
 CREATE INDEX idx_airtable_views_table ON airtable_views(table_id);
 CREATE INDEX idx_airtable_views_type ON airtable_views(view_type);
+
+-- 1c. Attachment size and type statistics (counts, bytes and file types only: no filenames, links or file contents)
+CREATE TABLE airtable_attachment_stats (
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    field_id TEXT NOT NULL,
+    file_extension TEXT NOT NULL,   -- from the attachment filename, else the MIME type, else 'bin'
+    mime_type TEXT NOT NULL,        -- as reported by Airtable, lower case, 'unknown' if none
+    file_count INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    min_bytes INTEGER,
+    max_bytes INTEGER,
+    unknown_size_count INTEGER NOT NULL DEFAULT 0,  -- attachments for which Airtable reported no size
+    size_lt_1mb INTEGER NOT NULL DEFAULT 0,         -- size buckets use 1 MB = 1,048,576 bytes
+    size_1_10mb INTEGER NOT NULL DEFAULT 0,
+    size_10_100mb INTEGER NOT NULL DEFAULT 0,
+    size_100mb_1gb INTEGER NOT NULL DEFAULT 0,
+    size_ge_1gb INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (field_id, file_extension, mime_type)
+);
+
+CREATE INDEX idx_attachment_stats_table ON airtable_attachment_stats(table_id);
+CREATE INDEX idx_attachment_stats_base ON airtable_attachment_stats(base_id);
 
 -- 2. Workfront Planning Environment Schema (Dev & Prod)
 CREATE TABLE workfront_fields (
@@ -489,6 +514,11 @@ def api_db_create(body):
     if os.path.isdir(path):
         raise AppError("That path is a folder. Enter the full path of a file.")
     parent = os.path.dirname(path)
+    if not os.path.isdir(parent) and os.path.abspath(parent) == os.path.join(BASE_DIR, "db"):
+        try:
+            os.makedirs(parent, exist_ok=True)   # the app's own db folder is created for you
+        except OSError as e:
+            raise AppError("Could not create the folder %s: %s" % (parent, scrub(e)))
     if not os.path.isdir(parent):
         raise AppError("The folder %s does not exist. Create it first or choose another path." % parent)
     try:
@@ -1394,6 +1424,7 @@ class Job:
         self.save_records = False   # True = also write every record to the JSON files (RecordSink)
         self.names = {}             # field_id -> field name, only used when saving records
         self.sinks = {}             # table_id -> open RecordSink
+        self.download_files = False # True = also download attachment files (needs save_records)
 
 
 JOB = {"current": None}
@@ -1430,6 +1461,10 @@ def api_profile_start(body):
     if not tables:
         raise AppError("There are no tables to profile for that choice. Ingest a schema first (step 3).")
     save = bool(body.get("save_records"))
+    dl = bool(body.get("download_attachments"))
+    if dl and not save:
+        raise AppError("Downloading attachment files needs \"Also save every record to JSON files\" to be ticked too, "
+                       "because the files are matched to records through the saved JSON.")
     names = {}
     if save:
         for t in tables:
@@ -1444,8 +1479,9 @@ def api_profile_start(body):
             raise AppError("A profiling run is already in progress. Wait for it to finish or cancel it.")
         job = Job(scope, cap, [{"base_id": t["base_id"], "table_id": t["table_id"], "table_name": t["table_name"],
                                 "fields": len(t["fields"]), "status": "pending", "pages": 0, "records": 0,
-                                "error": None, "capped_fields": 0, "saved": False} for t in tables])
-        job.save_records, job.names = save, names
+                                "error": None, "capped_fields": 0, "saved": False,
+                                "files": 0, "file_bytes": 0, "file_failed": 0} for t in tables])
+        job.save_records, job.names, job.download_files = save, names, dl
         for t in tables:
             job.fields[t["table_id"]] = t["fields"]
         JOB["current"] = job
@@ -1461,6 +1497,8 @@ def _profile_table(job, t):
     row_count, offset = 0, None
     path = "/v0/%s/%s" % (quote(t["base_id"], safe=""), quote(t["table_id"], safe=""))
     sink = None
+    att_fields = {fid for fid, ftype in fields if ftype == "multipleAttachments"}
+    att_stats = {}   # (field_id, extension, mime) -> counters; sizes and types only, never names or links
     if job.save_records:
         sink = job.sinks[t["table_id"]] = RecordSink(job, t)
     while True:
@@ -1474,6 +1512,10 @@ def _profile_table(job, t):
                 sink.add(rec)
             fv = rec.get("fields") or {}
             row_count += 1
+            for fid in att_fields:
+                for a in fv.get(fid) or []:
+                    if isinstance(a, dict):
+                        _tally_attachment(att_stats, fid, a)
             for fid, ftype in fields:
                 v = fv.get(fid)
                 if ftype == "checkbox" and v is None:
@@ -1494,10 +1536,31 @@ def _profile_table(job, t):
         offset = body.get("offset")
         if not offset:
             break
-    return row_count, nulls, sets, capped
+    return row_count, nulls, sets, capped, att_stats
 
 
-def _save_table(job, t, row_count, nulls, sets, capped):
+MB = 1048576
+ATT_BUCKET_EDGES = (MB, 10 * MB, 100 * MB, 1024 * MB)   # < 1 MB, 1-10, 10-100, 100 MB-1 GB, >= 1 GB
+
+
+def _tally_attachment(stats, fid, a):
+    """Add one attachment to the per-(field, extension, MIME type) counters. Sizes and types only."""
+    mime = str(a.get("type") or "").split(";")[0].strip().lower() or "unknown"
+    key = (fid, attachment_ext(a.get("filename"), a.get("type")), mime)
+    c = stats.setdefault(key, {"n": 0, "bytes": 0, "min": None, "max": None, "unknown": 0, "buckets": [0] * 5})
+    c["n"] += 1
+    size = a.get("size")
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0:
+        c["unknown"] += 1
+        return
+    size = int(size)
+    c["bytes"] += size
+    c["min"] = size if c["min"] is None else min(c["min"], size)
+    c["max"] = size if c["max"] is None else max(c["max"], size)
+    c["buckets"][sum(1 for e in ATT_BUCKET_EDGES if size >= e)] += 1
+
+
+def _save_table(job, t, row_count, nulls, sets, capped, att_stats=None):
     try:
         with db() as conn:
             with conn:
@@ -1509,6 +1572,16 @@ def _save_table(job, t, row_count, nulls, sets, capped):
                                  "cardinality_is_capped=? WHERE field_id=?",
                                  (row_count, nulls[fid], job.cap if fid in capped else len(sets[fid]),
                                   1 if fid in capped else 0, fid))
+                # Attachment sizes and types for this table are replaced as a whole, so a re-run never double counts.
+                conn.execute("DELETE FROM airtable_attachment_stats WHERE table_id=?", (t["table_id"],))
+                ts = utc_now()
+                for (fid, ext, mime), c in sorted((att_stats or {}).items()):
+                    conn.execute("INSERT INTO airtable_attachment_stats(base_id, table_id, field_id, file_extension, "
+                                 "mime_type, file_count, total_bytes, min_bytes, max_bytes, unknown_size_count, "
+                                 "size_lt_1mb, size_1_10mb, size_10_100mb, size_100mb_1gb, size_ge_1gb, updated_at) "
+                                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                 (t["base_id"], t["table_id"], fid, ext, mime, c["n"], c["bytes"], c["min"], c["max"],
+                                  c["unknown"], *c["buckets"], ts))
     except sqlite3.Error as e:
         raise DbError("Database write failed while saving %s: %s" % (t["table_name"], scrub(e)))
 
@@ -1571,7 +1644,7 @@ def api_profile_status(_q=None):
         return {"job": None}
     return {"job": {"id": job.id, "status": job.status, "error": job.error, "scope": job.scope, "cap": job.cap,
                     "started_at": job.started_at, "finished_at": job.finished_at, "api": job.api.as_dict(),
-                    "save_records": job.save_records, "tables": [dict(t) for t in job.tables]}}
+                    "save_records": job.save_records, "download_files": job.download_files, "tables": [dict(t) for t in job.tables]}}
 
 
 def api_profile_cancel(_body=None):
@@ -1677,6 +1750,10 @@ class RecordSink:
         self.path = _extract_path(t["base_id"], t["table_id"])
         self.tmp = self.path + ".tmp"
         self.t, self.n, self.seen = t, 0, set()
+        self.job = job
+        self.att_fields = [fid for fid, ftype in job.fields[t["table_id"]] if ftype == "multipleAttachments"] \
+            if job.download_files else []
+        self.att_index, self.att_done = [], {}    # index entries; attachment id -> result of its download
         self.captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.fields_meta = [{"field_id": fid, "field_name": job.names.get(fid, fid), "data_type": ftype}
                             for fid, ftype in job.fields[t["table_id"]]]
@@ -1698,16 +1775,49 @@ class RecordSink:
         self.seen.add(rid)
         self.f.write(("," if self.n else "") + json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
         self.n += 1
+        if self.att_fields:
+            self._attachments(rec)
+
+    def _attachments(self, rec):
+        """Download every attachment in this record now, while Airtable's temporary links are fresh."""
+        t, job = self.t, self.job
+        for fid in self.att_fields:
+            for a in (rec.get("fields") or {}).get(fid) or []:
+                if not isinstance(a, dict):
+                    continue
+                if job.cancel.is_set():
+                    raise Cancelled()
+                aid = a.get("id")
+                if aid in self.att_done:      # the same attachment seen twice: reuse the first download
+                    res = self.att_done[aid]
+                else:
+                    res = download_attachment(self.t["base_id"], a, job.cancel)
+                    if aid:
+                        self.att_done[aid] = res
+                    if res["status"] == "failed":
+                        t["file_failed"] += 1
+                    else:
+                        t["files"] += 1
+                        t["file_bytes"] += res["bytes"]
+                self.att_index.append({"record_id": rec.get("id"), "field_id": fid, "attachment_id": aid,
+                                       "filename": a.get("filename"), "type": a.get("type"), "size": a.get("size"),
+                                       "file": res.get("file"), "bytes": res.get("bytes"), "sha256": res.get("sha256"),
+                                       "status": res["status"], "error": res.get("error")})
 
     def finish(self):
         t = self.t
         self.f.write('],"record_count":%d}' % self.n)
         self.f.close()
         os.replace(self.tmp, self.path)
+        att = None
+        if self.job.download_files:
+            att = self._write_att_index()
         entry = {"base_id": t["base_id"], "table_id": t["table_id"], "table_name": t["table_name"],
                  "file": "%s/%s.json" % (t["base_id"], t["table_id"]), "record_count": self.n,
                  "bytes": os.path.getsize(self.path), "sha256": _file_digest(self.path),
                  "captured_at": self.captured, "fields": len(self.fields_meta)}
+        if att:
+            entry["attachments"] = att
         with _manifest_lock:
             m = _read_manifest()
             m["tables"] = [x for x in m["tables"] if x.get("table_id") != t["table_id"]] + [entry]
@@ -1716,6 +1826,21 @@ class RecordSink:
                          "source control and delete it when the migration no longer needs it. This manifest holds "
                          "counts and checksums only.")
             _write_manifest(m)
+
+    def _write_att_index(self):
+        t = self.t
+        ipath = os.path.join(os.path.dirname(self.path), t["table_id"] + ".attachments.json")
+        tmp = ipath + ".tmp"
+        failed = [e for e in self.att_index if e["status"] == "failed"]
+        doc = {"format": "airtable-attachment-index/1", "base_id": t["base_id"], "table_id": t["table_id"],
+               "captured_at": self.captured, "folder": "attachments", "attachments": self.att_index}
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=1)
+        _private(tmp)
+        os.replace(tmp, ipath)
+        uniq = {e["attachment_id"]: e for e in self.att_index if e["status"] != "failed"}
+        return {"files": len(uniq), "bytes": sum(e["bytes"] or 0 for e in uniq.values()), "failed": len(failed),
+                "index": "%s/%s.attachments.json" % (t["base_id"], t["table_id"])}
 
     def abort(self):
         try:
@@ -1726,6 +1851,105 @@ class RecordSink:
             os.remove(self.tmp)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------
+# Attachment files. Airtable's attachment links are signed and expire after a few hours, so the files are
+# downloaded in the same pass that reads the records. The links are NOT secret-free: they are never logged,
+# never put in an error message and never sent to the browser, and the Airtable token is never sent to them.
+# --------------------------------------------------------------------------
+ATT_HOST_SUFFIXES = ("airtableusercontent.com", "airtable.com")
+ATT_CHUNK = 256 * 1024
+ATT_TRIES = 3
+
+
+def attachment_ext(filename, mime):
+    """Extension for the saved file: the one in the original filename if it is plain, else one from the MIME type."""
+    ext = os.path.splitext(str(filename or ""))[1].lstrip(".").lower()
+    if re.match(r"^[a-z0-9]{1,10}$", ext):
+        return ext
+    guess = (mimetypes.guess_extension(str(mime or "").split(";")[0].strip()) or "").lstrip(".").lower()
+    if guess == "jpe":
+        guess = "jpg"
+    return guess if re.match(r"^[a-z0-9]{1,10}$", guess) else "bin"
+
+
+def _attachment_url_ok(url):
+    if not isinstance(url, str):
+        return False
+    if AIRTABLE_API_BASE != "https://api.airtable.com" and url.startswith(AIRTABLE_API_BASE + "/"):
+        return True   # the mock-server test plan serves files from the mock
+    u = urlparse(url)
+    h = (u.hostname or "").lower()
+    return u.scheme == "https" and any(h == x or h.endswith("." + x) for x in ATT_HOST_SUFFIXES)
+
+
+def download_attachment(base_id, a, cancel):
+    """Download one attachment to <extract_dir>/<base>/attachments/<attachment id>.<ext>. Never raises for a bad
+    file (the result says failed and why, without the link); raises Cancelled if the run is cancelled."""
+    aid = a.get("id")
+    if not isinstance(aid, str) or not ID_SAFE_RE.match(aid):
+        return {"status": "failed", "error": "attachment has no usable ID"}
+    if not _attachment_url_ok(a.get("url")):
+        return {"status": "failed", "error": "attachment link is not an Airtable file link"}
+    ext = attachment_ext(a.get("filename"), a.get("type"))
+    rel = "attachments/%s.%s" % (aid, ext)
+    d = os.path.join(extract_dir(), base_id, "attachments")
+    path, part = os.path.join(d, "%s.%s" % (aid, ext)), os.path.join(d, "%s.%s.part" % (aid, ext))
+    want = a.get("size") if isinstance(a.get("size"), int) else None
+    os.makedirs(d, exist_ok=True)
+    _private(extract_dir(), True)
+    _private(os.path.dirname(d), True)
+    _private(d, True)
+    if os.path.isfile(path) and (want is None or os.path.getsize(path) == want):   # already have it: keep it
+        return {"status": "existing", "file": rel, "bytes": os.path.getsize(path), "sha256": _file_digest(path)}
+    err = "download failed"
+    for attempt in range(ATT_TRIES):
+        if cancel.is_set():
+            raise Cancelled()
+        h, n = hashlib.sha256(), 0
+        try:
+            # No Authorization header: the link is already signed, and the token must never leave for another host.
+            req = urllib.request.Request(a["url"], method="GET", headers={"User-Agent": "airtable-migration-control"})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp, open(part, "wb") as out:
+                _private(part)
+                while True:
+                    if cancel.is_set():
+                        raise Cancelled()
+                    chunk = resp.read(ATT_CHUNK)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    h.update(chunk)
+                    n += len(chunk)
+            if want is not None and n != want:
+                err = "downloaded %d bytes but Airtable reported %d" % (n, want)
+                continue
+            os.replace(part, path)
+            return {"status": "downloaded", "file": rel, "bytes": n, "sha256": h.hexdigest()}
+        except Cancelled:
+            _rm(part)
+            raise
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403, 404, 410):
+                _rm(part)
+                return {"status": "failed", "error": "link expired or file no longer available (HTTP %d)" % e.code}
+            err = "HTTP %d" % e.code
+        except (urllib.error.URLError, http.client.HTTPException, socket.timeout, TimeoutError, ConnectionError) as e:
+            err = "network error (%s)" % type(e).__name__    # the exception text can contain the link, so it is not kept
+        except OSError as e:
+            _rm(part)
+            return {"status": "failed", "error": "could not write the file (%s)" % type(e).__name__}
+        time.sleep(min(2.0 ** attempt, 8.0) * (0.2 if AIRTABLE_API_BASE != "https://api.airtable.com" else 1.0))
+    _rm(part)
+    return {"status": "failed", "error": err}
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _profile_row_counts():
@@ -1752,7 +1976,10 @@ def api_extract_files(_q=None):
         check = "no profile" if not prof and e["record_count"] else ("matches profile" if prof == e["record_count"] else "differs from profile (%s)" % prof)
         out.append(dict(e, bytes=size, check=check))
     return {"folder": extract_dir(), "files": out,
-            "total_records": sum(x["record_count"] for x in out), "total_bytes": sum(x["bytes"] for x in out)}
+            "total_records": sum(x["record_count"] for x in out), "total_bytes": sum(x["bytes"] for x in out),
+            "total_attachment_files": sum((x.get("attachments") or {}).get("files", 0) for x in out),
+            "total_attachment_bytes": sum((x.get("attachments") or {}).get("bytes", 0) for x in out),
+            "total_attachment_failed": sum((x.get("attachments") or {}).get("failed", 0) for x in out)}
 
 
 def api_extract_delete(body):
@@ -1769,7 +1996,20 @@ def api_extract_delete(body):
             continue
         p = os.path.join(root, d)
         for fn in os.listdir(p):
-            if re.match(r"^[A-Za-z0-9_-]+\.json(\.tmp)?$", fn):
+            if fn == "attachments" and os.path.isdir(os.path.join(p, fn)):
+                ad = os.path.join(p, fn)
+                for af in os.listdir(ad):
+                    if re.match(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9]{1,10}){1,2}$", af):
+                        try:
+                            os.remove(os.path.join(ad, af))
+                            removed += 1
+                        except OSError as e:
+                            raise AppError("Could not delete %s/attachments/%s: %s" % (d, af, scrub(e)))
+                try:
+                    os.rmdir(ad)
+                except OSError:
+                    pass
+            elif re.match(r"^[A-Za-z0-9_-]+(\.attachments)?\.json(\.tmp)?$", fn):
                 try:
                     os.remove(os.path.join(p, fn))
                     removed += 1
@@ -1946,6 +2186,14 @@ def svg_graph(nodes, edges, self_tables):
     return "".join(o)
 
 
+def human_bytes(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024
+
+
 def _tr(cells, cls=""):
     return "<tr%s>%s</tr>" % ((' class="%s"' % cls) if cls else "", "".join(cells))
 
@@ -2113,6 +2361,29 @@ def build_report(mode):
                           _td(esc(v["view_name"]) + " " + _code(v["view_id"])), _td(esc(v["view_type"])), _td(vis)]))
 
     # 4. Load order
+    # 3c. Attachments (sizes and types seen while profiling)
+    with db() as conn3:
+        astats = load_attachment_stats(conn3)
+    h.append("<h3>3c. Attachments: how many, how large, what types</h3><p class=\"meta\">Counted from the attachment "
+             "details Airtable returns with each record while profiling (step 5). No files are downloaded and no "
+             "filenames or links are stored. 1 MB = 1,048,576 bytes. Run profiling to fill this in.</p>")
+    if not astats:
+        h.append("<p class=\"meta\">No attachment statistics yet (profiling has not found attachments, or has not run).</p>")
+    else:
+        tot, by_type, by_table = summarize_attachment_stats(astats)
+        h.append("<p><strong>%s files, %s</strong> in total; largest single file %s%s.</p>" % (
+            "{:,}".format(tot["files"]), human_bytes(tot["bytes"]), human_bytes(tot["max_bytes"]),
+            "; %d with no size reported" % tot["unknown_size"] if tot["unknown_size"] else ""))
+        lab = ["under 1 MB", "1-10 MB", "10-100 MB", "100 MB-1 GB", "1 GB or more"]
+        h.append("<table>" + _th(["Size band", "Files"]) + "".join(
+            _tr([_td(l), _td("{:,}".format(n))]) for l, n in zip(lab, tot["buckets"])) + "</table>")
+        h.append("<h4>By file type</h4><table>" + _th(["Extension", "Files", "Total size", "Largest"]) + "".join(
+            _tr([_td(esc(k)), _td("{:,}".format(v["files"])), _td(human_bytes(v["bytes"])), _td(human_bytes(v["max_bytes"]))])
+            for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]["bytes"])) + "</table>")
+        h.append("<h4>By table</h4><table>" + _th(["Base", "Table", "Files", "Total size", "Largest"]) + "".join(
+            _tr([_td(_code(k[0])), _td(esc(k[2])), _td("{:,}".format(v["files"])), _td(human_bytes(v["bytes"])),
+                 _td(human_bytes(v["max_bytes"]))]) for k, v in sorted(by_table.items(), key=lambda kv: (kv[0][0], kv[0][2].lower()))) + "</table>")
+
     h.append("<h2>4. Load order</h2><div class=\"box\"><p><strong>How to read this.</strong> Load tables in "
              "ascending <em>Load #</em>. A table's parents always have a lower number. Tables with the same "
              "<em>Depth</em> do not depend on each other. Tables flagged <em>In a cycle</em> depend on each other: "
@@ -2265,8 +2536,75 @@ def api_export_profile(q):
             for r in data if not r["stale"]]
     body = _csv_bytes(["base_id", "table", "field", "field_type", "row_count", "null_count", "cardinality",
                        "cardinality_capped"], rows)
+    def part(key, plural):   # the ID the user chose, or "Bases" / "Tables" for all
+        v = (q.get(key) or [""])[0]
+        return v if ID_SAFE_RE.match(v) else plural
+    name = "%s_%s_Profile_%s.csv" % (part("base_id", "Bases"), part("table_id", "Tables"), _stamp())
+    return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="%s"' % name})
+
+
+ATT_SUMMARY_SQL = ("SELECT s.base_id, s.table_id, COALESCE(t.table_name, s.table_id) AS table_name, s.field_id, "
+                   "COALESCE(f.field_name, s.field_id) AS field_name, s.file_extension, s.mime_type, s.file_count, "
+                   "s.total_bytes, s.min_bytes, s.max_bytes, s.unknown_size_count, s.size_lt_1mb, s.size_1_10mb, "
+                   "s.size_10_100mb, s.size_100mb_1gb, s.size_ge_1gb FROM airtable_attachment_stats s "
+                   "LEFT JOIN airtable_tables t ON t.table_id = s.table_id "
+                   "LEFT JOIN airtable_fields f ON f.field_id = s.field_id WHERE 1=1")
+
+
+def load_attachment_stats(conn, base="", table=""):
+    sql, args = ATT_SUMMARY_SQL, []
+    if base:
+        sql += " AND s.base_id=?"
+        args.append(base)
+    if table:
+        sql += " AND s.table_id=?"
+        args.append(table)
+    sql += (" ORDER BY s.base_id, lower(COALESCE(t.table_name, s.table_id)), s.table_id, "
+            "lower(COALESCE(f.field_name, s.field_id)), s.field_id, s.total_bytes DESC, s.file_extension")
+    return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
+def summarize_attachment_stats(rows):
+    def blank():
+        return {"files": 0, "bytes": 0, "max_bytes": 0, "unknown_size": 0, "buckets": [0] * 5}
+    tot, by_type, by_table = blank(), {}, {}
+    keys = ("size_lt_1mb", "size_1_10mb", "size_10_100mb", "size_100mb_1gb", "size_ge_1gb")
+    for r in rows:
+        for agg in (tot, by_type.setdefault(r["file_extension"], blank()),
+                    by_table.setdefault((r["base_id"], r["table_id"], r["table_name"]), blank())):
+            agg["files"] += r["file_count"]
+            agg["bytes"] += r["total_bytes"]
+            agg["max_bytes"] = max(agg["max_bytes"], r["max_bytes"] or 0)
+            agg["unknown_size"] += r["unknown_size_count"]
+            for i, k in enumerate(keys):
+                agg["buckets"][i] += r[k]
+    return tot, by_type, by_table
+
+
+def api_attachment_stats(q):
+    """Counts, bytes and file types of the attachments seen while profiling. No filenames, no links."""
+    base = (q.get("base_id") or [""])[0]
+    table = (q.get("table_id") or [""])[0]
+    with db() as conn:
+        rows = load_attachment_stats(conn, base, table)
+    tot, by_type, by_table = summarize_attachment_stats(rows)
+    return {"total": tot, "rows": rows,
+            "by_type": [dict(extension=k, **v) for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]["bytes"])],
+            "by_table": [dict(base_id=k[0], table_id=k[1], table_name=k[2], **v)
+                         for k, v in sorted(by_table.items(), key=lambda kv: (kv[0][0], kv[0][2].lower()))]}
+
+
+def api_export_attachment_stats(q):
+    base = (q.get("base_id") or [""])[0]
+    table = (q.get("table_id") or [""])[0]
+    with db() as conn:
+        rows = load_attachment_stats(conn, base, table)
+    cols = ["base_id", "table_id", "table_name", "field_id", "field_name", "file_extension", "mime_type", "file_count",
+            "total_bytes", "min_bytes", "max_bytes", "unknown_size_count", "size_lt_1mb", "size_1_10mb",
+            "size_10_100mb", "size_100mb_1gb", "size_ge_1gb"]
+    body = _csv_bytes(cols, [["" if r[c] is None else r[c] for c in cols] for r in rows])
     return (body, "text/csv; charset=utf-8",
-            {"Content-Disposition": 'attachment; filename="profile_%s.csv"' % _stamp()})
+            {"Content-Disposition": 'attachment; filename="attachment_stats_%s.csv"' % _stamp()})
 
 
 def api_export_views(q):
@@ -2328,6 +2666,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
               "/api/export/field_options.csv": api_export_field_options,
+              "/api/export/attachment_stats.csv": api_export_attachment_stats, "/api/attachments/stats": api_attachment_stats,
               "/api/export/views.csv": api_export_views, "/api/export/tables.csv": api_export_tables}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,

@@ -37,6 +37,15 @@ def load(base):
         return json.load(f)
 
 
+FILES = os.environ.get("MOCK_FILES") == "1"
+PUBLIC = os.environ.get("MOCK_PUBLIC", "http://127.0.0.1:%s" % os.environ.get("MOCK_PORT", "9100"))
+file_hits = {}
+
+
+def file_body(aid):
+    return (("bytes-of-%s;" % aid) * (1 + len(aid) * 40)).encode()
+
+
 def make_record(table, i):
     """Deterministic fake record. Empty values are omitted, like Airtable does."""
     fields = {}
@@ -46,7 +55,17 @@ def make_record(table, i):
             if i % 3 == 0:
                 fields[fid] = True            # unchecked boxes are omitted by Airtable
         elif t == "multipleAttachments":
-            if i % 4 == 0:
+            if FILES and i % 4 == 0:
+                # real downloadable files (MOCK_FILES=1): two per record, unique IDs, odd filenames
+                names = [("photo-%d.JPG" % i, "image/jpeg"), (".jfif", "image/jpeg"), ("noext", "application/pdf"),
+                         ("Report %d.final.PDF" % i, "application/pdf")]
+                fields[fid] = []
+                for j in range(2):
+                    nm, mt = names[(i // 4 + j) % 4]
+                    aid = "attR%dA%d" % (i, j)
+                    fields[fid].append({"id": aid, "filename": nm, "type": mt, "size": len(file_body(aid)),
+                                        "url": "%s/files/%s" % (PUBLIC.rstrip("/"), aid)})
+            elif i % 4 == 0:
                 fields[fid] = [{"id": "att%d" % (i % 7), "url": "https://example.invalid/x", "filename": "f.png"}]
         elif t == "multipleRecordLinks":
             if i % 2 == 0:
@@ -85,6 +104,22 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.path.startswith("/files/"):
+            aid = self.path.split("/files/", 1)[1].split("?")[0]
+            file_hits[aid] = file_hits.get(aid, 0) + 1
+            if self.headers.get("Authorization"):      # the real file host must never receive the token
+                return self._json(400, {"error": "token leaked to file host"})
+            if aid == "attR8A1":                        # simulates an expired link
+                return self._json(410, {"error": "expired"})
+            data = file_body(aid)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path == "/_file_hits":
+            return self._json(200, file_hits)
         if self.headers.get("Authorization") != "Bearer " + TOKEN:
             return self._json(401, {"error": {"type": "AUTHENTICATION_REQUIRED", "message": "Authentication required"}})
         u = urlparse(self.path)
