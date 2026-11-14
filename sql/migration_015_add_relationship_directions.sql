@@ -1,4 +1,4 @@
--- Migration 015 (PROPOSED, not applied): the confirmed direction of each link field. Adds SIX columns to ONE table: field_relationships.
+-- Migration 015 (applied 14 November 2026): the confirmed direction of each link field. Adds SIX columns to ONE table: field_relationships.
 -- Additive only: nothing is renamed or dropped, existing rows keep their values (the new columns are NULL, or 0 for the three flags).
 -- ADD COLUMN cannot be repeated: apply_migrations.py must check PRAGMA table_info first (it is not wired in until you confirm this is applied).
 --

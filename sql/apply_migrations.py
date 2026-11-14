@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the migrations (001 to 014) to an existing database. Standard library only.
+"""Apply the migrations (001 to 017) to an existing database. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
@@ -40,6 +40,17 @@ def main():
         added.append("field_names.core_target_type")
     for name in ("migration_013_add_field_relationships.sql", "migration_014_add_option_names.sql"):
         conn.executescript(open(os.path.join(HERE, name), encoding="utf-8").read())
+    if "suggested_type" not in {r[1] for r in conn.execute("PRAGMA table_info(field_relationships)")}:   # migration 015: ADD COLUMN cannot be repeated
+        conn.executescript(open(os.path.join(HERE, "migration_015_add_relationship_directions.sql"), encoding="utf-8").read())
+        added.append("field_relationships.direction columns (6)")
+    if "workspace_key" not in {r[1] for r in conn.execute("PRAGMA table_info(load_id_map)")}:   # migration 016 rebuilds the table: only while it is empty
+        rows = conn.execute("SELECT COUNT(*) FROM load_id_map").fetchone()[0]
+        if rows:
+            sys.exit("Stopped before migration 016: load_id_map has %d row(s), and 016 rebuilds that table. Nothing was changed by 016 (earlier steps were kept)." % rows)
+        conn.commit()
+        conn.executescript(open(os.path.join(HERE, "migration_016_load_id_map_workspace_key.sql"), encoding="utf-8").read())
+        added.append("load_id_map.workspace_key")
+    conn.executescript(open(os.path.join(HERE, "migration_017_add_record_id_map.sql"), encoding="utf-8").read())
     dropped, kept = [], []
     for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():

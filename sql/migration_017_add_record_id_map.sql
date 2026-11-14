@@ -1,4 +1,4 @@
--- Migration 017 (PROPOSED, not applied): the record ID map. Adds FOUR tables: source_records, target_mappings, record_pass_markers, attachment_map.
+-- Migration 017 (applied 14 November 2026): the record ID map. Adds FOUR tables: source_records, target_mappings, record_pass_markers, attachment_map.
 -- Additive only. Safe to run more than once. Holds IDs, statuses, file sizes and hashes ONLY: no record value, no file name, no link.
 --
 -- Design (owner, 14 November 2026): every Airtable record gets ONE surrogate ID, and everything else points to it instead of repeating base,

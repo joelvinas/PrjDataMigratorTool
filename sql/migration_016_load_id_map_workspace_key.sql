@@ -1,4 +1,4 @@
--- Migration 016 (PROPOSED, not applied): put the Planning Workspace in the key of load_id_map.
+-- Migration 016 (applied 14 November 2026): put the Planning Workspace in the key of load_id_map.
 -- THIS IS THE ONE STEP THAT IS NOT PURELY ADDITIVE: SQLite cannot change a primary key, so the table is rebuilt (create the new one, copy the
 -- rows, drop the old one, rename). It is safe only because nothing reads or writes load_id_map yet: apply it ONLY while the table is empty,
 -- and apply_migrations.py must refuse (and report) if it has rows. Back the database up first. Run once (the runner checks PRAGMA table_info for
