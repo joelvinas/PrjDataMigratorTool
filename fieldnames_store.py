@@ -747,6 +747,21 @@ def report_html(conn, base_id, base_label, css, generated=None):
     return fr.build_html(rv, event_summary(conn, base_id), css, base_label or base_id, generated or _now())
 
 
+def loader_inputs(conn, base_id):
+    """What the loader needs: the review (approved names, scope, targets, consolidations) and each select field's options in Airtable's order.
+    Schema metadata only: no record value is read."""
+    rv = review(conn, base_id)
+    choices = {}
+    for r in conn.execute("SELECT field_id, choices_json FROM airtable_fields WHERE base_id=? AND choices_json IS NOT NULL", (base_id,)):
+        try:
+            items = json.loads(r[1])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(items, list):
+            choices[r[0]] = [{"id": str(x.get("id")), "name": str(x.get("name"))} for x in items if isinstance(x, dict) and x.get("id") is not None]
+    return {"review": rv, "choices": choices}
+
+
 def report_zip(files):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:

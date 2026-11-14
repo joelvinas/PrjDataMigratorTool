@@ -58,6 +58,9 @@ airtable-migration-control/
 ├── fieldnames.py                field and table name validator: the rules and the pipeline (pure functions, no I/O)
 ├── fieldnames_io.py             validator command line: CSV import, read-only database loader, report files
 ├── emojitext.py                 emoji handling shared by names, labels and descriptions: remove, or replace with the Unicode name
+├── loadplan.py                  the load plan: everything the migration would create in Workfront, with temporary IDs and a status (pure)
+├── loadrun.py                   runs a plan: sandbox by default, idempotent, dry run, one failure never stops it (pure; real transports not built)
+├── loader.py                    the loader command line: plan and dry-run (read-only; nothing is sent to Workfront)
 ├── fieldgroups.py               consolidation rules: validate a group, merged members, survivors (pure)
 ├── fieldcompare.py              compares the values of fields in one table from a saved record file: counts and record IDs only (pure)
 ├── fielddesc.py                 field descriptions in the lineage syntax: generate, parse back, validate (pure functions)
@@ -68,7 +71,8 @@ airtable-migration-control/
 ├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
 ├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
 ├── docs/
-│   └── FIELD_NAMING_RULES.md    the naming rules in plain language (generated from the validator's rule list)
+│   ├── FIELD_NAMING_RULES.md    the naming rules in plain language (generated from the validator's rule list)
+│   └── LOADER_PLAN.md           the loader plan: what is built, what Adobe's documentation confirms, what is not verified, decisions needed
 ├── start.bat                    Windows launcher (finds Python, creates config.json, opens the browser)
 ├── config.example.json          copy to config.json and add your token
 ├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/ (databases live in db/)
@@ -85,6 +89,7 @@ airtable-migration-control/
 │   ├── migration_007_add_field_names.sql   Field name validator: field_names, table_names, name_events
 │   ├── migration_008_add_table_scope_and_targets.sql   Field names page: table_scope, table_targets (human decisions about scope and target)
 │   ├── migration_009_add_field_groups.sql   Field names page: field_groups, field_group_members (field consolidation)
+│   ├── migration_010_add_load_id_map.sql   PROPOSED, not yet applied: load_id_map (Workfront IDs against temporary IDs, per environment)
 │   └── apply_migrations.py             applies all nine to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
@@ -522,6 +527,21 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 
 **Tests.** `python test/run_regression.py names` runs the validator's suites (the pure rules; the import, database loader, reports and command line; the saved decisions; the descriptions; emoji handling; value comparison; and consolidation rules) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. `namesui` drives the real page in Chromium through the whole workflow (the table-approval gate, initials, previewing and saving settings, the emoji option, filters, approving, duplicate groups and value comparison, withdrawing, importing, descriptions, scope, the report preview and downloads, and that a hostile field name never runs) and, like the other browser suites, is skipped when Playwright is not installed.
 
+## The loader (Stage 4, begun)
+
+Stage 4 will create the target in Workfront. Only the first step is built: a **load plan** and a **dry run**, which send nothing anywhere. Full detail, including what Adobe's documentation confirms and what is not verified, is in [docs/LOADER_PLAN.md](docs/LOADER_PLAN.md).
+
+```
+python loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX
+python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env sandbox
+```
+
+- **`plan`** (read-only) writes `load_plan.csv` and a summary: every Planning record type, Core custom form, field and select option (in Airtable's order) the migration would create, plus the fields that link a Core object to its Planning record, each with a **temporary ID** that depends only on the Airtable IDs (so it is the same on every run) and a **status**: `ready`; `hold` (a design decision is open: a derived field, a relationship, an attachment, the Core object type); or `blocked` (a table or name is not approved, there is no target data type, or scope or target is undecided), with the reasons.
+- **`dry-run`** walks the plan the way a real run would and says what it would create. The environment defaults to **sandbox**; a production dry run is allowed because it changes nothing, but a real production run will need the exact phrase `CREATE IN PRODUCTION`.
+- **The runner's rules** are built and tested with a fake transport: a Workfront ID is written back against the temporary ID at once, so a restart creates nothing twice; one failed item never stops the run (its message has any credential removed, and what depends on it is skipped); dry run is the default.
+- **`run` is refused** with an explanation: creating anything is not implemented, because the request shapes for Workfront Planning and Workfront Core are not verified and no credentials are configured.
+- **Proposed schema:** [sql/migration_010_add_load_id_map.sql](sql/migration_010_add_load_id_map.sql) adds `load_id_map` (Workfront IDs against temporary IDs, per environment, with option rows and their order). It is **not applied** and not in the schema library; nothing needs it yet.
+
 ## Troubleshooting
 
 **`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
@@ -541,7 +561,7 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 | Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
 | Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14) |
-| Stage 4 (anticipated): Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning | Slot in the side panel only; `workfront_fields` and `field_crosswalk` exist, empty |
+| Stage 4: Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.14): the load plan and dry run are built (`loader.py`); nothing is created in Workfront yet. See `docs/LOADER_PLAN.md` |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 
 Decisions made:
