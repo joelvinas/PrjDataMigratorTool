@@ -174,7 +174,7 @@ with sync_playwright() as p:
     pg.wait_for_timeout(1200)
     check("saved automations are listed after a reload", "Order follow-up" in pg.inner_text("#savedAutos"))
     pg.click("#btnOpen")
-    pg.wait_for_timeout(800)
+    pg.wait_for_selector("#tree > details.fitem", timeout=8000)
     check("opening restores the trigger, the nested logic and the steps",
           pg.input_value("#autoName") == "Order follow-up" and pg.input_value("#scenarioName") == "Fusion: Order follow-up"
           and pg.locator("#triggerBox .cgroup .cgroup").count() == 1 and pg.locator("#tree > details.fitem").count() == 3
@@ -195,13 +195,24 @@ with sync_playwright() as p:
     check("fields that need a decision offer choices", sels.count() > 0 and "Choose..." in sels.first.inner_text(), sels.count())
     sels.first.select_option(index=1); pg.locator("#writersTable tbody button", has_text="Decide").first.click(); pg.wait_for_timeout(300)
     check("a decision without initials is refused with a plain message", "initials" in pg.inner_text("#writersMessage"), pg.inner_text("#writersMessage"))
-    pg.fill("#wrActor", "JV"); pg.locator("#writersTable tbody button", has_text="Decide").first.click(); pg.wait_for_timeout(800)
+    pg.fill("#wrActor", "JV"); pg.locator("#writersTable tbody button", has_text="Decide").first.click(); pg.wait_for_function("document.getElementById('writersMessage').textContent.includes('Saved.')", timeout=8000)
     check("a decision is saved and shown with who decided", "Saved." in pg.inner_text("#writersMessage") and "Decided by JV" in pg.inner_text("#writersTable"), pg.inner_text("#writersMessage"))
-    pg.locator("#writersTable tbody button", has_text="Clear").first.click(); pg.wait_for_timeout(800)
+    pg.locator("#writersTable tbody button", has_text="Clear").first.click(); pg.wait_for_function("document.getElementById('writersMessage').textContent.includes('Cleared.')", timeout=8000)
     check("a decision can be cleared", "Cleared." in pg.inner_text("#writersMessage") and "Decided by JV" not in pg.inner_text("#writersTable"), pg.inner_text("#writersMessage"))
+    NL = chr(10)
+    wr = json.loads(urllib.request.urlopen(B + "/api/field-writers?base_id=appSampleBase001").read())
+    fus = [e for e in wr["entries"] if e["fusion"]][0]
+    pg.set_input_files("#wrPullFile", files=[{"name": "pull.csv", "mimeType": "text/csv", "buffer": ("system,field_id,description" + NL + "planning," + fus["field_id"] + ",no marker here" + NL).encode()}])
+    pg.click("#btnWrValidate"); pg.wait_for_function("document.getElementById('wrValSummary').textContent.includes('problem(s) found')", timeout=8000)
+    vt = pg.inner_text("#wrValTable")
+    check("a pulled description with no marker is reported against the Fusion-driven field, and no description text is shown", "Marker missing" in vt and fus["field_id"] in vt and "no marker here" not in vt + pg.inner_text("#wrValSummary"), vt[:300])
+    check("the result says how many problems and what was checked", "problem(s) found" in pg.inner_text("#wrValSummary") and "planning" in pg.inner_text("#wrValSummary") and pg.is_visible("#btnWrFindingsCsv"), pg.inner_text("#wrValSummary"))
+    pg.set_input_files("#wrPullFile", files=[{"name": "bad.csv", "mimeType": "text/csv", "buffer": ("system,field_id,description" + NL + "teams,f1,x" + NL).encode()}])
+    pg.click("#btnWrValidate"); pg.wait_for_timeout(600)
+    check("a bad file gives a plain message", "core or planning" in (pg.inner_text("#globalError") + pg.inner_text("#wrValSummary")), pg.inner_text("#globalError"))
     check("the summary says how many fields are Fusion-written", "written by a Fusion scenario" in pg.inner_text("#writersSummary"), pg.inner_text("#writersSummary"))
     real = [e for e in errs if "status of 400" not in e]
-    check("no console errors (apart from the deliberate rejected save)", not real and len(errs) <= 1, errs)
+    check("no console errors (apart from the deliberate rejected save and rejected upload)", not real and len(errs) <= 2, errs)
     pg.screenshot(path="autos_ui.png", full_page=True)
     br.close()
 print("ALL PASS" if ok else "SOME FAILED")

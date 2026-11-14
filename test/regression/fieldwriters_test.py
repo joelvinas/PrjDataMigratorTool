@@ -125,5 +125,29 @@ check("'people also edit it' keeps the proposed outcome on record while the effe
 check("decisions are per base", fw.read_decisions(c, "appOther") == {})
 check("a database without migration 019 reads no decisions and refuses to save one", fw.read_decisions(sqlite3.connect(":memory:"), "appW") == {} and "migration 019" in (err(fw.decide, sqlite3.connect(":memory:"), "JV", "appW", RAW["f7"], "park") or ""))
 
+# ---- descriptions pulled from Workfront: reading the file, resolving IDs, and what each system should hold
+def perr(text):
+    try:
+        fw.parse_pull(text); return None
+    except fw.PullError as e:
+        return str(e)
+rows = fw.parse_pull('system,field_id,description\r\ncore,f4,"Fusion-driven: written by scenario ""Order sync"".\nSecond line"\r\nplanning,f4,plain\r\n')
+check("a CSV is read, with a quoted multi-line description kept whole", len(rows) == 2 and rows[0]["system"] == "core" and rows[0]["field_id"] == "f4" and "\nSecond line" in rows[0]["description"] and rows[1]["description"] == "plain", rows)
+check("column names may be capitalised, padded or called airtable_field_id; a byte order mark is ignored", fw.parse_pull("﻿ System , Airtable_Field_ID ,Description\ncore,f1,x\n")[0]["field_id"] == "f1")
+check("a row may name a Workfront ID instead of the Airtable field", fw.parse_pull("system,workfront_id,description\nplanning,wf1,x\n")[0]["workfront_id"] == "wf1")
+check("JSON is read, as a list or as an object with rows", len(fw.parse_pull('[{"system": "core", "field_id": "f1", "description": "x"}]')) == 1 and len(fw.parse_pull('{"rows": [{"system": "planning", "workfront_id": "w", "description": ""}]}')) == 1)
+check("an empty file, a wrong system, a row with no ID, a missing description column and bad JSON are each refused in plain words",
+      "empty" in (perr("  ") or "") and "core or planning" in (perr("system,field_id,description\nteams,f1,x\n") or "") and "field_id" in (perr("system,field_id,description\ncore,,x\n") or "")
+      and "no description" in (perr("system,field_id\ncore,f1\n") or "") and "JSON" in (perr("[{bad") or "") and "no rows" in (perr("system,field_id,description\n") or ""))
+check("only the first few problems are listed, so a bad file does not flood the page", perr("system,field_id,description\n" + "x,f1,d\n" * 20).count("row ") == 5)
+pulled2, stats = fw.build_pulled(fw.parse_pull("system,field_id,workfront_id,description\ncore,,W1,a\ncore,f2,,b\ncore,f2,,again\nplanning,,W9,lost\n"), {("core", "W1"): "f1"})
+check("a Workfront ID is resolved through the load ID map; an unknown one is counted, not guessed; the first row for a field wins", pulled2 == {"core": {"f1": "a", "f2": "b"}} and stats == {"rows": 4, "unresolved": 1, "duplicates": 1}, (pulled2, stats))
+exp = {"core": {"f4", "f6", "f3"}, "planning": {e["field_id"] for e in M}}
+rr = fw.validate(M, {"core": {"f4": good4, "f6": "d"}}, exp)
+core_missing = {(f["kind"], f["field_id"]) for f in rr["findings"]}
+check("a field that should not exist in a system is not reported as missing from it", core_missing == {("missing_marker", "f6"), ("not_pulled", "f3")}, core_missing)
+check("a pulled description for a field outside the expected set is still checked", ("unexpected_marker", "f1") in {(f["kind"], f["field_id"]) for f in fw.validate(M, {"core": {"f1": 'Fusion-driven: written by scenario "X".'}}, exp)["findings"]})
+check("with no expected set every field is expected, as before", fw.validate(M, perfect)["ok"])
+
 print("ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

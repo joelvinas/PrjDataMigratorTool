@@ -16,6 +16,7 @@ The server binds to 127.0.0.1 only. It owns every database and Airtable call.
 The Airtable token is read from config.json and is never stored, logged, or
 sent to the browser.
 """
+import base64
 import csv
 import hashlib
 import io
@@ -4917,6 +4918,46 @@ def api_field_writers(q):
         return _field_writers_payload(conn, base)
 
 
+VALIDATE_MAX_BYTES = 8 * 1024 * 1024
+WRITER_FINDING_COLUMNS = ["system", "kind", "table_name", "field_name", "field_id", "detail"]
+
+
+def api_field_writers_validate(body):
+    """Check the field-writer matrix against descriptions pulled from Workfront Core and Planning (an uploaded CSV or JSON), in both directions. Nothing is
+    stored and no description is sent back: the answer is counts and findings (field names and IDs and a plain sentence each)."""
+    base = _names_base(body)
+    raw = body.get("csv_base64")
+    try:
+        text = base64.b64decode(raw, validate=True).decode("utf-8-sig") if raw is not None else str(body.get("text") or "")
+    except (ValueError, UnicodeDecodeError):
+        raise AppError("The file could not be read as UTF-8 text.")
+    if len(text.encode("utf-8")) > VALIDATE_MAX_BYTES:
+        raise AppError("The file is too large (the limit is 8 MB).")
+    try:
+        rows = fieldwriters.parse_pull(text)
+    except fieldwriters.PullError as e:
+        raise AppError(str(e))
+    with db() as conn:
+        entries = field_writer_matrix(conn, base)
+        live, core_tables = names_store.expected_fields(conn, base)
+        owner = {e["field_id"]: e["table_id"] for e in entries}
+        cands = {}
+        for r in conn.execute("SELECT system, workfront_id, airtable_field_id FROM load_id_map WHERE base_id=? AND status='created' AND workfront_id IS NOT NULL AND airtable_field_id IS NOT NULL "
+                              "ORDER BY system, workfront_id, airtable_field_id", (base,)):
+            cands.setdefault((r["system"], r["workfront_id"]), set()).add(r["airtable_field_id"])
+    id_map = {k: next(iter(v)) for k, v in cands.items() if len(v) == 1}          # an ID that maps to two fields is ambiguous: not guessed
+    live &= set(owner)
+    expected = {"planning": live, "core": {fid for fid in live if owner[fid] in core_tables}}
+    pulled, stats = fieldwriters.build_pulled(rows, id_map)
+    res = fieldwriters.validate(entries, pulled, expected)
+    out_rows = [[names_store.fio._safe(x) for x in (f["system"], f["kind"], f["table_name"] or "", f["field_name"] or "", f["field_id"], f["detail"])] for f in res["findings"]]
+    cap = 2000
+    return {"base_id": base, "ok": res["ok"], "counts": res["counts"], "systems": res["systems"], "findings": res["findings"][:cap], "truncated": len(res["findings"]) > cap,
+            "total_findings": len(res["findings"]), "rows_read": stats["rows"], "unresolved_rows": stats["unresolved"], "duplicate_rows": stats["duplicates"],
+            "checked": {s: len(pulled.get(s, {})) for s in res["systems"]}, "expected": {s: len(expected[s]) for s in res["systems"]},
+            "csv": _csv_bytes(WRITER_FINDING_COLUMNS, out_rows).decode("utf-8"), "marker_prefix": fieldwriters.MARKER_PREFIX}
+
+
 def api_field_writers_decide(body):
     """A person's decision about a formula-only or automation-only field (recompute | park; fusion_owned | go_stale | users_also_edit; or clear). Who, when and why are kept."""
     base = _names_base(body)
@@ -5183,7 +5224,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/field-writers/decide": api_field_writers_decide, "/api/links/directions/decide": api_link_directions_decide,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,

@@ -639,10 +639,47 @@ async function loadWriters() {
   renderWriters();
 }
 
+const FINDING_LABEL = { missing_marker: "Marker missing", unexpected_marker: "Marker with no automation", unknown_marked_field: "Marked field not in the schema", scenario_mismatch: "Marker names another scenario", not_pulled: "Not in the file" };
+const V = { csv: "" };
+
+async function readFileBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function validateWriters() {
+  const base = currentBase(), f = $("wrPullFile").files[0], tb = $("wrValTable").querySelector("tbody");
+  clear(tb); $("wrValScroll").hidden = true; $("btnWrFindingsCsv").hidden = true;
+  if (!base) { setMsg("wrValSummary", "Choose a base above first.", "err"); return; }
+  if (!f) { setMsg("wrValSummary", "Choose a file of pulled descriptions first.", "err"); return; }
+  setMsg("wrValSummary", "Checking...", "");
+  const r = await api("POST", "/api/field-writers/validate", { base_id: base, csv_base64: await readFileBase64(f) });
+  V.csv = r.csv;
+  for (const x of r.findings) {
+    tb.appendChild(el("tr", { class: x.kind === "not_pulled" ? "" : "undecided" }, el("td", { text: x.system }), el("td", { text: FINDING_LABEL[x.kind] || x.kind }), el("td", { text: x.table_name || "" }),
+      el("td", { text: x.field_name || "" }), el("td", { text: x.field_id }), el("td", { text: x.detail })));
+  }
+  applySort("wrValTable");
+  $("wrValScroll").hidden = r.findings.length === 0;
+  $("btnWrFindingsCsv").hidden = r.total_findings === 0;
+  const c = r.counts, bad = r.total_findings - (c.not_pulled || 0);
+  setMsg("wrValSummary", (r.ok ? "Agrees with the matrix in both directions" : bad + " problem(s) found") + " for " + r.systems.join(" and ") + ": " + r.systems.map((s) => r.checked[s] + " of " + r.expected[s] + " expected " + s + " field(s) in the file").join("; ") + ". " +
+    r.rows_read + " row(s) read" + (r.unresolved_rows ? ", " + r.unresolved_rows + " with a Workfront ID that matches no field (not guessed)" : "") + (r.duplicate_rows ? ", " + r.duplicate_rows + " repeated (the first was used)" : "") +
+    (c.not_pulled ? "; " + c.not_pulled + " field(s) not in the file." : ".") + (r.truncated ? " Showing the first 2,000; the .csv has all of them." : ""), r.ok ? "ok" : "err");
+}
+
+function downloadFindings() {
+  const blob = new Blob(["\ufeff" + V.csv], { type: "text/csv;charset=utf-8" });
+  const a = el("a", { href: URL.createObjectURL(blob), download: "field_writer_findings.csv" });
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
 /* ---------- page wiring ---------- */
 function onReadyChange() {
   const on = state.ready;
-  for (const id of ["btnSave", "btnUsage", "btnNew", "btnWriters"]) $(id).disabled = !on;
+  for (const id of ["btnSave", "btnUsage", "btnNew", "btnWriters", "btnWrValidate"]) $(id).disabled = !on;
   if (!on) $("btnOpen").disabled = true;
 }
 async function afterConnect() {
@@ -670,6 +707,9 @@ startPage("stage3", { onReadyChange, afterConnect }, () => {
   $("btnUsage").addEventListener("click", guarded(runUsage));
   sortableTable("writersTable");
   $("btnWriters").addEventListener("click", guarded(loadWriters));
+  sortableTable("wrValTable");
+  $("btnWrValidate").addEventListener("click", guarded(validateWriters));
+  $("btnWrFindingsCsv").addEventListener("click", downloadFindings);
   for (const id of ["wrCat", "wrFusion"]) $(id).addEventListener("change", renderWriters);
   $("wrQ").addEventListener("input", renderWriters);
   $("useQ").addEventListener("keydown", (ev) => { if (ev.key === "Enter") guarded(runUsage)(); });

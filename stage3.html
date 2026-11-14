@@ -161,6 +161,21 @@
       <tbody></tbody>
     </table>
   </div>
+
+  <h3>Check the descriptions pulled from Workfront</h3>
+  <p class="hint">Compares the matrix with the field descriptions as they stand in Workfront Core and Workfront Planning, in both directions, so the two cannot drift apart: every field a recorded automation sets must carry the <strong>Fusion-driven</strong> marker, and every marked field must trace back to a recorded automation. Upload a <code>.csv</code> (or <code>.json</code>) with the columns <code>system</code> (<code>core</code> or <code>planning</code>), <code>description</code>, and either <code>field_id</code> (the Airtable field ID) or <code>workfront_id</code> (matched through the load ID map). Only the systems in the file are checked. Nothing is stored and no description is shown back: the page lists field names, IDs and one sentence per finding. A field missing from the file is counted as not pulled, not as a failure.</p>
+  <div class="row">
+    <input id="wrPullFile" type="file" accept=".csv,.json,text/csv,application/json" aria-label="File of pulled descriptions">
+    <button id="btnWrValidate" type="button">Check the descriptions</button>
+    <button id="btnWrFindingsCsv" type="button" hidden>Download findings .csv</button>
+  </div>
+  <div id="wrValSummary" class="msg"></div>
+  <div class="scroll" id="wrValScroll" hidden>
+    <table class="grid compact" id="wrValTable">
+      <thead><tr><th data-sort="text">System</th><th data-sort="text">Finding</th><th data-sort="text">Table</th><th data-sort="text">Field</th><th data-sort="text">Field ID</th><th>What is wrong</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
 </section>
 </main>
 </div>

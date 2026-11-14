@@ -756,6 +756,19 @@ def report_html(conn, base_id, base_label, css, generated=None):
     return fr.build_html(rv, event_summary(conn, base_id), css, base_label or base_id, generated or _now())
 
 
+def expected_fields(conn, base_id):
+    """({field IDs that should exist in the target}, {table IDs that land in Core too}) for a base, whatever the review gate says: fields of tables out of
+    scope, abandoned fields and fields merged into another are not expected anywhere. Schema and saved decisions only."""
+    data = load_fields(conn, base_id)
+    scope, _ok = read_scope(conn, base_id)
+    _, names = _stored(conn, base_id)
+    merged = fgp.merged_ids(_live_groups(read_groups(conn, base_id)[0], data))
+    gone = {fid for fid, r in names.items() if r["abandoned"]} | set(merged)
+    live = {f["field_id"] for f in data["fields"] if (scope.get(f["table_id"]) or {}).get("decision") != "out" and f["field_id"] not in gone}
+    core = {tid for tid, v in read_targets(conn, base_id).items() if v.get("target") == "planning_and_core"}
+    return live, core
+
+
 def loader_inputs(conn, base_id):
     """What the loader needs: the review (approved names, scope, targets, consolidations) and each select field's options in Airtable's order.
     Schema metadata only: no record value is read."""

@@ -240,15 +240,91 @@ def summary(entries):
             "unnamed_scenarios": sum(1 for e in entries if e["fusion"] and not e["scenarios"]), "anomalies": sum(1 for e in entries if e["anomalies"])}
 
 
-def validate(entries, pulled):
+# ------------------------------------------------------------------ descriptions pulled from Workfront
+PULL_MAX_ROWS = 200000
+
+
+class PullError(Exception):
+    pass
+
+
+def parse_pull(text):
+    """Read a file of descriptions pulled from Workfront Core or Planning: CSV with a header row, or JSON (a list of objects, or {"rows": [...]}).
+    Columns: system (core or planning), description, and field_id (the Airtable field ID, also accepted as airtable_field_id) or workfront_id
+    (resolved through the load ID map). Returns [{system, field_id, workfront_id, description}]. Raises PullError with a plain message."""
+    import csv, io, json
+    text = (text or "").lstrip("\ufeff")
+    if not text.strip():
+        raise PullError("The file is empty.")
+    raw = []
+    if text.lstrip()[:1] in "[{":
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            raise PullError("The file looks like JSON but could not be read.")
+        raw = doc.get("rows") if isinstance(doc, dict) else doc
+        if not isinstance(raw, list) or not all(isinstance(r, dict) for r in raw):
+            raise PullError("The JSON must be a list of objects (or an object with a \"rows\" list).")
+    else:
+        rd_ = csv.DictReader(io.StringIO(text))
+        if not rd_.fieldnames:
+            raise PullError("The file has no header row.")
+        raw = [{(k or "").strip().lower(): v for k, v in r.items()} for r in rd_]
+    if len(raw) > PULL_MAX_ROWS:
+        raise PullError("The file has more than %d rows." % PULL_MAX_ROWS)
+    rows, errors = [], []
+    for i, r in enumerate(raw, 1):
+        r = {str(k).strip().lower(): v for k, v in r.items()}
+        system = str(r.get("system") or "").strip().lower()
+        fid = str(r.get("field_id") or r.get("airtable_field_id") or "").strip()
+        wid = str(r.get("workfront_id") or "").strip()
+        if system not in ("core", "planning"):
+            errors.append("row %d: the system must be core or planning" % i)
+        elif not fid and not wid:
+            errors.append("row %d: it needs a field_id (the Airtable field ID) or a workfront_id" % i)
+        elif "description" not in r:
+            errors.append("row %d: it has no description column" % i)
+        else:
+            rows.append({"system": system, "field_id": fid, "workfront_id": wid, "description": "" if r["description"] is None else str(r["description"])})
+        if len(errors) >= 5:
+            break
+    if errors:
+        raise PullError("; ".join(errors) + ("; stopped after the first 5 problems." if len(errors) >= 5 else "."))
+    if not rows:
+        raise PullError("The file has no rows.")
+    return rows
+
+
+def build_pulled(rows, id_map):
+    """{system: {airtable_field_id: description}} from parsed rows. id_map: {(system, workfront_id): airtable_field_id} (the load ID map) turns a Workfront ID
+    into the Airtable field it was made from. A row that names neither is counted as unresolved. The first row for a field wins; later ones are counted as
+    duplicates. Returns (pulled, stats)."""
+    pulled, stats = {}, {"rows": len(rows), "unresolved": 0, "duplicates": 0}
+    for r in rows:
+        fid = r["field_id"] or id_map.get((r["system"], r["workfront_id"]), "")
+        if not fid:
+            stats["unresolved"] += 1
+            continue
+        got = pulled.setdefault(r["system"], {})
+        if fid in got:
+            stats["duplicates"] += 1
+            continue
+        got[fid] = r["description"]
+    return pulled, stats
+
+
+def validate(entries, pulled, expected=None):
     """Check the matrix against the descriptions pulled from Workfront, in both directions.
     pulled: {system: {airtable_field_id: description}} where system is 'core' or 'planning'; only the systems given are checked. A field of the matrix that
-    is missing from a system's pull is 'not_pulled' (counted, not a failure). Returns {findings, counts}; findings are sorted."""
+    is missing from a system's pull is 'not_pulled' (counted, not a failure). expected: {system: set of field IDs that should exist in that system}; a field
+    outside it is not checked there (a Planning-only table has no Core fields; an abandoned or merged field has none anywhere). Returns {findings, counts}."""
     by_id = {e["field_id"]: e for e in entries}
     findings = []
     for system in sorted(pulled):
         got = pulled[system]
         for e in entries:
+            if expected is not None and e["field_id"] not in expected.get(system, ()) and e["field_id"] not in got:
+                continue
             if e["field_id"] not in got:
                 findings.append(_f("not_pulled", system, e, "the description was not in the pull"))
                 continue
