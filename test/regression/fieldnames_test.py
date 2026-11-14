@@ -2,7 +2,11 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import fieldnames as fn
-from fieldnames import Settings, PASS, SUGGESTED_FIX, NEEDS_HUMAN
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+from fieldnames import Settings, PASS, AUTO_FIXABLE, NEEDS_HUMAN
 
 ok = True
 def check(n, c, x=""):
@@ -14,42 +18,51 @@ def ev(name, target="planning_name", s=S, field=None, tmap=None, fields=None, ba
 
 # ---- verdicts
 r = ev("Budget")
-check("clean name passes", r["verdict"] == PASS and r["suggested"] is None and r["rules"] == [], r)
+check("clean name passes", r["verdict"] == PASS and r["proposed"] is None and r["rules"] == [], r)
 r = ev("Total  Cost ")
-check("double and edge spaces: suggested fix, not applied", r["verdict"] == SUGGESTED_FIX and r["suggested"] == "Total Cost" and r["candidate"] == "Total  Cost "
+check("double and edge spaces need approval; repair is proposed, never applied", r["verdict"] == NEEDS_HUMAN and r["suggested"] is None and r["proposed"] == "Total Cost" and r["candidate"] == "Total  Cost "
       and {"DOUBLE_SPACE", "EDGE_SPACE"} <= set(r["rules"]), r)
 r = ev("x" * 251)
-check("over 250 chars: needs human, no fix", r["verdict"] == NEEDS_HUMAN and "TOO_LONG" in r["rules"] and r["suggested"] is None)
+check("over 250 chars: needs human, no fix", r["verdict"] == NEEDS_HUMAN and "TOO_LONG" in r["rules"] and r["proposed"] is None)
 check("250 chars passes for Planning, 251 fails; Core name allows 255", ev("x" * 250)["verdict"] == PASS and ev("x" * 255, "core_name")["verdict"] == PASS
       and ev("x" * 256, "core_name")["verdict"] == NEEDS_HUMAN)
 r = ev("   ")
 check("blank name needs human", r["verdict"] == NEEDS_HUMAN and "EMPTY" in r["rules"], r)
 
-# ---- special characters (each banned class)
-for ch, label in [("[", "square bracket"), ("]", "square bracket"), ("{", "curly"), ("}", "curly"), ("(", "paren"), (")", "paren"), (".", "dot"), ("/", "slash"),
-                  ("\\", "backslash"), ("'", "quote"), ('"', "dquote"), ("#", "pound"), ("?", "question"), ("_", "underscore"), ("%", "percent"), ("*", "star")]:
+# ---- special characters: the AUTO_DELETE_CHARS list is AUTO_FIXABLE (deleted with nothing); anything else needs approval
+AUTO = "'\"`~!@#$%^&*()[]{};:<>,./?"
+for ch in AUTO:
     r = ev("Alpha%sBeta" % ch)
-    check("special character flagged and fixed: %s %r" % (label, ch), "SPECIAL_CHAR" in r["rules"] and r["verdict"] == SUGGESTED_FIX and not fn.violations(r["suggested"], "planning_name", S), r)
-check("separators become a space", ev("a_b/c.d")["suggested"] == "a b c d")
-check("ampersand becomes and", ev("Terms & Conditions")["suggested"] == "Terms and Conditions")
+    check("auto-fixable: %r is deleted with nothing" % ch, r["verdict"] == AUTO_FIXABLE and r["suggested"] == "AlphaBeta" and "SPECIAL_CHAR" in r["rules"], r)
+BS = chr(92)
+for ch in "_" + BS + "|+=":
+    r = ev("Alpha%sBeta" % ch)
+    check("not on the auto list, needs approval: %r" % ch, r["verdict"] == NEEDS_HUMAN and r["suggested"] is None and "SPECIAL_CHAR" in r["rules"]
+          and r["proposed"] is not None and not fn.violations(r["proposed"], "planning_name", S), r)
+check("underscore and backslash are proposed as a space", ev("a_b")["proposed"] == "a b" and ev("a" + BS + "b")["proposed"] == "a b")
+check("a dot, slash and hash are deleted, not turned into spaces", ev("v1.2/x#")["suggested"] == "v12x")
+check("spaces left by a deletion are closed up (part of the same auto fix)", ev("Terms & Conditions")["suggested"] == "Terms Conditions" and ev("Terms & Conditions")["verdict"] == AUTO_FIXABLE)
+check("auto fix plus an unrelated problem is not auto", ev("Total  #Cost")["verdict"] == NEEDS_HUMAN and ev("1Q #Plan")["verdict"] == NEEDS_HUMAN)
+check("deleting characters that exposes a quarter token is not auto", ev("1#Q Plan")["verdict"] == NEEDS_HUMAN)
+check("auto fix that would leave an empty name needs a person", ev("#?")["verdict"] == NEEDS_HUMAN)
 check("hyphen is allowed", ev("Pre-Approved")["verdict"] == PASS)
 
 # ---- unicode and emoji
 r = ev("Budget \U0001F680")
-check("emoji detected and removed", r["verdict"] == SUGGESTED_FIX and "NON_ASCII" in r["rules"] and r["suggested"] == "Budget", r)
-check("accents are transliterated", ev("Café Résumé")["suggested"] == "Cafe Resume")
-check("smart quotes and en dash: quotes removed, dash kept as hyphen", ev("It’s – ok")["suggested"] == "Its - ok", ev("It’s – ok"))
-check("non-breaking space becomes a normal space", ev("a b")["suggested"] == "a b")
-check("zero width space is detected and removed", ev("ab​c")["suggested"] == "abc" and "NON_ASCII" in ev("ab​c")["rules"])
-check("tab and newline are replaced", ev("a\tb\nc")["suggested"] == "a b c")
-check("composed and decomposed accents give the same result", ev("é")["suggested"] == ev("é")["suggested"] == "e")
-check("CJK that cannot be transliterated is removed", ev("Budget 中文")["suggested"] == "Budget")
+check("emoji detected; removal is proposed, needs approval", r["verdict"] == NEEDS_HUMAN and "NON_ASCII" in r["rules"] and r["proposed"] == "Budget", r)
+check("accents are transliterated", ev("Café Résumé")["proposed"] == "Cafe Resume")
+check("smart quotes and en dash: quotes removed, dash kept as hyphen", ev("It’s – ok")["proposed"] == "Its - ok", ev("It’s – ok"))
+check("non-breaking space becomes a normal space", ev("a b")["proposed"] == "a b")
+check("zero width space is detected and removed", ev("ab​c")["proposed"] == "abc" and "NON_ASCII" in ev("ab​c")["rules"])
+check("tab and newline are replaced", ev("a\tb\nc")["proposed"] == "a b c")
+check("composed and decomposed accents give the same result", ev("é")["proposed"] == ev("é")["proposed"] == "e")
+check("CJK that cannot be transliterated is removed", ev("Budget 中文")["proposed"] == "Budget")
 check("name made only of emoji is needs human (empty after repair)", ev("\U0001F680")["verdict"] == NEEDS_HUMAN)
 
 # ---- quarter convention
-check("1Q becomes Q1", ev("1Q Budget")["suggested"] == "Q1 Budget" and ev("1Q Budget")["verdict"] == SUGGESTED_FIX)
-check("2Q in the middle", ev("Plan 2Q Review")["suggested"] == "Plan Q2 Review")
-check("1Q24 becomes Q1 24", ev("Sales 1Q24")["suggested"] == "Sales Q1 24")
+check("1Q becomes Q1 as a proposal that needs approval", ev("1Q Budget")["proposed"] == "Q1 Budget" and ev("1Q Budget")["verdict"] == NEEDS_HUMAN)
+check("2Q in the middle", ev("Plan 2Q Review")["proposed"] == "Plan Q2 Review")
+check("1Q24 becomes Q1 24", ev("Sales 1Q24")["proposed"] == "Sales Q1 24")
 r = ev("Plan 1Quality")
 check("1Quality inside a name is never rewritten", "QUARTER_STYLE" not in r["rules"] and r["verdict"] == PASS, r)
 check("21Q is not a quarter", "QUARTER_STYLE" not in ev("Item 21Q")["rules"])
@@ -61,25 +74,25 @@ check("quarter style detection", [fn.quarter_style(x) for x in ("Q1 Plan", "1Q P
 r = ev("1Q Budget (Draft)", "core_label")
 check("label keeps 1Q and parentheses and records the convention", r["verdict"] == PASS and r["quarter_style"] == "1Q", r)
 r = ev("Budget \U0001F680 {x}", "core_label")
-check("label drops emoji and blocklisted characters only", r["suggested"] == "Budget x" and r["verdict"] == SUGGESTED_FIX, r)
-check("label converts 1Q only when the preset says so", ev("1Q Plan", "core_label", Settings(label_keep_quarter=False))["suggested"] == "Q1 Plan")
+check("label drops emoji and blocklisted characters only", r["proposed"] == "Budget x" and r["verdict"] == NEEDS_HUMAN, r)
+check("label converts 1Q only when the preset says so", ev("1Q Plan", "core_label", Settings(label_keep_quarter=False))["proposed"] == "Q1 Plan")
 check("label may start with a digit", ev("500K Fund", "core_label")["verdict"] == PASS)
 
 # ---- leading digits
 r = ev("500K Acme Fund")
-check("leading number moves to the end (preset)", r["verdict"] == SUGGESTED_FIX and r["suggested"] == "Acme Fund 500K", r)
+check("leading number moves to the end (preset), needs approval", r["verdict"] == NEEDS_HUMAN and r["proposed"] == "Acme Fund 500K", r)
 r = ev("500K Acme Fund", s=Settings(digit_style="prefix_word", digit_word="Fuel"))
-check("prefix word preset", r["suggested"] == "Fuel 500K Acme Fund", r)
+check("prefix word preset", r["proposed"] == "Fuel 500K Acme Fund", r)
 r = ev("500K Acme Fund", s=Settings(digit_style="prefix_word"))
-check("prefix preset without a word needs human", r["verdict"] == NEEDS_HUMAN and r["suggested"] is None, r)
+check("prefix preset without a word needs human", r["verdict"] == NEEDS_HUMAN and r["proposed"] is None, r)
 check("a name that is only a number needs human", ev("2024")["verdict"] == NEEDS_HUMAN)
 r = ev("500K Acme Fund", s=Settings(leading_digits=False))
 check("leading digit baseline still flags when the step is off", r["verdict"] == NEEDS_HUMAN and "LEADING_DIGIT" in r["rules"] and "switched off" in " ".join(r["reasons"]), r)
-check("1Q at the start is repaired before the leading-digit step sees it", ev("1Q Budget")["suggested"] == "Q1 Budget")
+check("1Q at the start is repaired before the leading-digit step sees it", ev("1Q Budget")["proposed"] == "Q1 Budget")
 
 # ---- toggles
 r = ev("A#B", s=Settings(char_cleanup=False))
-check("cleanup off: special character still flagged, no fix", r["verdict"] == NEEDS_HUMAN and "SPECIAL_CHAR" in r["rules"] and r["suggested"] is None)
+check("cleanup off: special character still flagged, no fix", r["verdict"] == NEEDS_HUMAN and "SPECIAL_CHAR" in r["rules"] and r["proposed"] is None)
 check("cleanup off: 1Q is not checked (not baseline)", ev("Plan 1Q", s=Settings(char_cleanup=False))["verdict"] == PASS)
 
 # ---- table names
@@ -90,7 +103,7 @@ check("table prefix: drop", fn.clean_table_name("1.2.3 Orders", Settings(table_p
 check("table prefix: plain keeps digits first", fn.clean_table_name("1.2.3 Orders", Settings(table_prefix="plain")) == "1-2-3 Orders")
 check("PO#s becomes POs", fn.clean_table_name("PO#s", S) == "POs")
 tm = fn.table_names(tabs, S)
-check("table map has suggested names and verdicts", tm["tA"]["suggested"] == "Orders 1-2-3" and tm["tB"]["verdict"] == SUGGESTED_FIX and tm["tC"]["verdict"] == PASS
+check("table map has suggested names and verdicts", tm["tA"]["suggested"] == "Orders 1-2-3" and tm["tB"]["verdict"] == AUTO_FIXABLE and tm["tC"]["verdict"] == PASS
       and tm["tD"]["suggested"] == "Funds 500K", {k: v["suggested"] for k, v in tm.items()})
 tm2 = fn.table_names(tabs, S, approved={"tB": "Purchase Orders"})
 check("an approved table name wins over the suggestion", tm2["tB"]["effective"] == "Purchase Orders" and tm2["tB"]["approved"] and tm2["tB"]["suggested"] == "POs")
@@ -109,7 +122,7 @@ fields = [
 ]
 res = fn.run(fields, tabs, S)
 lk = res["fields"]["fLook"]["targets"]["planning_name"]
-check("PO Number (from PO#s) resolves to ... (from POs) via the schema", lk["verdict"] == SUGGESTED_FIX and lk["suggested"] == "PO Number from POs" and "TABLE_REF" in lk["rules"], lk)
+check("PO Number (from PO#s) resolves through the schema; proposal needs approval", lk["verdict"] == NEEDS_HUMAN and lk["proposed"] == "PO Number from POs" and "TABLE_REF" in lk["rules"], lk)
 res_nc = fn.run(fields, tabs, Settings(char_cleanup=False))
 lk = res_nc["fields"]["fLook"]["targets"]["planning_name"]
 check("with cleanup off the swap alone gives PO Number (from POs) (parentheses still flagged)", lk["final"] == "PO Number (from POs)" and lk["verdict"] == NEEDS_HUMAN, lk)
@@ -164,7 +177,7 @@ check("manual label equal to the rubric result is not a difference", m1["core_la
 check("targets without a manual name use the original", m1["core_name"]["source"] == "original")
 res = fn.run(mf, [{"table_id": "tM", "base_id": "b", "table_name": "M"}], S, manual={"m1": {"planning_name": "Bad_Name?"}})
 check("a non-compliant manual name gets a suggestion beside it, not an overwrite", res["fields"]["m1"]["targets"]["planning_name"]["candidate"] == "Bad_Name?"
-      and res["fields"]["m1"]["targets"]["planning_name"]["suggested"] == "Bad Name")
+      and res["fields"]["m1"]["targets"]["planning_name"]["proposed"] == "Bad Name")
 
 # ---- scope, determinism, summary, rules document
 res = fn.run(dup, dt, S, out_of_scope_tables=["tX"])

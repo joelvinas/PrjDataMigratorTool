@@ -7,7 +7,7 @@ Nothing here ever changes a name. Every fix is a SUGGESTION that a person approv
 Three targets are validated independently, each with its own rules: planning_name (Workfront Planning field name),
 core_name (Workfront Core custom field name) and core_label (Workfront Core custom field label).
 
-Verdicts: PASS, SUGGESTED_FIX (a deterministic fix exists and is shown, but is applied only on approval),
+Verdicts: PASS, AUTO_FIXABLE (a deterministic fix exists and is shown, but is applied only on approval),
 NEEDS_HUMAN (the fix needs judgment, or the rule has no fix).
 
 Pipeline order (fixed, because the order changes the output):
@@ -24,7 +24,7 @@ import re
 import unicodedata
 from collections import OrderedDict, defaultdict, namedtuple
 
-PASS, SUGGESTED_FIX, NEEDS_HUMAN = "PASS", "SUGGESTED_FIX", "NEEDS_HUMAN"
+PASS, AUTO_FIXABLE, NEEDS_HUMAN = "PASS", "AUTO_FIXABLE", "NEEDS_HUMAN"
 TARGETS = ("planning_name", "core_name", "core_label")
 STEPS = ("table_swap", "char_cleanup", "leading_digits")   # the toggles, in pipeline order
 
@@ -42,6 +42,8 @@ LABEL_BLOCKLIST = frozenset('\\{}[]|<>')
 # PROVISIONAL and empty: names Adobe reserves (to be confirmed). Compared case-insensitively.
 RESERVED_NAMES = {t: frozenset() for t in TARGETS}
 
+# The only characters whose removal is AUTO_FIXABLE. Each is deleted with nothing put in its place.
+AUTO_DELETE_CHARS = frozenset("'\"`~!@#$%^&*()[]{};:<>,./?")
 NAME_ALLOWED = re.compile(r"[A-Za-z0-9 \-]")
 _PUNCT_MAP = {ord(c): r for c, r in {"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", "−": "-",
                                      " ": " ", " ": " ", " ": " "}.items()}
@@ -80,10 +82,17 @@ def _squash(s):
     return re.sub(r" {2,}", " ", s).strip()
 
 
+def delete_auto_chars(s, chars=None):
+    """The AUTO_FIXABLE repair: delete the listed characters with nothing in their place, then close up the spaces that leaves."""
+    chars = AUTO_DELETE_CHARS if chars is None else chars
+    return _squash("".join(c for c in s if c not in chars))
+
+
 def clean_name_chars(s):
-    """Names: keep A-Z a-z 0-9 space hyphen. '&' becomes ' and '; '_' '/' '\\' '.' become a space; everything else is deleted."""
-    s = _translit(s).replace("&", " and ")
-    s = re.sub(r"[_/\\.]", " ", s)
+    """Names, the full proposal: keep A-Z a-z 0-9 space hyphen. AUTO_DELETE_CHARS are deleted; '_' and a backslash become a space;
+    accents become plain letters; everything else (emoji, other symbols, other non-ASCII) is deleted. Only the first part is AUTO_FIXABLE."""
+    s = _translit(delete_auto_chars(s, AUTO_DELETE_CHARS))
+    s = re.sub(r"[_\\]", " ", s)
     s = re.sub(r"\s", " ", s)
     return _squash("".join(c for c in s if NAME_ALLOWED.match(c)))
 
@@ -147,15 +156,16 @@ RULES = [
     Rule("EMPTY", "Name is empty", TARGETS, "baseline", True, _c_empty, "A name must contain at least one character.", "(blank)", "Budget"),
     Rule("NON_ASCII", "Non-ASCII character", TARGETS, "char_cleanup", True, _c_nonascii,
          "Emoji, accented letters, smart quotes, zero-width characters, tabs and other non-ASCII characters are not allowed, because data exported to CSV "
-         "without the right encoding corrupts them. Suggested fix: accents become plain letters, the rest are removed.", "Café ✨ Budget", "Cafe Budget"),
+         "without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters, the rest are removed.", "Café ✨ Budget", "Cafe Budget"),
     Rule("SPECIAL_CHAR", "Special character", TARGETS, "char_cleanup", True, _c_special,
-         "Names allow only letters, digits, spaces and hyphens. Brackets, braces, parentheses, dots, slashes, quotes, #, ?, underscores and every other "
-         "symbol are rejected ('_', '/', '\\' and '.' become a space, '&' becomes 'and', the rest are deleted). Labels keep the original text and remove only "
+         "Names allow only letters, digits, spaces and hyphens. The characters ' \" ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? are AUTO_FIXABLE: they are "
+         "deleted with nothing in their place (and any double space that leaves is closed up). Any other symbol, such as an underscore, a backslash, | + =, "
+         "needs approval; the proposal turns an underscore or backslash into a space and deletes the rest. Labels keep the original text and remove only "
          "the characters on the reporting blocklist (provisional).", "PO Number (from PO#s)", "PO Number from POs"),
     Rule("EDGE_SPACE", "Leading or trailing space", TARGETS, "char_cleanup", True, _c_edge, "No space at the start or end.", " Budget ", "Budget"),
     Rule("DOUBLE_SPACE", "Double space", TARGETS, "char_cleanup", True, _c_double, "No two spaces in a row.", "Total  Cost", "Total Cost"),
     Rule("LEADING_DIGIT", "Starts with a digit", _NAMES, "leading_digits", True, _c_lead,
-         "A name must not start with a digit. The suggested fix follows the chosen preset: move the leading number token behind the descriptive words, "
+         "A name must not start with a digit. The proposed repair (needs approval) follows the chosen preset: move the leading number token behind the descriptive words, "
          "or put a chosen word in front. A name that is only a number needs a person.", "500K Acme Fund", "Acme Fund 500K"),
     Rule("TOO_LONG", "Name too long", TARGETS, "baseline", True, _c_long,
          "Maximum length per target (Planning 250, confirmed; Core name and label 255, provisional). There is no automatic shortening.", "(260 characters)", "(a shorter name chosen by a person)"),
@@ -217,7 +227,13 @@ def table_names(tables, settings, approved=None):
         sug = clean_table_name(old, settings)
         bad = [r for r in violations(sug, "planning_name", settings) if not (r == "LEADING_DIGIT" and settings.table_prefix == "plain")]
         eff = approved.get(t["table_id"]) or (sug if not bad else old)
-        verdict = PASS if sug == old and not violations(old, "planning_name", settings) else (NEEDS_HUMAN if bad else SUGGESTED_FIX)
+        old_rules = violations(old, "planning_name", settings)
+        if sug == old and not old_rules:
+            verdict = PASS
+        elif not bad and set(old_rules) == {"SPECIAL_CHAR"} and sug == delete_auto_chars(old):
+            verdict = AUTO_FIXABLE       # only AUTO_DELETE_CHARS were removed; a number prefix or anything else is a person's decision
+        else:
+            verdict = NEEDS_HUMAN
         out[t["table_id"]] = {"table_id": t["table_id"], "base_id": t.get("base_id"), "old": old, "suggested": sug, "effective": eff,
                               "approved": t["table_id"] in approved, "verdict": verdict, "rules": bad if bad else violations(old, "planning_name", settings)}
     groups = defaultdict(list)                       # two tables ending up with the same name in one base
@@ -293,14 +309,19 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
         r = RULE_BY_ID[rid]
         off = r.step in STEPS and not settings.enabled(r.step)
         reasons.append("%s%s" % (r.title, " (the '%s' step is switched off, so no fix is suggested)" % r.step if off else ""))
+    auto = (set(rules) == {"SPECIAL_CHAR"} and not remaining and not ambiguous and cur != candidate
+            and cur == delete_auto_chars(candidate, LABEL_BLOCKLIST if kind == "label" else AUTO_DELETE_CHARS))
     if not rules and cur == candidate and not ambiguous:
         verdict = PASS
-    elif remaining or ambiguous:
-        verdict = NEEDS_HUMAN
+    elif auto:
+        verdict = AUTO_FIXABLE
     else:
-        verdict = SUGGESTED_FIX
+        verdict = NEEDS_HUMAN
+        if not remaining and not ambiguous and cur != candidate:
+            reasons.append("A repair is proposed but needs approval (%s)" % ", ".join(RULE_BY_ID[r].title for r in sorted(set(rules))))
     res = {"candidate": candidate, "final": cur, "verdict": verdict, "rules": sorted(set(rules)),
-           "suggested": cur if verdict == SUGGESTED_FIX else None, "reasons": reasons, "steps": steps}
+           "suggested": cur if verdict == AUTO_FIXABLE else None, "proposed": cur if cur != candidate else None,
+           "reasons": reasons, "steps": steps}
     if kind == "label":
         res["quarter_style"] = quarter_style(candidate)
     return res
@@ -387,7 +408,7 @@ def run(fields, tables, settings=None, manual=None, approved_tables=None, abando
 
 def summarize(results):
     """Counts per target and verdict, per rule, and how many names each step changed."""
-    out = {t: {"verdicts": {PASS: 0, SUGGESTED_FIX: 0, NEEDS_HUMAN: 0}, "rules": defaultdict(int), "steps": defaultdict(int)} for t in TARGETS}
+    out = {t: {"verdicts": {PASS: 0, AUTO_FIXABLE: 0, NEEDS_HUMAN: 0}, "rules": defaultdict(int), "steps": defaultdict(int)} for t in TARGETS}
     abandoned = 0
     for e in results.values():
         if e["abandoned"]:
@@ -421,8 +442,8 @@ def rules_markdown():
           "3. Characters are cleaned up and `1Q` becomes `Q1` (names only).", "4. Names that start with a digit are rearranged.",
           "5. Duplicates are checked last, on the repaired names. Always on.", "",
           "Steps 2 to 4 can be switched off for review. Rules marked *baseline* are always checked.", "",
-          "## Verdicts", "", "- **PASS**: complies.", "- **SUGGESTED_FIX**: breaks a rule that has a deterministic fix; the fix is shown next to the original and applied only when approved.",
-          "- **NEEDS_HUMAN**: the fix needs judgment, or there is no fix. The reason is shown.", "", "## Rules", ""]
+          "## Verdicts", "", "- **PASS**: complies.", "- **AUTO_FIXABLE**: the only problem is one or more of the characters on the auto-delete list; deleting them gives a clean name. The fix is shown next to the original and a batch of these can be approved in one action.",
+          "- **NEEDS_HUMAN**: everything else. A proposed repair is shown where one exists, with the reason, and is approved one item at a time. Nothing is ever applied without approval.", "", "## Rules", ""]
     for r in RULES:
         L += ["### %s - %s" % (r.id, r.title), "", r.text, "",
               "- Applies to: %s" % ", ".join(r.targets), "- Pipeline step: %s%s" % (r.step, " (baseline, always checked)" if r.baseline else ""),

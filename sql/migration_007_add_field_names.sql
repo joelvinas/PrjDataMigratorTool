@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS field_names (
     core_label_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(core_label_status IN ('unreviewed', 'approved', 'needs_human')),
     description TEXT,                 -- generated from the lineage syntax, then hand-edited
     target_type TEXT,                 -- target Workfront data type
-    planning_name_verdict TEXT,       -- cache of the last validation: PASS, SUGGESTED_FIX or NEEDS_HUMAN (always recomputable)
+    planning_name_verdict TEXT,       -- cache of the last validation: PASS, AUTO_FIXABLE or NEEDS_HUMAN (always recomputable)
     core_name_verdict TEXT,
     core_label_verdict TEXT,
     verdict_rules TEXT,               -- JSON: rule IDs per target from the last validation
