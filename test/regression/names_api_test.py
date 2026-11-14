@@ -125,6 +125,13 @@ s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNb0000000001",
 check("a table can be taken out of scope with a reason; it is skipped and its links are flagged", s_ == 200 and r["review"]["scope_counts"]["out"] == 1
       and {(w["field_id"], w["kind"]) for w in r["review"]["scope_warnings"]} == {("fldN06", "link"), ("fldN07", "link")}, r.get("error") or r["review"]["scope_counts"])
 check("the out table has no fields in the review and no name decision", all(f["table_id"] != "tblNb0000000001" for f in r["review"]["fields"]))
+gs_, g = post("/api/depgraph/recompute", {"mode": "literal"})
+gm = [m for m in g["matrix"] if m["base_id"] == BASE]
+check("load order: an out-of-scope table takes no part in the order", gs_ == 200 and "tblNb0000000001" not in {m["table_id"] for m in gm} and {"tblNa0000000001", "tblNc0000000001"} <= {m["table_id"] for m in gm}, [m["table_id"] for m in gm])
+check("load order: a link to an out-of-scope table is listed for a person, not ordered or called unresolved",
+      [(o["field_id"], o["linked_table_name"]) for o in g["out_of_scope_links"] if o["table_id"] == "tblNa0000000001"] == [("fldN06", "PO#s")] and not [u for u in g["unresolved_links"] if u["table_name"] == "Orders"]
+      and not any(e["parent"] == "tblNb0000000001" for e in g["edges"]) and g["out_of_scope_tables"] >= 1, g["out_of_scope_links"])
+check("load order: the link field is classified, with a second pass of False", any(l["field_id"] == "fldN06" and l["treatment"] == "Links to an out-of-scope table" and not l["second_pass"] for l in g["link_fields"]))
 s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNb0000000001", "decision": "clear"}])); check("clearing returns it to undecided", s_ == 200 and r["review"]["scope_counts"]["out"] == 0 and not r["review"]["scope_warnings"])
 s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNa0000000001", "decision": "in", "target": "planning_and_core", "reason": "has attachments"}]))
 check("a table can be in scope and land in Planning plus Core", s_ == 200 and {t["table_id"]: t for t in r["review"]["tables"]}["tblNa0000000001"]["target"] == "planning_and_core"

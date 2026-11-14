@@ -174,6 +174,8 @@ async function loadDepgraph() {
     else notes.appendChild(note("info", g.inverse_pairs.length + " two-way link pair(s). Where exactly one side is a single-record link, that side's table is ordered as the child. The rest add no ordering; populate their links in a second pass, after both tables' records exist.", lines));
   }
   if (g.self_links.length) notes.appendChild(note("info", "Self-links (ignored for ordering)", g.self_links.map((s) => s.table_name + "." + s.field_name)));
+  if (g.out_of_scope_tables) notes.appendChild(note("info", g.out_of_scope_tables + " table(s) marked out of scope take no part in this order (scope is decided on the Field names page)."));
+  if ((g.out_of_scope_links || []).length) notes.appendChild(note("warn", "Links to tables that are out of scope: a person decides whether to bring the table in or drop the field", g.out_of_scope_links.map((o) => o.table_name + "." + o.field_name + " → " + o.linked_table_name)));
   if (g.unresolved_links.length) notes.appendChild(note("warn", "Links to tables that are not in the database (ingest the other base?)", g.unresolved_links.map((u) => u.table_name + "." + u.field_name + " → " + u.linked_table_id)));
 
   const selfTables = new Set(g.self_links.map((s) => s.table_id));

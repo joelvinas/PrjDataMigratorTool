@@ -1512,6 +1512,11 @@ def compute_graph(conn, mode="literal"):
     if mode not in ("literal", "collapse"):
         raise AppError("Unknown dependency mode.")
     rows = [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"]]
+    # Scope is a human decision: a table marked OUT is not part of the migration, so it takes no part in the order. A table with no decision is
+    # undecided, not out, and stays in. A link TO an out-of-scope table has nowhere to point: it is listed for a person to decide, not ordered.
+    out_ids = {r["table_id"] for r in conn.execute("SELECT table_id FROM table_scope WHERE decision='out'")}
+    out_names = {r["table_id"]: r["table_name"] for r in rows if r["table_id"] in out_ids}
+    rows = [r for r in rows if r["table_id"] not in out_ids]
     tables, base_of = {}, {}
     for r in rows:
         tables[r["table_id"]] = r["table_name"]
@@ -1545,10 +1550,14 @@ def compute_graph(conn, mode="literal"):
                               "parent_table": tables[child["linked_table_id"]] if child else None}
     pairs = sorted(pair_list.values(), key=lambda p: (p["table_a"].lower(), p["table_b"].lower(), p["field_a"].lower()))
 
-    self_links, unresolved, edges = [], [], {}
+    self_links, unresolved, edges, out_links = [], [], {}, []
     for a in links:
         if a["linked_table_id"] == a["table_id"]:
             self_links.append({"table_id": a["table_id"], "table_name": a["table_name"], "field_name": a["field_name"]})
+            continue
+        if a["linked_table_id"] in out_ids:
+            out_links.append({"table_id": a["table_id"], "table_name": a["table_name"], "field_id": a["field_id"], "field_name": a["field_name"],
+                              "linked_table_id": a["linked_table_id"], "linked_table_name": out_names.get(a["linked_table_id"], a["linked_table_id"])})
             continue
         if a["linked_table_id"] not in tables:
             unresolved.append({"table_name": a["table_name"], "field_name": a["field_name"],
@@ -1623,6 +1632,9 @@ def compute_graph(conn, mode="literal"):
         if tgt == a["table_id"]:
             cls, second, why = ("Self-link", True,
                                 "Links to its own table. Load the table's records first, then set these links.")
+        elif tgt in out_ids:
+            cls, second, why = ("Links to an out-of-scope table", False,
+                                "The linked table is marked out of scope, so this link has nowhere to point. A person decides: bring the table in, or drop the field.")
         elif tgt not in tables:
             cls, second, why = ("Unresolved", True,
                                 "The linked table is not in the database. Ingest its base, then recompute.")
@@ -1642,7 +1654,8 @@ def compute_graph(conn, mode="literal"):
                             "linked_table_name": tables.get(tgt, tgt), "treatment": cls, "second_pass": second,
                             "explanation": why})
     return {"mode": mode, "matrix": matrix, "edges": edge_list, "cycles": cycles, "self_links": self_links,
-            "unresolved_links": unresolved, "inverse_pairs": pairs, "link_fields": link_fields}
+            "unresolved_links": unresolved, "out_of_scope_links": sorted(out_links, key=lambda o: (o["table_name"].lower(), o["field_name"].lower(), o["field_id"])),
+            "out_of_scope_tables": len(out_ids), "inverse_pairs": pairs, "link_fields": link_fields}
 
 
 def _cycle_message(cyc, mode):
@@ -2744,6 +2757,10 @@ def build_report(mode):
         if mode == "literal":
             h.append("<p class=\"meta\">In Literal mode each pair counts as a two-table cycle. Regenerate with "
                      "\"Resolve two-way link pairs\" to order them using the single-link hint.</p>")
+    if g.get("out_of_scope_links"):
+        h.append("<div class=\"box warn\"><strong>Links to out-of-scope tables:</strong> these fields link to tables marked out of scope, so the link has "
+                 "nowhere to point. A person decides: bring the table in, or drop the field.<ul>%s</ul></div>" % "".join(
+                     "<li>%s.%s links to %s</li>" % (esc(o["table_name"]), esc(o["field_name"]), esc(o["linked_table_name"])) for o in g["out_of_scope_links"]))
     if g["unresolved_links"]:
         h.append("<div class=\"box warn\"><strong>Unresolved links:</strong> these fields link to tables that are not "
                  "in the database (ingest the other base, then recompute).<ul>%s</ul></div>" % "".join(
