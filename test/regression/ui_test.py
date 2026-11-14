@@ -69,6 +69,10 @@ with sync_playwright() as p:
     pg.select_option("#resTable",index=1)
     tid=pg.eval_on_selector("#resTable","e=>e.value")
     n=dl("#lnkProfileCsv"); check("table selected uses its ID", re.match(r"^[A-Za-z0-9]+_%s_Profile_\d{8}-\d{4}\.csv$"%tid, n), n)
+    pg.select_option("#resBase",""); pg.click("#btnSelectValues"); pg.wait_for_timeout(300)
+    check("select values: no base chosen gives a plain message", "Choose a base" in pg.inner_text("#svSummary"), pg.inner_text("#svSummary"))
+    pg.select_option("#resBase","appSampleBase001"); pg.click("#btnSelectValues"); pg.wait_for_timeout(800)
+    check("select values: a base with no select fields says so and shows no table", "0 select field(s) checked" in pg.inner_text("#svSummary") and pg.is_hidden("#svTable"), pg.inner_text("#svSummary"))
     check("csv helper text mentions row, null, cardinality", all(w in pg.inner_text("#step5") for w in ["row count","null count","cardinality"]))
     # ---- API call log is its own page ----
     pg.click("#sidenav a[href='/log']"); pg.wait_for_timeout(1500)

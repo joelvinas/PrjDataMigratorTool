@@ -396,7 +396,7 @@ async function checkSelectValues() {
   const d = await api("POST", "/api/select-values", { base_id: base });
   d.tables.forEach((tb) => tb.fields.forEach((f) => {
     const ex = f.unmatched.map((u) => u.label + ": " + u.records + " record(s) " + u.examples.join(", ") + (u.near_match_option ? " (near match: " + u.near_match_option + ")" : "")).join("; ");
-    body.appendChild(el("tr", {}, el("td", { text: tb.table_name }), el("td", { text: f.field_name }), el("td", { class: "num", text: fmt(f.declared_options) }), el("td", { class: "num", text: fmt(f.observed_values) }),
+    body.appendChild(el("tr", {}, el("td", { text: tb.table_name }), el("td", { text: f.field_name }), el("td", { class: "num", text: fmt(f.declared_options) }), el("td", { class: "num", text: fmt(f.records_total) }), el("td", { class: "num", text: fmt(f.records_total - f.records_with_value) }), el("td", { class: "num", text: fmt(f.observed_values) }),
       el("td", { class: "num" }, f.unmatched_values ? el("span", { class: "tag cap", text: fmt(f.unmatched_values) }) : "0"), el("td", { class: "num", text: fmt(f.unmatched_records) }), el("td", { class: "num", text: fmt(f.near_matches) }),
       el("td", { text: f.unused_options.join(", ") }), el("td", { text: ex })));
   }));
