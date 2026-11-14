@@ -1,7 +1,7 @@
 -- Migration 014: select option names and their Workfront option IDs. Adds TWO tables: option_names and option_workfront_ids.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED (creating a table for this was authorised by the owner on 2026-11-14; review the DDL, then confirm it is applied).
--- Deliberately NOT in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py until the owner confirms it is applied.
+-- Applied to the live database on 2026-11-14 (backed up first) and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in server.py and
+-- sql/apply_migrations.py. Apply it to an existing database with: python sql/apply_migrations.py path/to/your.db (back it up first).
 
 -- Option names follow the Core label rules. The tool proposes a repair for a name that breaks them; a person approves it here, with who, when
 -- and why. The Airtable option is identified by its stable choice ID (airtable_fields.choices_json), never by its name. An option whose name

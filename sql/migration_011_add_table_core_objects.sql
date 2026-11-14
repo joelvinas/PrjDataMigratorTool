@@ -1,8 +1,7 @@
 -- Migration 011: the Core object type of each table. Adds ONE table: table_core_objects.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED (authorised in principle by the owner on 2026-11-14; review the DDL, then confirm it is applied).
--- It is deliberately NOT in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py: the app refuses to connect to a
--- database that lacks an expected table, so those change together, after the owner confirms it is applied.
+-- Applied to the live database on 2026-11-14 (backed up first) and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in server.py and
+-- sql/apply_migrations.py. Apply it to an existing database with: python sql/apply_migrations.py path/to/your.db (back it up first).
 
 -- A table that has a Workfront Core presence (table_targets.target = 'planning_and_core') becomes ONE kind of Core object: a project, a request
 -- or a task. That is a human decision, recorded with who, when and why. A table with no row has no Core object type yet, and the loader keeps

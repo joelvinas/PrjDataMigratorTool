@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the migrations (001 to 009) to an existing database. Standard library only.
+"""Apply the migrations (001 to 014) to an existing database. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
@@ -33,6 +33,13 @@ def main():
     conn.executescript(open(os.path.join(HERE, "migration_007_add_field_names.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_008_add_table_scope_and_targets.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_009_add_field_groups.sql"), encoding="utf-8").read())
+    for name in ("migration_010_add_load_id_map.sql", "migration_011_add_table_core_objects.sql"):
+        conn.executescript(open(os.path.join(HERE, name), encoding="utf-8").read())
+    if "core_target_type" not in {r[1] for r in conn.execute("PRAGMA table_info(field_names)")}:   # migration 012: ADD COLUMN cannot be repeated
+        conn.executescript(open(os.path.join(HERE, "migration_012_add_core_target_type.sql"), encoding="utf-8").read())
+        added.append("field_names.core_target_type")
+    for name in ("migration_013_add_field_relationships.sql", "migration_014_add_option_names.sql"):
+        conn.executescript(open(os.path.join(HERE, name), encoding="utf-8").read())
     dropped, kept = [], []
     for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():

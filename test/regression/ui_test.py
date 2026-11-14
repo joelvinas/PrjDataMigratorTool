@@ -21,7 +21,7 @@ with sync_playwright() as p:
     nb=pg.eval_on_selector("#sidenav","e=>{const r=e.getBoundingClientRect();return r.bottom}")
     check("API call log link sits at the bottom of the side panel, below Stage 4", box("#sidenav a[href='/log']")[0]>box("#sidenav .planned")[1] and nb-box("#sidenav a[href='/log']")[1]<40, (box("#sidenav a[href='/log']"),nb))
     check("database badge shows connected on Setup", "connected" in pg.inner_text("#dbBadge") and "not" not in pg.inner_text("#dbBadge"), pg.inner_text("#dbBadge"))
-    check("Setup lists the connected database's tables", pg.query_selector_all("#countsTable tbody tr") and len(pg.query_selector_all("#countsTable tbody tr"))==25)
+    check("Setup lists the connected database's tables", pg.query_selector_all("#countsTable tbody tr") and len(pg.query_selector_all("#countsTable tbody tr"))==30)
     check("token shown only as yes/no", pg.inner_text("#tokenYesNo")=="yes" and "patMOCK" not in pg.content())
     check("hidden rows are really hidden (no stray empty button on Setup)", not pg.is_visible("#dbActions"))
     pg.fill("#baseId","appSampleBase001"); pg.wait_for_timeout(200)

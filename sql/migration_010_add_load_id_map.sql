@@ -1,14 +1,12 @@
 -- Migration 010: the load ID map. Adds ONE table: load_id_map.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED. Review it, then approve it before it is applied.
--- It is deliberately NOT in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py: the app refuses to connect to a
--- database that lacks an expected table, so those change together, after this is approved. Nothing in the code needs it yet: the loader's plan
--- and dry run keep their state in memory. It is needed when real creation is added.
+-- Applied to the live database on 2026-11-14 (backed up first) and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in server.py and
+-- sql/apply_migrations.py. Apply it to an existing database with: python sql/apply_migrations.py path/to/your.db (back it up first).
 
 -- Every item the loader creates in Workfront (a Planning record type or field, a Core custom field, a select option) has a TEMPORARY ID that
 -- depends only on the Airtable IDs (see loadplan.py), such as P-F-fldXXXX. The moment a create call returns, its Workfront ID is written here
 -- against the temporary ID, and a restart skips every row that already has one, so nothing is ever created twice. One row per temporary ID
--- per stage: Core has a sandbox and production; Workfront Planning has NO environments, only Workspaces (owner, 14 November 2026): everything goes into
+-- per stage: Core has four environments; Workfront Planning has NO environments, only Workspaces (owner, 14 November 2026): everything goes into
 -- one Workspace treated as isolated for Dev, which is then either wiped and recreated as a UAT Workspace or promoted to UAT. So 'environment' is the
 -- stage label ('sandbox1', 'sandbox2', 'preview' and 'production' for Core, 'dev' and 'uat' for Planning) and workspace_id names the Planning Workspace the IDs belong to.
 -- Promoting Dev to UAT relabels that Workspace's rows (a person's recorded decision); a wipe and recreate makes new rows. Each stage has its own IDs. Option rows (kind 'option') are rows

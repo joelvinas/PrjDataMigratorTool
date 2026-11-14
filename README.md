@@ -90,10 +90,11 @@ airtable-migration-control/
 │   ├── migration_007_add_field_names.sql   Field name validator: field_names, table_names, name_events
 │   ├── migration_008_add_table_scope_and_targets.sql   Field names page: table_scope, table_targets (human decisions about scope and target)
 │   ├── migration_009_add_field_groups.sql   Field names page: field_groups, field_group_members (field consolidation)
-│   ├── migration_010_add_load_id_map.sql   PROPOSED, not yet applied: load_id_map (Workfront IDs against temporary IDs, per environment)
-│   ├── migration_011_add_table_core_objects.sql    PROPOSED, not yet applied: table_core_objects
-│   ├── migration_012_add_core_target_type.sql      PROPOSED, not yet applied: field_names.core_target_type (one new column)
-│   ├── migration_013_add_field_relationships.sql   PROPOSED, not yet applied: field_relationships
+│   ├── migration_010_add_load_id_map.sql   applied 2026-11-14: load_id_map (Workfront IDs against temporary IDs, per environment)
+│   ├── migration_011_add_table_core_objects.sql    applied 2026-11-14: table_core_objects
+│   ├── migration_012_add_core_target_type.sql      applied 2026-11-14: field_names.core_target_type (one new column)
+│   ├── migration_013_add_field_relationships.sql   applied 2026-11-14: field_relationships
+│   ├── migration_014_add_option_names.sql          applied 2026-11-14: option_names, option_workfront_ids
 │   └── apply_migrations.py             applies all nine to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
@@ -546,7 +547,7 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 - **`run` is refused** with an explanation: creating anything is not implemented, because the request shapes for Workfront Planning and Workfront Core are not verified and no credentials are configured.
 - **Select option names** follow the label rules; a name that breaks them is put on hold with the proposed repair.
 - **Credentials:** the `workfront` section of `config.json` (see `config.example.json`) holds the Core credential per environment and the Planning bearer token and Workspace ID (Planning has Workspaces, not environments). `python loader.py config` says only whether each is configured. They are never stored, logged or shown in the browser. Nothing uses them yet.
-- **Proposed schema (approved in principle, not applied):** [migration 010](sql/migration_010_add_load_id_map.sql) `load_id_map` (Workfront IDs against temporary IDs, per environment); [011](sql/migration_011_add_table_core_objects.sql) `table_core_objects` (project, request or task per table); [012](sql/migration_012_add_core_target_type.sql) the column `field_names.core_target_type` (the Core data type, beside the Planning one); [013](sql/migration_013_add_field_relationships.sql) `field_relationships` (links defined by the schema, which side is the real relationship, who approved). [014](sql/migration_014_add_option_names.sql) adds `option_names` (approved select option names) and `option_workfront_ids` (option IDs read back from Core and Planning). None is in the schema library until you confirm it is applied.
+- **Schema added for the loader (applied and folded into the schema library, 2026-11-14):** migration 010 `load_id_map` (Workfront IDs against temporary IDs, per stage); 011 `table_core_objects` (project, request or task per table); 012 the column `field_names.core_target_type` (the Core data type, beside the Planning one); 013 `field_relationships` (links defined by the schema, which side is the real relationship, who approved); 014 `option_names` and `option_workfront_ids` (approved option names, and option IDs read back from Core and Planning). Nothing reads them yet except the migrations check. `sql/apply_migrations.py` applies 001 to 014 to an older database.
 
 ## Troubleshooting
 

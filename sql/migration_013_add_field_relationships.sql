@@ -1,8 +1,7 @@
 -- Migration 013: stored relationships between tables. Adds ONE table: field_relationships.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED (authorised in principle by the owner on 2026-11-14; review the DDL, then confirm it is applied).
--- It is deliberately NOT in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py until the owner confirms it
--- is applied.
+-- Applied to the live database on 2026-11-14 (backed up first) and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in server.py and
+-- sql/apply_migrations.py. Apply it to an existing database with: python sql/apply_migrations.py path/to/your.db (back it up first).
 
 -- Relationships are DEFINED BY THE AIRTABLE SCHEMA (airtable_fields.linked_table_id and inverse_link_field_id) and are STORED here so the
 -- loader and the reports read one decided answer. The tool proposes: one row per link field, with its paired field when the schema reports
