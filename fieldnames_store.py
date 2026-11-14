@@ -211,9 +211,9 @@ def _compute(conn, base_id, settings, override=None):
 
 def review(conn, base_id, settings=None):
     """The full payload for the page. Fields appear only when every in-scope table name is approved (the gate)."""
-    saved = True
+    saved_settings, saved = read_settings(conn, base_id)     # 'saved' says whether anything has been saved, even when previewing other settings
     if settings is None:
-        settings, saved = read_settings(conn, base_id)
+        settings = saved_settings
     c = _compute(conn, base_id, settings)
     res, data = c["res"], c["data"]
     targets = read_targets(conn, base_id)

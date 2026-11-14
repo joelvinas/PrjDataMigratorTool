@@ -62,6 +62,7 @@ check("every field is unreviewed at first and nothing is approved", rv["counts"]
 # ---- preview does not save; saving needs initials
 s, p = post("/api/names/preview", {"base_id": BASE, "settings": {"char_cleanup": False}})
 check("preview shows the effect of a toggle without saving it", s == 200 and p["settings"]["char_cleanup"] is False and get("/api/names/review?base_id=" + BASE)[1]["settings"]["char_cleanup"] is True)
+check("a preview does not claim its settings are saved", p["settings_saved"] is False and get("/api/names/review?base_id=" + BASE)[1]["settings_saved"] is False)
 check("a preview with invalid settings is refused", post("/api/names/preview", {"base_id": BASE, "settings": {"table_prefix": "bad"}})[0] == 400)
 check("saving settings needs initials", post("/api/names/settings", {"base_id": BASE, "settings": {}})[0] == 400)
 s, r = post("/api/names/settings", A(settings={"label_keep_quarter": False}, reason="test")); check("settings are saved and returned", s == 200 and r["settings"]["label_keep_quarter"] is False and r["settings_saved"])
