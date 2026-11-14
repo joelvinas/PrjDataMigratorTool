@@ -580,17 +580,48 @@ function writerVisible(e) {
   return !q || [e.table_name, e.table_id, e.field_name, e.field_id].some((x) => String(x).toLowerCase().includes(q));
 }
 
+function writerDecisionCell(e, d) {
+  const opts = d.decisions[e.base_category];
+  if (!opts) return "";
+  if (!d.decisions_available) return e.needs_decision ? "Not decided (decisions need migration 019)" : "";
+  const sel = el("select", { "aria-label": "Decision for " + e.field_name }, el("option", { value: "", text: "Choose..." }), opts.map((o) => el("option", { value: o, text: d.decision_labels[o] || o })));
+  sel.value = e.decision ? e.decision.decision : "";
+  const save = el("button", { type: "button", text: e.decision ? "Change" : "Decide" });
+  save.addEventListener("click", () => {
+    if (!sel.value) { setMsg("writersMessage", "Choose a decision for " + e.table_name + "." + e.field_name + " first.", "err"); return; }
+    saveWriterDecision(e.field_id, sel.value, "Saved.");
+  });
+  const kids = [sel, save];
+  if (e.decision) {
+    const clr = el("button", { type: "button", text: "Clear" });
+    clr.addEventListener("click", () => saveWriterDecision(e.field_id, "clear", "Cleared."));
+    kids.push(clr);
+    kids.push(el("div", { class: "hint", text: "Decided by " + e.decision.decided_by + (e.decision.decided_at ? " on " + String(e.decision.decided_at).slice(0, 10) : "") }));
+  }
+  return el("div", {}, kids);
+}
+
+async function saveWriterDecision(fieldId, decision, done) {
+  const actor = $("wrActor").value.trim();
+  if (!actor) { setMsg("writersMessage", "Enter your initials before making a decision.", "err"); return; }
+  try {
+    W.data = await api("POST", "/api/field-writers/decide", { base_id: currentBase(), actor, items: [{ field_id: fieldId, decision }], reason: "set from the page" });
+    renderWriters();
+    setMsg("writersMessage", done, "ok");
+  } catch (e) { setMsg("writersMessage", e.message, "err"); }
+}
+
 function renderWriters() {
   const d = W.data, tb = $("writersTable").querySelector("tbody");
   clear(tb);
   if (!d) { $("writersScroll").hidden = true; return; }
   const rows = d.entries.filter(writerVisible);
   for (const e of rows) {
-    const decision = e.decision ? (d.decision_labels[e.decision.decision] || e.decision.decision) + " (" + e.decision.decided_by + ")" : (e.needs_decision ? "Not decided" : "");
+    const decision = writerDecisionCell(e, d);
     tb.appendChild(el("tr", { class: e.needs_decision ? "undecided" : "" }, el("td", { text: e.table_name }), el("td", { text: e.table_id }), el("td", { text: e.field_name }), el("td", { text: e.field_id }), el("td", { text: e.data_type }),
       el("td", { text: e.writers.form.join(", ") }), el("td", { text: e.writers.automation.map((a) => a.automation_name).join(", ") }),
       el("td", { text: e.scenarios.join(", ") || (e.fusion ? "(not named yet)" : "") }), el("td", { text: WRITER_CATEGORY[e.category] || e.category }),
-      el("td", { class: "settings", text: e.marker || "" }), el("td", { text: decision }), el("td", { text: e.anomalies.join("; ") })));
+      el("td", { class: "settings", text: e.marker || "" }), el("td", {}, decision), el("td", { text: e.anomalies.join("; ") })));
   }
   $("writersScroll").hidden = rows.length === 0;
   applySort("writersTable");

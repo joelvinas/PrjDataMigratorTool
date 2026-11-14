@@ -691,6 +691,35 @@ CREATE TABLE link_direction_events (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 CREATE INDEX idx_link_direction_events_field ON link_direction_events(airtable_field_id, event_id);
+
+-- 18. Field-writer decisions and their history (migration 019)
+-- The matrix of who fills each field is computed each time; what a person DECIDES about a formula-only or automation-only field is kept here (who,
+-- when, why), with an append-only history. Field IDs and choices only: no record value.
+CREATE TABLE field_writer_decisions (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('recompute', 'park', 'fusion_owned', 'go_stale', 'users_also_edit')),
+    decided_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_writer_decisions_base ON field_writer_decisions(base_id);
+
+-- Append-only history, so a changed or cleared decision does not lose what it was (the lesson of migration 018).
+CREATE TABLE field_writer_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    airtable_field_id TEXT NOT NULL,
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('decide', 'change', 'clear')),
+    old_decision TEXT,                           -- NULL when there was none before
+    new_decision TEXT,                           -- NULL after a clear
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_writer_events_field ON field_writer_events(airtable_field_id, event_id);
 '''
 
 
@@ -4886,27 +4915,43 @@ def _field_writer_inputs(conn, base_id):
     return fields, autos, refs, forms, items
 
 
-def field_writer_matrix(conn, base_id):
+def field_writer_matrix(conn, base_id, with_decisions=True):
     entries = fieldwriters.build_matrix(*_field_writer_inputs(conn, base_id))
-    return fieldwriters.apply_decisions(entries, _writer_decisions(conn, base_id))
+    return fieldwriters.apply_decisions(entries, fieldwriters.read_decisions(conn, base_id)) if with_decisions else entries
 
 
-def _writer_decisions(conn, base_id):
-    """{field_id: decision} once the decisions table exists (migration 019); until then nobody has decided anything."""
-    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_writer_decisions'").fetchone():
-        return {}
-    return {r["airtable_field_id"]: {"decision": r["decision"], "decided_by": r["decided_by"], "decided_at": r["decided_at"], "reason": r["reason"]}
-            for r in conn.execute("SELECT * FROM field_writer_decisions WHERE base_id=?", (base_id,))}
+def _field_writers_payload(conn, base):
+    entries = field_writer_matrix(conn, base)
+    cap = 5000
+    return {"base_id": base, "entries": entries[:cap], "truncated": len(entries) > cap, "summary": fieldwriters.summary(entries), "decisions": {k: list(v) for k, v in fieldwriters.DECISIONS.items()},
+            "decision_labels": fieldwriters.DECISION_LABEL, "marker_prefix": fieldwriters.MARKER_PREFIX, "decisions_available": fieldwriters.available(conn)}
 
 
 def api_field_writers(q):
     """The field-writer matrix: who fills each field (user, form, automation, formula) and which fields carry the Fusion-driven marker. Metadata only."""
     base = _names_base(q)
     with db() as conn:
-        entries = field_writer_matrix(conn, base)
-    cap = 5000
-    return {"base_id": base, "entries": entries[:cap], "truncated": len(entries) > cap, "summary": fieldwriters.summary(entries), "decisions": {k: list(v) for k, v in fieldwriters.DECISIONS.items()},
-            "decision_labels": fieldwriters.DECISION_LABEL, "marker_prefix": fieldwriters.MARKER_PREFIX}
+        return _field_writers_payload(conn, base)
+
+
+def api_field_writers_decide(body):
+    """A person's decision about a formula-only or automation-only field (recompute | park; fusion_owned | go_stale | users_also_edit; or clear). Who, when and why are kept."""
+    base = _names_base(body)
+    items = body.get("items") or []
+    if not items:
+        raise AppError("Nothing to save.")
+    with db() as conn:
+        raw = {e["field_id"]: e for e in field_writer_matrix(conn, base, with_decisions=False)}
+        results = []
+        for it in items:
+            e = raw.get(str(it.get("field_id") or ""))
+            if e is None:
+                raise AppError("That field is not in this base, or its table is out of scope.", 404)
+            try:
+                results.append(fieldwriters.decide(conn, body.get("actor"), base, e, it.get("decision"), body.get("reason") or ""))
+            except fieldwriters.WriterError as err:
+                raise AppError(err.message, err.status)
+        return dict(_field_writers_payload(conn, base), saved=results)
 
 
 WRITER_COLUMNS = ["table_name", "table_id", "field_name", "field_id", "data_type", "category", "fusion_driven", "forms", "automations", "scenarios", "marker", "decision", "decided_by", "notes"]
@@ -5155,7 +5200,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/links/directions/decide": api_link_directions_decide,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/field-writers/decide": api_field_writers_decide, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,

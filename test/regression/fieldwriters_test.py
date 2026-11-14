@@ -95,5 +95,35 @@ mism = {"core": dict(perfect["core"], f4=fw.with_marker("d", [{"automation_name"
 check("a marker that names a different scenario than the recorded automation is a mismatch", [f["kind"] for f in fw.validate(M, mism)["findings"]] == ["scenario_mismatch"])
 check("findings are sorted, so the same input gives the same report whatever order the matrix arrives in", fw.validate(M, pulled) == fw.validate(M[::-1], pulled))
 
+# ---- stored decisions (migration 019), on a database built from the schema library
+import sqlite3
+c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+c.executescript(open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "sql", "DatabaseSchemaLibrary.sql"), encoding="utf-8").read())
+for f in FIELDS:
+    c.execute("INSERT INTO airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type) VALUES (?,?,?,?,?,?)", ("appW", f["table_id"], f["table_name"], f["field_id"], f["field_name"], f["data_type"]))
+c.commit()
+RAW = {e["field_id"]: e for e in fw.build_matrix(FIELDS, AUTOS, REFS, FORMS, ITEMS)}
+def err(fn, *a):
+    try:
+        fn(*a); return None
+    except fw.WriterError as e:
+        return e.message
+check("every entry remembers the category the tool proposed", all(e["base_category"] == e["category"] for e in RAW.values()))
+check("a decision needs who", "initials" in (err(fw.decide, c, "", "appW", RAW["f7"], "park") or ""))
+check("a decision that does not fit the field is refused, saying what does", "choose recompute, park" in (err(fw.decide, c, "JV", "appW", RAW["f7"], "fusion_owned") or "") and "nothing to decide" in (err(fw.decide, c, "JV", "appW", RAW["f3"], "park") or ""))
+check("a decision is stored with who, when and why, and the history says so", fw.decide(c, "JV", "appW", RAW["f7"], "park", "rollup not needed") == "decided"
+      and fw.read_decisions(c, "appW")["f7"]["decided_by"] == "JV" and fw.read_decisions(c, "appW")["f7"]["reason"] == "rollup not needed" and fw.read_decisions(c, "appW")["f7"]["decided_at"])
+check("deciding the same thing again changes nothing and adds no history", fw.decide(c, "KR", "appW", RAW["f7"], "park", "again") == "unchanged" and c.execute("SELECT COUNT(*) FROM field_writer_events").fetchone()[0] == 1)
+check("a changed decision replaces it and is appended to the history with the old choice", fw.decide(c, "KR", "appW", RAW["f7"], "recompute", "needed after all") == "changed"
+      and fw.read_decisions(c, "appW")["f7"]["decision"] == "recompute" and [tuple(r) for r in c.execute("SELECT event_type, old_decision, new_decision, actor FROM field_writer_events ORDER BY event_id")] == [("decide", None, "park", "JV"), ("change", "park", "recompute", "KR")])
+check("clearing removes the decision and is recorded", fw.decide(c, "KR", "appW", RAW["f7"], "clear", "") == "cleared" and "f7" not in fw.read_decisions(c, "appW") and c.execute("SELECT event_type, old_decision FROM field_writer_events ORDER BY event_id DESC").fetchone()[:] == ("clear", "recompute"))
+check("clearing nothing is not an event", fw.decide(c, "KR", "appW", RAW["f7"], "clear", "") == "unchanged" and c.execute("SELECT COUNT(*) FROM field_writer_events").fetchone()[0] == 3)
+fw.decide(c, "JV", "appW", RAW["f4"], "users_also_edit", "people fix the fee by hand")
+M4 = fw.apply_decisions(fw.build_matrix(FIELDS, AUTOS, REFS, FORMS, ITEMS), fw.read_decisions(c, "appW"))
+f4 = {e["field_id"]: e for e in M4}["f4"]
+check("'people also edit it' keeps the proposed outcome on record while the effective outcome becomes mixed", f4["category"] == "mixed" and f4["base_category"] == "automation_only" and f4["fusion"] and not f4["needs_decision"])
+check("decisions are per base", fw.read_decisions(c, "appOther") == {})
+check("a database without migration 019 reads no decisions and refuses to save one", fw.read_decisions(sqlite3.connect(":memory:"), "appW") == {} and "migration 019" in (err(fw.decide, sqlite3.connect(":memory:"), "JV", "appW", RAW["f7"], "park") or ""))
+
 print("ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

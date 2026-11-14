@@ -120,7 +120,7 @@ def build_matrix(fields, automations, refs, forms=(), form_items=()):
             cat = "user_plain"
         out.append({"field_id": fid, "field_name": f["field_name"], "table_id": f["table_id"], "table_name": f["table_name"], "base_id": f["base_id"], "data_type": typ,
                     "writers": {"user": "n/a" if (computed or system) else "possible", "form": forms_, "automation": sources, "formula": computed, "system": system},
-                    "category": cat, "fusion": bool(sources), "scenarios": sorted({clean_name(s["scenario"]) for s in sources if clean_name(s["scenario"])}),
+                    "category": cat, "base_category": cat, "fusion": bool(sources), "scenarios": sorted({clean_name(s["scenario"]) for s in sources if clean_name(s["scenario"])}),
                     "marker": marker_text(sources), "needs_decision": cat in DECISIONS, "decision": None, "anomalies": anomalies})
     return out
 
@@ -140,6 +140,61 @@ def apply_decisions(entries, decisions):
         if d["decision"] == "users_also_edit":
             e["category"] = "mixed"
     return entries
+
+
+# ------------------------------------------------------------------ stored decisions (migration 019)
+class WriterError(Exception):
+    def __init__(self, message, status=400):
+        super(WriterError, self).__init__(message)
+        self.message, self.status = message, status
+
+
+def available(conn):
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return {"field_writer_decisions", "field_writer_events"} <= have
+
+
+def read_decisions(conn, base_id):
+    """{field_id: {decision, decided_by, decided_at, reason}}. Empty until migration 019 is applied."""
+    if not available(conn):
+        return {}
+    return {r[0]: {"decision": r[1], "decided_by": r[2], "decided_at": r[3], "reason": r[4]}
+            for r in conn.execute("SELECT airtable_field_id, decision, decided_by, decided_at, reason FROM field_writer_decisions WHERE base_id=? ORDER BY airtable_field_id", (base_id,))}
+
+
+def decide(conn, actor, base_id, entry, decision, reason=""):
+    """Record a person's decision for one field, with who, when and why, and append it to the history. `entry` is the field's matrix entry BEFORE
+    decisions were applied (so its base_category is what the tool proposed). decision 'clear' removes the decision. Returns 'decided', 'changed',
+    'unchanged' or 'cleared'. A decision that does not fit the field's category is refused."""
+    actor = (actor or "").strip()
+    if not actor or len(actor) > 40 or any(ord(c) < 32 for c in actor):
+        raise WriterError("Enter your initials or a short name (up to 40 characters) before making a decision.")
+    reason = (reason or "").strip() or "set from the page"
+    if len(reason) > 500 or any(ord(c) < 32 and c not in "\n\t" for c in reason):
+        raise WriterError("The reason must be plain text of up to 500 characters.")
+    if not available(conn):
+        raise WriterError("Field-writer decisions need migration 019 on this database.", 409)
+    fid = entry["field_id"]
+    old = conn.execute("SELECT decision FROM field_writer_decisions WHERE airtable_field_id=?", (fid,)).fetchone()
+    old = old[0] if old else None
+    if decision == "clear":
+        if old is None:
+            return "unchanged"
+        with conn:
+            conn.execute("DELETE FROM field_writer_decisions WHERE airtable_field_id=?", (fid,))
+            conn.execute("INSERT INTO field_writer_events(airtable_field_id, base_id, event_type, old_decision, new_decision, actor, reason) VALUES (?,?,?,?,?,?,?)", (fid, base_id, "clear", old, None, actor, reason))
+        return "cleared"
+    allowed = DECISIONS.get(entry["base_category"], ())
+    if decision not in allowed:
+        raise WriterError("%s is not a decision for a field in the outcome %s%s." % (decision, entry["base_category"].replace("_", " "), ("; choose " + ", ".join(allowed)) if allowed else ": nothing to decide"))
+    if old == decision:
+        return "unchanged"
+    with conn:
+        conn.execute("INSERT INTO field_writer_decisions(airtable_field_id, base_id, decision, decided_by, reason) VALUES (?,?,?,?,?) "
+                     "ON CONFLICT(airtable_field_id) DO UPDATE SET decision=excluded.decision, decided_by=excluded.decided_by, decided_at=CURRENT_TIMESTAMP, reason=excluded.reason", (fid, base_id, decision, actor, reason))
+        conn.execute("INSERT INTO field_writer_events(airtable_field_id, base_id, event_type, old_decision, new_decision, actor, reason) VALUES (?,?,?,?,?,?,?)",
+                     (fid, base_id, "change" if old else "decide", old, decision, actor, reason))
+    return "changed" if old else "decided"
 
 
 def summary(entries):

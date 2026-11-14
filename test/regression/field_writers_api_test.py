@@ -52,4 +52,25 @@ s, csvb = call("GET", "/api/export/field_writers.csv?base_id=" + BASE, raw=True)
 text = csvb.decode("utf-8-sig") if s == 200 else ""
 check("the .csv has a header, one row per field and the marker, and no recorded detail", s == 200 and text.splitlines()[0].startswith("table_name,table_id,field_name") and len(text.splitlines()) == 6 and 'scenario ""Order sync""' in text and "SECRETVALUE" not in text, text[:300])
 check("a bad base ID is refused", call("GET", "/api/field-writers?base_id=x%20y")[0] == 400)
+# ---- decisions
+D = lambda items, **k: post("/api/field-writers/decide", dict({"base_id": BASE, "actor": "JV", "items": items}, **k))
+s, r = call("GET", "/api/field-writers?base_id=" + BASE)
+check("decisions are available once migration 019 is in the database", r["decisions_available"] is True and r["decisions"]["formula_only"] == ["recompute", "park"])
+check("a decision without who is refused", D([{"field_id": "fldW04", "decision": "park"}], actor="")[0] == 400)
+check("a decision that does not fit the field is refused", D([{"field_id": "fldW04", "decision": "fusion_owned"}])[0] == 400 and D([{"field_id": "fldW03", "decision": "park"}])[0] == 400)
+check("a field of another base or an out-of-scope table is refused", D([{"field_id": "fldX01", "decision": "park"}])[0] == 404 and D([{"field_id": "fldNope", "decision": "park"}])[0] == 404)
+check("nothing to save is refused", D([])[0] == 400)
+s, r = D([{"field_id": "fldW04", "decision": "park"}], reason="not needed in the target")
+E = {e["field_name"]: e for e in r["entries"]}
+check("a decision is saved with who and why and settles the field", s == 200 and r["saved"] == ["decided"] and E["Total"]["decision"]["decided_by"] == "JV" and E["Total"]["decision"]["reason"] == "not needed in the target" and not E["Total"]["needs_decision"] and r["summary"]["needs_decision"] == 0, r.get("saved"))
+c2 = sqlite3.connect("writers.db")
+check("the history has the event", [tuple(x) for x in c2.execute("SELECT event_type, old_decision, new_decision, actor FROM field_writer_events")] == [("decide", None, "park", "JV")])
+c2.execute("INSERT INTO automation_field_refs(spec_id, item_id, ref_order, field_id, role) VALUES (?,?,?,?,?)", (new, "s1", 9, "fldW01", "set")); c2.commit()
+s, r = D([{"field_id": "fldW01", "decision": "users_also_edit"}])
+E = {e["field_name"]: e for e in r["entries"]}
+check("an automation-only field can be marked 'people also edit it': it becomes mixed and keeps its marker", s == 200 and E["Title"]["category"] == "mixed" and E["Title"]["base_category"] == "automation_only" and E["Title"]["marker"], E["Title"])
+s, r = D([{"field_id": "fldW04", "decision": "clear"}, {"field_id": "fldW01", "decision": "clear"}])
+E = {e["field_name"]: e for e in r["entries"]}
+check("clearing returns both fields to needing a decision", s == 200 and r["saved"] == ["cleared", "cleared"] and E["Total"]["needs_decision"] and E["Title"]["category"] == "automation_only" and r["summary"]["needs_decision"] == 2, r["summary"])
+check("the .csv shows the decision column", b"decision" in call("GET", "/api/export/field_writers.csv?base_id=" + BASE, raw=True)[1].splitlines()[0])
 sys.exit(0 if ok else 1)
