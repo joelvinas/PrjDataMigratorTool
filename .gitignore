@@ -14,3 +14,6 @@ data_extract/
 # Python
 __pycache__/
 *.pyc
+
+# Local assistant instructions (kept out of the public repo)
+CLAUDE.md
