@@ -182,6 +182,12 @@ def build_reports(result, fields, imp=None, notes=()):
         L += ["%s (%s)" % (t, fn.PROFILES[t]["title"]), "  PASS %d   AUTO_FIXABLE %d   NEEDS_HUMAN %d" % (v[fn.PASS], v[fn.AUTO_FIXABLE], v[fn.NEEDS_HUMAN]),
               "  names touched by step: " + (", ".join("%s=%d" % kv for kv in sorted(s[t]["steps"].items())) or "none"),
               "  violations by rule: " + (", ".join("%s=%d" % kv for kv in s[t]["rules"].items()) or "none"), ""]
+    g = result.get("gate") or {"ready": True, "pending": [], "enforced": False}
+    if not g["ready"]:
+        names = ", ".join("%s (%s)" % (result["tables"][t]["old"], t) for t in g["pending"])
+        L[2:2] = (["BLOCKED: field review cannot start until every table name is approved. %d table(s) waiting: %s" % (len(g["pending"]), names), ""]
+                  if g["enforced"] else
+                  ["DRAFT: %d table name(s) are not approved yet, so swapped names below are proposals only: %s" % (len(g["pending"]), names), ""])
     L += ["Abandoned fields excluded: %d" % s["abandoned"], "Duplicate groups: %d" % len(result["clusters"]),
           "Import problems: %d (%d errors)" % (len(imp["problems"]), sum(1 for p in imp["problems"] if p["severity"] == "error"))]
     L += [""] + list(notes)
@@ -203,6 +209,7 @@ def main(argv=None):
     ap.add_argument("--no-char-cleanup", action="store_true")
     ap.add_argument("--no-leading-digits", action="store_true")
     ap.add_argument("--label-convert-quarter", action="store_true", help="propose 1Q -> Q1 in labels too (default: labels keep the client's convention)")
+    ap.add_argument("--draft", action="store_true", help="preview field results even though some table names are not approved (the report says DRAFT)")
     ap.add_argument("--skip-table", action="append", default=[], help="table ID to treat as out of scope (repeatable)")
     a = ap.parse_args(argv)
     if not os.path.isfile(a.db):
@@ -218,13 +225,15 @@ def main(argv=None):
         imp = parse_import(text, db["fields"])
         notes += [note] if note else []
     res = fn.run(db["fields"], db["tables"], st, manual=(imp or {}).get("manual"), approved_tables=db["approved_tables"],
-                 abandoned=db["abandoned"], out_of_scope_tables=a.skip_table)
+                 abandoned=db["abandoned"], out_of_scope_tables=a.skip_table, gate=not a.draft)
     os.makedirs(a.out, exist_ok=True)
     for name, text in build_reports(res, db["fields"], imp, notes).items():
         with open(os.path.join(a.out, name), "w", encoding="utf-8-sig", newline="") as fh:
             fh.write(text)
     print(open(os.path.join(a.out, "names_summary.txt"), encoding="utf-8-sig").read())
     print("Reports written to %s" % a.out)
+    if res["gate"]["enforced"] and not res["gate"]["ready"]:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

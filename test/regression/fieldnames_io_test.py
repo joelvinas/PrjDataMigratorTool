@@ -109,11 +109,21 @@ check("rules document uses allowlist wording", "allowlist" in reports["FIELD_NAM
 csvp = os.path.join(tmp, "renames.csv")
 open(csvp, "w", encoding="utf-8", newline="").write(good)
 out = os.path.join(tmp, "out")
-fio.main(["--db", dbp, "--base", "appT", "--import", csvp, "--out", out])
+try:
+    fio.main(["--db", dbp, "--base", "appT", "--import", csvp, "--out", os.path.join(tmp, "gated")]); code = 0
+except SystemExit as e:
+    code = e.code
+gated = os.path.join(tmp, "gated")
+check("command line refuses field review until table names are approved (exit 2)", code == 2)
+check("blocked run still writes the table report and says why", "BLOCKED" in open(os.path.join(gated, "names_summary.txt"), encoding="utf-8-sig").read()
+      and len(list(csv.DictReader(open(os.path.join(gated, "names_tables.csv"), encoding="utf-8-sig", newline="")))) == 2
+      and len(list(csv.DictReader(open(os.path.join(gated, "names_report.csv"), encoding="utf-8-sig", newline="")))) == 0)
+fio.main(["--db", dbp, "--base", "appT", "--import", csvp, "--out", out, "--draft"])
+check("--draft previews field results and labels the report DRAFT", "DRAFT" in open(os.path.join(out, "names_summary.txt"), encoding="utf-8-sig").read())
 check("command line writes every file", sorted(os.listdir(out)) == sorted(reports), os.listdir(out))
 check("command line report files open in Excel as UTF-8 (BOM)", open(os.path.join(out, "names_report.csv"), "rb").read().startswith(b"\xef\xbb\xbf"))
 check("command line left the database untouched", hashlib.sha256(open(dbp, "rb").read()).hexdigest() == h0)
-fio.main(["--db", dbp, "--base", "appT", "--out", out, "--skip-table", "tblA", "--no-char-cleanup"])
+fio.main(["--db", dbp, "--base", "appT", "--out", out, "--skip-table", "tblA", "--no-char-cleanup", "--draft"])
 skipped = [r["field_id"] for r in csv.DictReader(open(os.path.join(out, "names_report.csv"), encoding="utf-8-sig", newline=""))]
 check("skipping a table removes its fields from the report", skipped == ["fld3", "fld4", "fld5", "fld6"], skipped)
 sys.exit(0 if ok else 1)

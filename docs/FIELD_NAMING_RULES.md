@@ -12,6 +12,7 @@ Names are unique within a table only. Adobe states that a Core custom field API 
 
 ## Order the rules run in
 
+0. Before any field is reviewed, every in-scope table name must be approved (an unchanged name is approved in one click).
 1. Table names are cleaned and a table rename map is built.
 2. Old table names inside field names are replaced (resolved through the schema).
 3. Characters are cleaned up and `1Q` becomes `Q1` (names only).
@@ -38,11 +39,19 @@ A name must contain at least one character.
 
 ### NON_ASCII - Non-ASCII character
 
-Emoji, accented letters, smart quotes, zero-width characters, tabs and other non-ASCII characters are not allowed, because data exported to CSV without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters, the rest are removed.
+Emoji, accented letters, smart quotes, zero-width characters and other non-ASCII characters are not allowed, because data exported to CSV without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters, the rest are removed.
 
 - Applies to: planning_name, core_name, core_label
 - Pipeline step: char_cleanup (baseline, always checked)
 - Example: `Café ✨ Budget` becomes `Cafe Budget`
+
+### WHITESPACE_CHAR - Tab, new line or no-break space
+
+A no-break space (ASCII 160), tab, new line, vertical tab, form feed or carriage return must never appear in a name or label. Each is turned into a plain space (ASCII 32), and the spaces are then closed up. AUTO_FIXABLE.
+
+- Applies to: planning_name, core_name, core_label
+- Pipeline step: char_cleanup (baseline, always checked)
+- Example: `Total\tCost` becomes `Total Cost`
 
 ### SPECIAL_CHAR - Special character
 
@@ -54,7 +63,7 @@ Names allow only letters, digits, spaces and hyphens. The characters ' " ` ~ ! @
 
 ### EDGE_SPACE - Leading or trailing space
 
-No space at the start or end.
+No space at the start or end. Removing them is AUTO_FIXABLE.
 
 - Applies to: planning_name, core_name, core_label
 - Pipeline step: char_cleanup (baseline, always checked)
@@ -62,7 +71,7 @@ No space at the start or end.
 
 ### DOUBLE_SPACE - Double space
 
-No two spaces in a row.
+No two spaces in a row. Closing them up is AUTO_FIXABLE.
 
 - Applies to: planning_name, core_name, core_label
 - Pipeline step: char_cleanup (baseline, always checked)
@@ -102,7 +111,7 @@ Names Adobe reserves cannot be used (list to be confirmed; empty for now).
 
 ### TABLE_REF - Old table name inside a field name
 
-When a field name contains the name of a table that is being renamed (typical for lookup and rollup fields), the table's new name is suggested. The table is identified through the schema (link field -> linked table ID), never by guessing, and the old name must match as a whole name.
+When a field name contains the name of a table that is being renamed (typical for lookup and rollup fields), the table's new name is suggested. The table is identified through the schema (link field -> linked table ID), never by guessing, and the old name must match as a whole name. Because every table name must be approved before fields are reviewed, a swap that follows the schema is AUTO_FIXABLE; a mention with no schema path is NEEDS_HUMAN.
 
 - Applies to: planning_name, core_name, core_label
 - Pipeline step: table_swap
