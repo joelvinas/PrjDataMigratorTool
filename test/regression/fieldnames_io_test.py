@@ -149,6 +149,11 @@ check("with every table approved the gate opens without --draft and the swap is 
 check("the abandoned member shrinks the duplicate group, which resolves it", rep["fld1"]["planning_name_verdict"] == "PASS")
 skipped = [r["field_id"] for r in csv.DictReader(open(os.path.join(out, "names_report.csv"), encoding="utf-8-sig", newline=""))]
 check("skipping a table removes its fields from the report", skipped == ["fld3", "fld4", "fld5", "fld6"], skipped)
+# emoji option on the command line
+eo = os.path.join(tmp, "emoji")
+fio.main(["--db", appr, "--base", "appT", "--out", eo, "--draft", "--emoji-mode", "word", "--description-emoji-mode", "word"])
+check("the emoji options are accepted and shown in the summary", "emoji_mode=word" in open(os.path.join(eo, "names_summary.txt"), encoding="utf-8-sig").read())
+
 # descriptions on the command line
 dd = os.path.join(tmp, "desc")
 k = sqlite3.connect(appr)

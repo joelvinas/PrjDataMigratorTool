@@ -41,6 +41,7 @@ const SETTING_ROWS = [
   { key: "digit_style", label: "If it must not: how to rearrange", type: "style", on: NAME_TARGETS },
   { key: "digit_word", label: "Word to put in front (when rearranging that way)", type: "text", on: NAME_TARGETS, size: "short", max: 40 },
   { key: "max_len", label: "Maximum length", type: "number", on: ["planning_name", "core_name", "core_label"] },
+  { key: "emoji_mode", label: "Emoji: remove it, or replace it with its word", type: "emoji", on: ["planning_name", "core_name", "core_label"] },
   { key: "extra_allowed", label: "Extra punctuation to allow (it is kept, not removed)", type: "text", on: NAME_TARGETS, size: "short", max: 40, hint: "for example &" },
   { key: "extra_blocked", label: "Extra characters to remove (besides Adobe's unsupported ones)", type: "text", on: ["core_label"], size: "short", max: 40, hint: "for example %" },
   { key: "label_keep_quarter", label: "Keep the client's quarter style (1Q)", type: "bool", on: ["core_label"] },
@@ -51,7 +52,7 @@ const cellId = (t, k) => "o_" + t + "_" + k;
 function effective(s, t, k) {
   const o = (s.targets && s.targets[t]) || {};
   if (o[k] !== undefined) return o[k];
-  if (["table_swap", "char_cleanup", "leading_digits", "digit_style", "digit_word", "label_keep_quarter"].includes(k)) return s[k];
+  if (["table_swap", "char_cleanup", "leading_digits", "digit_style", "digit_word", "label_keep_quarter", "emoji_mode"].includes(k)) return s[k];
   return { max_len: DEFAULT_MAX[t], allow_leading_digit: false, extra_allowed: "", extra_blocked: "" }[k];
 }
 function buildSettingsGrid() {
@@ -65,7 +66,9 @@ function buildSettingsGrid() {
       let input;
       if (row.type === "bool") input = el("input", { type: "checkbox", id: cellId(t, row.key), "aria-label": row.label });
       else if (row.type === "number") input = el("input", { type: "number", id: cellId(t, row.key), min: "1", max: String(MAX_CAP[t]), class: "short", "aria-label": row.label });
-      else if (row.type === "style") {
+      else if (row.type === "emoji") {
+        input = el("select", { id: cellId(t, row.key), "aria-label": row.label }, el("option", { value: "remove", text: "Remove it" }), el("option", { value: "word", text: "Replace with its word" }));
+      } else if (row.type === "style") {
         input = el("select", { id: cellId(t, row.key), "aria-label": row.label }, el("option", { value: "move_to_end", text: "Move the number to the end" }), el("option", { value: "prefix_word", text: "Put a word in front" }));
       } else input = el("input", { type: "text", id: cellId(t, row.key), class: row.size || "", maxlength: String(row.max || 40), placeholder: row.hint || "", autocomplete: "off", "aria-label": row.label });
       input.addEventListener(row.type === "text" || row.type === "number" ? "input" : "change", schedulePreview);
@@ -90,13 +93,15 @@ function controlSettings() {
   /* The general values (used for table names) follow the Planning name; the label's quarter setting is its own. */
   const p = s.targets.planning_name;
   Object.assign(s, { table_swap: p.table_swap, char_cleanup: p.char_cleanup, leading_digits: p.leading_digits, digit_style: p.digit_style, digit_word: p.digit_word,
-    label_keep_quarter: s.targets.core_label.label_keep_quarter });
+    label_keep_quarter: s.targets.core_label.label_keep_quarter, emoji_mode: p.emoji_mode });
   s.description_include_airtable = $("descAirtable").checked;
+  s.description_emoji_mode = $("descEmoji").value;
   return s;
 }
 function setControls(s) {
   $("pPrefix").value = s.table_prefix;
   $("descAirtable").checked = !!s.description_include_airtable;
+  $("descEmoji").value = s.description_emoji_mode || "remove";
   for (const row of SETTING_ROWS) for (const t of row.on) {
     const c = $(cellId(t, row.key)), v = effective(s, t, row.key);
     if (row.type === "bool") c.checked = !!v; else c.value = v === undefined || v === null ? "" : v;
@@ -108,7 +113,7 @@ function syncWordBoxes() {
 }
 /* Two settings are the same when every option has the same effective value for every name. */
 function matrix(s) {
-  const m = { table_prefix: s.table_prefix, description_include_airtable: String(!!s.description_include_airtable) };
+  const m = { table_prefix: s.table_prefix, description_include_airtable: String(!!s.description_include_airtable), description_emoji_mode: s.description_emoji_mode || "remove" };
   for (const t of ["planning_name", "core_name", "core_label"]) for (const row of SETTING_ROWS) if (row.on.includes(t)) m[t + "." + row.key] = String(effective(s, t, row.key));
   return JSON.stringify(m);
 }
@@ -500,6 +505,7 @@ startPage("names", { onReadyChange, afterConnect }, () => {
   $("btnApproveAuto").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "auto", targets: [N.target] }, "fieldsMessage", fieldsOk));
   $("btnApproveAllTargets").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "pass_and_auto" }, "fieldsMessage", fieldsOk));
   $("descAirtable").addEventListener("change", schedulePreview);
+  $("descEmoji").addEventListener("change", schedulePreview);
   for (const id of ["dTable", "dEdited", "dProblems"]) $(id).addEventListener("change", () => { N.descPage = 0; renderDescriptions(); });
   $("dSearch").addEventListener("input", () => { N.descPage = 0; renderDescriptions(); });
   $("btnDescPrev").addEventListener("click", () => { N.descPage = Math.max(0, N.descPage - 1); renderDescriptions(); });

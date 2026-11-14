@@ -134,7 +134,7 @@ def scope_warnings(data, out_ids):
 
 def settings_from_dict(d):
     d = d or {}
-    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets", "description_include_airtable"}
+    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets", "description_include_airtable", "emoji_mode", "description_emoji_mode"}
     try:
         return fn.Settings(**{k: v for k, v in d.items() if k in known})
     except (ValueError, TypeError) as e:
@@ -167,7 +167,7 @@ def descriptions(data, names, settings):
     by_id = {f["field_id"]: f for f in data["fields"]}
     out = {}
     for f in data["fields"]:
-        gen = fd.generate_description(f, by_id, settings.description_include_airtable)
+        gen = fd.generate_description(f, by_id, settings.description_include_airtable, settings.description_emoji_mode)
         saved = ((names.get(f["field_id"]) or {}).get("description") or None)
         text = saved if saved is not None else gen
         out[f["field_id"]] = {"generated": gen, "saved": saved, "text": text, "edited": saved is not None and saved != gen,

@@ -51,7 +51,7 @@ A name must contain at least one character.
 
 ### NON_ASCII - Non-ASCII character
 
-Emoji, accented letters, smart quotes, zero-width characters and other non-ASCII characters are not allowed, because data exported to CSV without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters, the rest are removed.
+Emoji, accented letters, smart quotes, zero-width characters and other non-ASCII characters are not allowed, because data exported to CSV without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters; an emoji is removed, or replaced with its Unicode name (for example Hot Beverage), as chosen for that name; other characters are removed.
 
 - Applies to: planning_name, core_name, core_label
 - Pipeline step: char_cleanup (baseline, always checked)

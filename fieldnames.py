@@ -22,6 +22,8 @@ Limits marked PROVISIONAL below are not confirmed against Adobe's documentation 
 """
 import re
 import unicodedata
+
+import emojitext
 from collections import OrderedDict, defaultdict, namedtuple
 
 PASS, AUTO_FIXABLE, NEEDS_HUMAN = "PASS", "AUTO_FIXABLE", "NEEDS_HUMAN"
@@ -66,7 +68,7 @@ _TABLE_PREFIX = re.compile(r"^(\d+(?:\.\d+)*)[.)]?\s+(.+)$")
 # Options that can be set separately for each of the three names (planning_name, core_name, core_label). Anything not set falls back to the
 # general value (the first six) or to the default shown, so by default the names behave the same.
 BOOL_OPTS = ("table_swap", "char_cleanup", "leading_digits", "allow_leading_digit", "label_keep_quarter")
-TARGET_OPTS = BOOL_OPTS + ("digit_style", "digit_word", "max_len", "extra_allowed", "extra_blocked")
+TARGET_OPTS = BOOL_OPTS + ("digit_style", "digit_word", "max_len", "extra_allowed", "extra_blocked", "emoji_mode")
 MAX_LEN_CAP = {"planning_name": 250, "core_name": 1000, "core_label": 1000}   # Planning's 250 is documented by Adobe and cannot be exceeded
 _PUNCT_POOL = frozenset(chr(c) for c in range(33, 127) if not chr(c).isalnum() and chr(c) != "-")   # printable ASCII punctuation, never a space, letter, digit or hyphen
 
@@ -84,9 +86,13 @@ class Settings(object):
     configured separately: the three step toggles, allow_leading_digit, digit_style and digit_word, max_len, extra_allowed (names: extra
     punctuation that is allowed instead of removed) and extra_blocked (labels: extra punctuation that is removed)."""
     def __init__(self, table_swap=True, char_cleanup=True, leading_digits=True, table_prefix="end",
-                 digit_style="move_to_end", digit_word="", label_keep_quarter=True, targets=None, description_include_airtable=False):
+                 digit_style="move_to_end", digit_word="", label_keep_quarter=True, targets=None, description_include_airtable=False,
+                 emoji_mode="remove", description_emoji_mode="remove"):
         if table_prefix not in ("drop", "end", "plain") or digit_style not in ("move_to_end", "prefix_word"):
             raise ValueError("unknown preset")
+        if emoji_mode not in emojitext.EMOJI_MODES or description_emoji_mode not in emojitext.EMOJI_MODES:
+            raise ValueError("unknown emoji mode")
+        self.emoji_mode, self.description_emoji_mode = emoji_mode, description_emoji_mode    # what to do with an emoji: remove it, or replace it with its word
         self.table_swap, self.char_cleanup, self.leading_digits = bool(table_swap), bool(char_cleanup), bool(leading_digits)
         self.table_prefix, self.digit_style, self.digit_word = table_prefix, digit_style, (digit_word or "").strip()
         self.label_keep_quarter = bool(label_keep_quarter)
@@ -112,6 +118,10 @@ class Settings(object):
                     clean[k] = v
                 elif k == "digit_word":
                     clean[k] = str(v or "").strip()[:40]
+                elif k == "emoji_mode":
+                    if v not in emojitext.EMOJI_MODES:
+                        raise ValueError("unknown emoji mode")
+                    clean[k] = v
                 elif k == "max_len":
                     try:
                         n = int(v)
@@ -140,7 +150,7 @@ class Settings(object):
         o = self.targets.get(target) or {}
         if key in o:
             return o[key]
-        if key in ("table_swap", "char_cleanup", "leading_digits", "digit_style", "digit_word", "label_keep_quarter"):
+        if key in ("table_swap", "char_cleanup", "leading_digits", "digit_style", "digit_word", "label_keep_quarter", "emoji_mode"):
             return getattr(self, key)
         return {"max_len": PROFILES[target]["max_len"], "allow_leading_digit": False, "extra_allowed": "", "extra_blocked": ""}[key]
 
@@ -181,22 +191,22 @@ def delete_auto_chars(s, chars=None):
     return _squash("".join(c for c in s if c not in chars))
 
 
-def clean_name_chars(s, extra_allowed=""):
+def clean_name_chars(s, extra_allowed="", emoji_mode="remove"):
     """Names, the full proposal: keep A-Z a-z 0-9 space hyphen (and any punctuation the user allowed for this name). AUTO_DELETE_CHARS are
     deleted; '_' and a backslash become a space; accents become plain letters; everything else (emoji, other symbols, other non-ASCII) is
     deleted. Only the first part is AUTO_FIXABLE."""
     keep = frozenset(extra_allowed or "")
-    s = _translit(delete_auto_chars(s, AUTO_DELETE_CHARS - keep))
+    s = _translit(delete_auto_chars(emojitext.replace_emoji(s, emoji_mode), AUTO_DELETE_CHARS - keep))
     s = "".join(" " if c in "_\\" and c not in keep else c for c in s)
     s = re.sub(r"\s", " ", s)
     return _squash("".join(c for c in s if NAME_ALLOWED.match(c) or c in keep))
 
 
-def clean_label_chars(s, extra_blocked=""):
+def clean_label_chars(s, extra_blocked="", emoji_mode="remove"):
     """Labels: stay as close to the original as possible. Accents become plain letters, emoji and non-ASCII are removed,
     and LABEL_BLOCKLIST characters (and any the user chose to remove) are removed. Everything else is kept."""
     blocked = LABEL_BLOCKLIST | frozenset(extra_blocked or "")
-    s = re.sub(r"\s", " ", _translit(s))
+    s = re.sub(r"\s", " ", _translit(emojitext.replace_emoji(s, emoji_mode)))
     return _squash("".join(c for c in s if 32 <= ord(c) <= 126 and c not in blocked))
 
 
@@ -255,7 +265,7 @@ RULES = [
     Rule("EMPTY", "Name is empty", TARGETS, "baseline", True, _c_empty, "A name must contain at least one character.", "(blank)", "Budget"),
     Rule("NON_ASCII", "Non-ASCII character", TARGETS, "char_cleanup", True, _c_nonascii,
          "Emoji, accented letters, smart quotes, zero-width characters and other non-ASCII characters are not allowed, because data exported to CSV "
-         "without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters, the rest are removed.", "Café ✨ Budget", "Cafe Budget"),
+         "without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters; an emoji is removed, or replaced with its Unicode name (for example Hot Beverage), as chosen for that name; other characters are removed.", "Café ✨ Budget", "Cafe Budget"),
     Rule("WHITESPACE_CHAR", "Tab, new line or no-break space", TARGETS, "char_cleanup", True, _c_ws,
          "A no-break space (ASCII 160), tab, new line, vertical tab, form feed or carriage return must never appear in a name or label. Each is turned into a "
          "plain space (ASCII 32), and the spaces are then closed up. AUTO_FIXABLE.", "Total\\tCost", "Total Cost"),
@@ -308,12 +318,12 @@ def clean_table_name(old, settings):
     s = _translit(old).strip()
     m = _TABLE_PREFIX.match(s)
     if m:
-        num, rest = m.group(1).replace(".", "-"), clean_name_chars(m.group(2), settings.opt("planning_name", "extra_allowed"))
+        num, rest = m.group(1).replace(".", "-"), clean_name_chars(m.group(2), settings.opt("planning_name", "extra_allowed"), settings.opt("planning_name", "emoji_mode"))
         if not rest:
-            return clean_name_chars(old, settings.opt("planning_name", "extra_allowed"))
+            return clean_name_chars(old, settings.opt("planning_name", "extra_allowed"), settings.opt("planning_name", "emoji_mode"))
         s = {"drop": rest, "end": rest + " " + num, "plain": num + " " + rest}[settings.table_prefix]
     else:
-        s = clean_name_chars(s, settings.opt("planning_name", "extra_allowed"))
+        s = clean_name_chars(s, settings.opt("planning_name", "extra_allowed"), settings.opt("planning_name", "emoji_mode"))
     if s[:1].isdigit() and not (m and settings.table_prefix == "plain"):
         s = fix_leading_digits(s, settings.opt("planning_name", "digit_style"), settings.opt("planning_name", "digit_word")) or s
     return s
@@ -396,7 +406,8 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
         cur = new
     swapped_name = cur
     if settings.opt(target, "char_cleanup"):
-        new = clean_name_chars(cur, settings.opt(target, "extra_allowed")) if kind == "name" else clean_label_chars(cur, settings.opt(target, "extra_blocked"))
+        em = settings.opt(target, "emoji_mode")
+        new = clean_name_chars(cur, settings.opt(target, "extra_allowed"), em) if kind == "name" else clean_label_chars(cur, settings.opt(target, "extra_blocked"), em)
         if kind == "name":
             new = quarter_to_q1(new)
         elif not settings.opt(target, "label_keep_quarter"):

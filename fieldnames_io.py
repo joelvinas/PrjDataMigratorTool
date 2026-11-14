@@ -200,6 +200,8 @@ def main(argv=None):
     ap.add_argument("--target-option", action="append", default=[], metavar="NAME.OPTION=VALUE",
                     help="an option for one name only, e.g. planning_name.allow_leading_digit=true, core_name.max_len=200, planning_name.extra_allowed=&' "
                          "(names: planning_name, core_name, core_label; options: %s). Repeatable." % ", ".join(fn.TARGET_OPTS))
+    ap.add_argument("--emoji-mode", choices=("remove", "word"), default="remove", help="what to do with an emoji in names and labels: remove it (default) or replace it with its word")
+    ap.add_argument("--description-emoji-mode", choices=("remove", "word"), default="remove", help="the same, for generated descriptions")
     ap.add_argument("--include-airtable-description", action="store_true", help="append each field's own Airtable description to its generated description")
     ap.add_argument("--draft", action="store_true", help="preview field results even though some table names are not approved (the report says DRAFT)")
     ap.add_argument("--skip-table", action="append", default=[], help="table ID to treat as out of scope (repeatable)")
@@ -219,7 +221,8 @@ def main(argv=None):
     except ValueError as e:
         sys.exit("--target-option: %s" % e)
     st = fn.Settings(targets=per, table_swap=not a.no_table_swap, char_cleanup=not a.no_char_cleanup, leading_digits=not a.no_leading_digits,
-                     description_include_airtable=a.include_airtable_description, table_prefix=a.table_prefix, digit_style=a.digit_style, digit_word=a.digit_word, label_keep_quarter=not a.label_convert_quarter)
+                     description_include_airtable=a.include_airtable_description, emoji_mode=a.emoji_mode, description_emoji_mode=a.description_emoji_mode,
+                     table_prefix=a.table_prefix, digit_style=a.digit_style, digit_word=a.digit_word, label_keep_quarter=not a.label_convert_quarter)
     db = load_db(a.db, a.base)
     if not db["fields"]:
         sys.exit("No fields found for base %s." % a.base)
@@ -234,7 +237,7 @@ def main(argv=None):
     fbi = {f["field_id"]: f for f in db["fields"]}
     descs = {}
     for fid, f in fbi.items():
-        gen = fd.generate_description(f, fbi, st.description_include_airtable)
+        gen = fd.generate_description(f, fbi, st.description_include_airtable, st.description_emoji_mode)
         saved = db["saved_descriptions"].get(fid)
         text = saved if saved is not None else gen
         descs[fid] = {"text": text, "source": "saved" if saved is not None else "generated", "problems": [p["rule"] for p in fd.validate_description(text)]}

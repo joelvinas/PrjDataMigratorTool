@@ -15,6 +15,8 @@ checks it, so a stricter validator (including a length limit once one is confirm
 """
 import json
 
+import emojitext
+
 # UNCONFIRMED. Adobe's documentation gives no length limit for field descriptions, and one is on the sandbox test plan. Leave None (no length check)
 # until it is confirmed, then set it here (or pass max_len to validate_description).
 DESCRIPTION_MAX_LEN = None
@@ -99,15 +101,22 @@ def parse_lineage(text):
     return {"source": source, "origins": origins, "rest": rest.strip()}
 
 
-def field_origins(f, fields_by_id):
+def _no_emoji(text, mode):
+    """Remove (or spell out) any emoji in a name or text; text without an emoji is returned unchanged."""
+    if not emojitext.has_emoji(text):
+        return text
+    return " ".join(emojitext.replace_emoji(text, mode).split())
+
+
+def field_origins(f, fields_by_id, emoji_mode="remove"):
     """The original (table, field) names this field's data comes from. A plain field: itself. A lookup or rollup: the field it reads in the linked
     table, then the link field it reads through. A count: the link field. A formula: the fields it references. Anything that cannot be resolved
     falls back to the field itself, so every field has at least one origin."""
-    own = [(f["table_name"], f["field_name"])]
+    own = [(_no_emoji(f["table_name"], emoji_mode), _no_emoji(f["field_name"], emoji_mode))]
 
     def ref(fid):
         g = fields_by_id.get(fid) if fid else None
-        return (g["table_name"], g["field_name"]) if g else None
+        return (_no_emoji(g["table_name"], emoji_mode), _no_emoji(g["field_name"], emoji_mode)) if g else None
 
     out = []
     t = f.get("data_type")
@@ -127,12 +136,13 @@ def field_origins(f, fields_by_id):
     return out or own
 
 
-def generate_description(f, fields_by_id, include_airtable_description=False):
-    """The generated description for one field (a row from airtable_fields). Deterministic."""
+def generate_description(f, fields_by_id, include_airtable_description=False, emoji_mode="remove"):
+    """The generated description for one field (a row from airtable_fields). Deterministic. Emoji in the names (and in Airtable's own description)
+    are removed, or spelled out as their word when emoji_mode is 'word'."""
     rest = None
     if include_airtable_description and (f.get("field_description") or "").strip():
-        rest = "Airtable description: " + f["field_description"]
-    return format_lineage("Airtable", field_origins(f, fields_by_id), rest)
+        rest = "Airtable description: " + _no_emoji(f["field_description"], emoji_mode)
+    return format_lineage("Airtable", field_origins(f, fields_by_id, emoji_mode), rest)
 
 
 def validate_description(text, max_len=None):

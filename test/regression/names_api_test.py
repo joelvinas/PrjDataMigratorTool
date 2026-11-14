@@ -68,6 +68,9 @@ s, r = post("/api/names/settings", A(settings={"label_keep_quarter": False}, rea
 s, r = post("/api/names/settings", A(settings={"targets": {"core_name": {"max_len": 40}, "planning_name": {"allow_leading_digit": True}}}, reason="separate"))
 check("per-name settings are saved through the API and returned", s == 200 and r["settings"]["targets"]["core_name"]["max_len"] == 40 and r["settings"]["targets"]["planning_name"]["allow_leading_digit"] is True, r.get("error"))
 s, e = post("/api/names/preview", {"base_id": BASE, "settings": {"targets": {"planning_name": {"max_len": 5000}}}}); check("an invalid per-name setting is refused", s == 400 and "maximum length" in e["error"].lower(), e)
+s_, r = post("/api/names/settings", A(settings={"emoji_mode": "word", "description_emoji_mode": "word", "targets": {"core_label": {"emoji_mode": "remove"}}}, reason="spell emoji out"))
+check("the emoji options are saved through the API", s_ == 200 and r["settings"]["emoji_mode"] == "word" and r["settings"]["description_emoji_mode"] == "word" and r["settings"]["targets"]["core_label"]["emoji_mode"] == "remove", r.get("error"))
+check("an invalid emoji mode is refused", post("/api/names/preview", {"base_id": BASE, "settings": {"emoji_mode": "keep"}})[0] == 400)
 post("/api/names/settings", A(settings={}))
 
 # ---- field decisions
