@@ -60,6 +60,7 @@ airtable-migration-control/
 ├── emojitext.py                 emoji handling shared by names, labels and descriptions: remove, or replace with the Unicode name
 ├── loadplan.py                  the load plan: everything the migration would create in Workfront, with temporary IDs and a status (pure)
 ├── loadrun.py                   runs a plan: sandbox by default, idempotent, dry run, one failure never stops it (pure; real transports not built)
+├── loadconfig.py                reads the Workfront credentials from config.json; never shows or stores a secret
 ├── loader.py                    the loader command line: plan and dry-run (read-only; nothing is sent to Workfront)
 ├── fieldgroups.py               consolidation rules: validate a group, merged members, survivors (pure)
 ├── fieldcompare.py              compares the values of fields in one table from a saved record file: counts and record IDs only (pure)
@@ -90,6 +91,9 @@ airtable-migration-control/
 │   ├── migration_008_add_table_scope_and_targets.sql   Field names page: table_scope, table_targets (human decisions about scope and target)
 │   ├── migration_009_add_field_groups.sql   Field names page: field_groups, field_group_members (field consolidation)
 │   ├── migration_010_add_load_id_map.sql   PROPOSED, not yet applied: load_id_map (Workfront IDs against temporary IDs, per environment)
+│   ├── migration_011_add_table_core_objects.sql    PROPOSED, not yet applied: table_core_objects
+│   ├── migration_012_add_core_target_type.sql      PROPOSED, not yet applied: field_names.core_target_type (one new column)
+│   ├── migration_013_add_field_relationships.sql   PROPOSED, not yet applied: field_relationships
 │   └── apply_migrations.py             applies all nine to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
@@ -540,7 +544,9 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 - **`dry-run`** walks the plan the way a real run would and says what it would create. The environment defaults to **sandbox**; a production dry run is allowed because it changes nothing, but a real production run will need the exact phrase `CREATE IN PRODUCTION`.
 - **The runner's rules** are built and tested with a fake transport: a Workfront ID is written back against the temporary ID at once, so a restart creates nothing twice; one failed item never stops the run (its message has any credential removed, and what depends on it is skipped); dry run is the default.
 - **`run` is refused** with an explanation: creating anything is not implemented, because the request shapes for Workfront Planning and Workfront Core are not verified and no credentials are configured.
-- **Proposed schema:** [sql/migration_010_add_load_id_map.sql](sql/migration_010_add_load_id_map.sql) adds `load_id_map` (Workfront IDs against temporary IDs, per environment, with option rows and their order). It is **not applied** and not in the schema library; nothing needs it yet.
+- **Select option names** follow the label rules; a name that breaks them is put on hold with the proposed repair.
+- **Credentials:** the `workfront` section of `config.json` (see `config.example.json`) holds the Core sandbox credential and the Planning bearer token. `python loader.py config` says only whether each is configured. They are never stored, logged or shown in the browser. Nothing uses them yet.
+- **Proposed schema (approved in principle, not applied):** [migration 010](sql/migration_010_add_load_id_map.sql) `load_id_map` (Workfront IDs against temporary IDs, per environment); [011](sql/migration_011_add_table_core_objects.sql) `table_core_objects` (project, request or task per table); [012](sql/migration_012_add_core_target_type.sql) the column `field_names.core_target_type` (the Core data type, beside the Planning one); [013](sql/migration_013_add_field_relationships.sql) `field_relationships` (links defined by the schema, which side is the real relationship, who approved). None is in the schema library until you confirm it is applied.
 
 ## Troubleshooting
 

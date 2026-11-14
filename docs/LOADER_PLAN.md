@@ -9,7 +9,7 @@ Stage 4 takes the approved names, the scope and target decisions, the consolidat
 | Step | What | Status |
 | --- | --- | --- |
 | 4a | **The load plan and the dry run**: everything that would be created, with temporary IDs and a status; the runner's rules (sandbox by default, idempotent, one failure never stops a run) | **Built** |
-| 4b | **Field creation in the sandbox**: real Planning and Core transports (separate modules, each with its own authentication), the ID map table, the crosswalk written back, every call logged against its temporary ID | Waiting on the decisions and checks below |
+| 4b | **Field creation in the sandbox**: real Planning and Core transports (separate modules, each with its own authentication), the ID map table, the crosswalk written back, every call logged against its temporary ID | Waiting on the owner applying migrations 010 to 013 and on the request-shape checks below |
 | 4c | **Record load order and the record ID map**: Airtable record ID to Core object ID and Planning record ID, so links and attachments can be reattached | Not started; needs a schema proposal |
 | 4d | **Attachments** as native Core documents (link expiry, download behavior against real Airtable is untested) | Not started |
 | 4e | **The Core to Planning publish pattern**: the write-once Planning ID field, the sync status, idempotent publish, the reconciliation report | Not started; needs sandbox proof first |
@@ -51,15 +51,17 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 3. Core's **PARAM creation call**, its required fields and the API version in your instance.
 4. Credentials: whether you will use OAuth2 Server-to-Server for both systems, and where they live.
 
-## Decisions I need from you
+## Decisions made (14 November 2026)
 
-1. **Core object type per table.** A table with a Core presence becomes a project, a request or a task. Where should that be recorded? (It needs a column or table: a schema proposal.) Until it is decided, the Core form stays on hold.
-2. **One target data type or two?** The spreadsheet has one `new_dataType` per field, but Planning and Core have different type sets. Should the importer take a separate Core type?
-3. **Derived fields** (formulas, lookups, rollups, counts, automatic numbers, created and modified times): per field, drop, rebuild, or load the values? They are on hold in the plan until decided.
-4. **Relationships** (link fields): which side of each two-way pair becomes the real Planning relationship, and which lookups and rollups are dropped or rebuilt.
-5. **Select option names:** do they follow the same ASCII rule as field names? Today they are only flagged.
-6. **The ID map table** (migration 010, proposed in `sql/migration_010_add_load_id_map.sql`): approve it, or change it. It holds Workfront IDs against temporary IDs per environment, including option rows with their position. It is needed for 4b, not for the plan or dry run.
-7. **Credentials and sandbox:** is there a sandbox for both Planning and Core, and will you create the OAuth2 applications?
+1. **Core object type per table:** recorded in a new table, `table_core_objects` (project, request or task, with who, when and why). Proposed in [migration 011](../sql/migration_011_add_table_core_objects.sql); not applied. Until a table has a row, its Core form stays on hold.
+2. **A data type per system:** a new column, `field_names.core_target_type`, beside the existing `target_type` (which stays the Planning type). Proposed in [migration 012](../sql/migration_012_add_core_target_type.sql); not applied. The importer does not read a Core type yet.
+3. **Derived fields** (formulas, lookups, rollups, counts, automatic numbers, created and modified times): **on hold**. They stay on hold in the plan.
+4. **Relationships:** defined by the Airtable schema and stored in the database, in `field_relationships` (one row per link field, its paired field, cardinality, which side is the real relationship, and who approved it). Proposed in [migration 013](../sql/migration_013_add_field_relationships.sql); not applied. Link fields stay on hold until it exists.
+5. **Select option names follow the Core label rules** (built): they keep the original text except Adobe's unsupported characters, emoji and non-ASCII characters. An option name that breaks them is put on hold with the proposed repair; nothing renames on its own. Approving an option name is not stored yet.
+6. **Migration 010 (`load_id_map`) is approved.** It is applied by the owner; it is folded into the schema library, the embedded DDL and `apply_migrations.py` only after the owner confirms it is applied.
+7. **Credentials:** a Core sandbox exists. The Core credential and the Planning bearer token go in `config.json` (see `config.example.json`, section `workfront`; `python loader.py config` says yes or no for each). They are never stored, logged or sent to the browser, and `loadconfig.redact()` removes them from messages. Nothing uses them yet.
+
+Still open: whether a Planning sandbox exists (the Planning bearer token is named, its environment is not), and the request shapes below.
 
 ## The sandbox test plan (from the Migration Design prompt)
 
