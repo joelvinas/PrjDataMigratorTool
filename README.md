@@ -78,8 +78,8 @@ airtable-migration-control/
 │   ├── migration_005_add_form_specs.sql   Stage 2: form_specs, form_items, form_logic, form_links
 │   ├── migration_006_add_automation_specs.sql   Stage 3: automation_specs, automation_items, automation_logic, automation_field_refs, automation_links
 │   ├── migration_007_add_field_names.sql   Field name validator: field_names, table_names, name_events
-│   ├── migration_008_add_table_scope_and_targets.sql   PROPOSED, not yet applied: table_scope, table_targets (the Field names page reads table_scope when it exists)
-│   └── apply_migrations.py             applies all seven to an existing database (safe to repeat)
+│   ├── migration_008_add_table_scope_and_targets.sql   Field names page: table_scope, table_targets (human decisions about scope and target)
+│   └── apply_migrations.py             applies all eight to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
@@ -352,7 +352,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 Steps 1 and 2 are on Setup (`/setup`); steps 3 to 6 are on Stage 1 (`/stage1`), where the Base ID picker is repeated at the top. The base you pick on either page is kept as you move between them.
 
-1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 21 tables, all with 0 rows, and foreign keys on.
+1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 23 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -457,7 +457,7 @@ Airtable's API does not return automations at all, so, like forms, they are reco
 
 ## Field name validator
 
-Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, the import, the reports, the command line and the review page (`/names`, with saved approvals and the abandon action) are built and tested. Not built yet: setting a table's scope or target from the page (see Table scope below), descriptions generated from the lineage syntax, and a comparison of values between duplicate-group members.
+Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, the import, the reports, the command line and the review page (`/names`, with saved approvals and the abandon action) are built and tested. Not built yet: descriptions generated from the lineage syntax, an HTML report, and a comparison of values between duplicate-group members.
 
 **Three targets, each validated separately:** the Workfront Planning field name, the Workfront Core custom field name, and the Workfront Core custom field label. Names are ASCII-safe (an allowlist of letters, digits, spaces and hyphens, because data exported to CSV without the right encoding corrupts anything else), may not start with a digit, and must be unique within a table. Labels keep the original text except the characters Adobe documents as unsupported in labels (`[ ] ( ) : { }` and control characters) and emoji. The full list of rules, with an example for each, is in [docs/FIELD_NAMING_RULES.md](docs/FIELD_NAMING_RULES.md); it is generated from the same rule list the validator runs, so the two cannot disagree.
 
@@ -477,14 +477,14 @@ A proposed repair is shown beside the original for both non-PASS verdicts, and n
 
 - **A. Rules and presets.** The Planning name, the Core name and the Core label are configured separately, one column each (by default they behave the same). Each has its own step toggles (table-name swap, character cleanup, leading digits), maximum length (Planning cannot exceed Adobe's documented 250), whether a name may start with a digit, the leading-digit preset and word, and extra punctuation to allow (names) or to remove (labels); labels also choose whether to keep the `1Q` style. The table number prefix preset is shared. The count under each step is how many names it changes for that column. Changing a control previews the effect without saving; decisions can only be made under saved settings, so every run can be reproduced.
 - **B. Import.** Upload the renamed-names CSV (described below). Problems are listed on the page; a name you already approved is never overwritten.
-- **C. Table names.** Approve every in-scope table name first. A table with no scope decision is shown as **undecided**, which is different from **out** (skipped, no decision needed); undecided tables are still checked. Approve one at a time (typing a different name if you want one), or approve all unchanged or all auto-fixable names in one click. Field review stays locked until every in-scope table is approved.
+- **C. Table names.** Approve every in-scope table name first. A table with no scope decision is shown as **undecided**, which is different from **out** (skipped, no decision needed); undecided tables are still checked. Set a table's scope and target here too. Approve one at a time (typing a different name if you want one), or approve all unchanged or all auto-fixable names in one click. Field review stays locked until every in-scope table is approved.
 - **D. Field review.** One grid per name (Planning name, Core name, Core label) with the original, your imported name, the proposed repair, the check and reasons, the data presence and the status. Approve a name as proposed or type another; the server re-checks it, including its duplicate group, and refuses a name that would still collide. Flag a name for later, or withdraw an approval with a reason. Approve everything that passes or is auto-fixable in one click. An approved name that no longer passes (because a setting changed) is flagged.
 - **E. Duplicate groups.** Each group is one block with every member's original and repaired name side by side and its data presence. Rename a member or abandon one that has no values; the check runs again on what remains.
 - **F. Reports.** The CSVs, the summary and the rules document, or all of them as a zip.
 
 **Abandon** is enforced by the server, not just the page: it needs a reason, and only a field that was profiled since it was last seen in the schema, has no values and is not a checkbox qualifies. Restoring an abandoned field is also recorded. Every approval, withdrawal, flag, import, abandon and settings change is a row in `name_events` (append-only, with who and when).
 
-**Table scope (proposed, not yet applied).** Which tables are in scope is a human decision kept apart from the ingested table definition, so a re-ingest can never overwrite it. [sql/migration_008_add_table_scope_and_targets.sql](sql/migration_008_add_table_scope_and_targets.sql) proposes `table_scope` (in or out, who, when, why; no row means undecided) and `table_targets` (Planning only, or Planning plus Core). It is not yet in the schema library, the embedded DDL or `apply_migrations.py`. Until it exists, every table shows as undecided and is validated. The page already reads `table_scope` when present.
+**Table scope and target (migration 008).** Which tables are in scope is a human decision kept apart from the ingested table definition, so a re-ingest can never overwrite it. `table_scope` records in or out with who, when and why (no row means **undecided**, which is different from out), and `table_targets` records whether an in-scope table lands in Workfront Planning only or in Planning plus Core. Both are set from section C of the page; **Out** needs a reason, and every change is also written to `name_events`. Out-of-scope tables and their fields are skipped, and any in-scope field that links to, or names, an out-of-scope table is listed for a human decision, because a link to a dropped table has nowhere to point. An existing database gets the tables from `python sql/apply_migrations.py path/to/your.db` (back it up first); until then every table shows as undecided and the scope buttons are off.
 
 **Command line** (read-only: the database is opened read-only and no record value is read):
 
@@ -522,7 +522,7 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 | Stage 1: Data | `/stage1` | Schema, load order, profiling, record and attachment capture (steps 3 to 6, plus the open runbook items) | Built |
 | Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
-| Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14); table scope and descriptions still to come |
+| Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14); descriptions still to come |
 | Stage 4 (anticipated): Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning | Slot in the side panel only; `workfront_fields` and `field_crosswalk` exist, empty |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 

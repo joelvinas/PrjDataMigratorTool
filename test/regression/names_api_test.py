@@ -39,7 +39,7 @@ s, st_ = get("/api/status"); check("server version matches the pages", st_["vers
 # ---- review, the gate and scope
 s, rv = get("/api/names/review?base_id=" + BASE)
 check("review: gate closed, no fields yet, all tables undecided and pending", s == 200 and rv["gate"]["ready"] is False and rv["fields"] == [] and len(rv["gate"]["pending"]) == 3
-      and rv["scope_counts"] == {"in": 0, "out": 0, "undecided": 3} and rv["scope_available"] is False, rv["gate"])
+      and rv["scope_counts"] == {"in": 0, "out": 0, "undecided": 3} and rv["scope_available"] is True, rv["gate"])
 check("settings default when none are saved", rv["settings_saved"] is False and rv["settings"]["table_prefix"] == "end")
 check("a bad base ID is refused", get("/api/names/review?base_id=nope")[0] == 400 and get("/api/names/review")[0] == 400)
 check("an unknown base has no fields", get("/api/names/review?base_id=appNothingHere1")[0] == 404)
@@ -112,6 +112,21 @@ z = zipfile.ZipFile(io.BytesIO(d)); check("zip holds every report", s == 200 and
 s, d, h = raw("GET", "/api/names/report?base_id=" + BASE + "&file=names_report.csv")
 check("a csv download opens in Excel as UTF-8 and holds approved names", s == 200 and d.startswith(b"\xef\xbb\xbf") and b"Notes" in d and "attachment" in h["Content-Disposition"])
 check("an unknown report file is refused (never a path)", raw("GET", "/api/names/report?base_id=" + BASE + "&file=../server.py")[0] == 404)
+
+# ---- scope and target decisions
+TC = "tblNc0000000001"
+check("a scope decision needs initials", post("/api/names/tables/scope", {"base_id": BASE, "items": [{"table_id": TC, "decision": "in"}]})[0] == 400)
+s_, e = post("/api/names/tables/scope", A(items=[{"table_id": TC, "decision": "out"}])); check("'out' needs a reason", s_ == 400 and "reason" in e["error"], e)
+s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNb0000000001", "decision": "out", "reason": "not migrating purchase orders"}]))
+check("a table can be taken out of scope with a reason; it is skipped and its links are flagged", s_ == 200 and r["review"]["scope_counts"]["out"] == 1
+      and {(w["field_id"], w["kind"]) for w in r["review"]["scope_warnings"]} == {("fldN06", "link"), ("fldN07", "link")}, r.get("error") or r["review"]["scope_counts"])
+check("the out table has no fields in the review and no name decision", all(f["table_id"] != "tblNb0000000001" for f in r["review"]["fields"]))
+s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNb0000000001", "decision": "clear"}])); check("clearing returns it to undecided", s_ == 200 and r["review"]["scope_counts"]["out"] == 0 and not r["review"]["scope_warnings"])
+s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNa0000000001", "decision": "in", "target": "planning_and_core", "reason": "has attachments"}]))
+check("a table can be in scope and land in Planning plus Core", s_ == 200 and {t["table_id"]: t for t in r["review"]["tables"]}["tblNa0000000001"]["target"] == "planning_and_core"
+      and r["review"]["scope_counts"]["in"] == 1)
+check("an unknown table is refused", post("/api/names/tables/scope", A(items=[{"table_id": "tblNope", "decision": "in"}]))[0] == 400)
+post("/api/names/tables/scope", A(items=[{"table_id": "tblNa0000000001", "decision": "clear", "target": "clear"}]))
 
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row

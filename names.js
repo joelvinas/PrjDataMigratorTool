@@ -178,6 +178,42 @@ function scopeTag(t) {
   if (tip) n.title = tip;
   return n;
 }
+/* Scope: who decided and the controls to decide. Undecided (no row) is different from out; the controls need migration 008. */
+function scopeCell(t, locked) {
+  const R = N.R, td = el("td", {}, scopeTag(t));
+  if (!R.scope_available) { td.appendChild(el("div", { class: "hint", text: "Scope decisions need migration 008" })); return td; }
+  const set = (decision) => decide("/api/names/tables/scope", { items: [{ table_id: t.table_id, decision, reason: "set from the page" }] }, "tablesMessage", "Scope saved.");
+  const row = el("div", { class: "row" });
+  row.appendChild(btn("In", () => set("in"), { disabled: locked || t.scope === "in" }));
+  row.appendChild(btn("Out", () => { N.open = { kind: "scope_out", table_id: t.table_id }; render(); }, { disabled: locked || t.scope === "out" }));
+  if (t.scope !== "undecided") row.appendChild(btn("Clear", () => set("clear"), { disabled: locked }));
+  td.appendChild(row);
+  if (t.scope === "in" && R.targets_available) {
+    const sel = el("select", { "aria-label": "Where " + t.old + " lands", disabled: locked || null },
+      el("option", { value: "", text: "Target not decided" }), el("option", { value: "planning_only", text: "Planning only" }), el("option", { value: "planning_and_core", text: "Planning plus Core" }));
+    sel.value = t.target || "";
+    sel.addEventListener("change", () => { if (sel.value) decide("/api/names/tables/scope", { items: [{ table_id: t.table_id, target: sel.value }] }, "tablesMessage", "Target saved."); });
+    td.appendChild(sel);
+  }
+  return td;
+}
+function scopeOutRow(t) {
+  const input = el("input", { type: "text", class: "wide", maxlength: "500", placeholder: "Why is this table out of scope? (required)", "aria-label": "Reason" });
+  setTimeout(() => input.focus(), 0);
+  return el("tr", { class: "reason" }, el("td", { colspan: "8" }, el("div", { class: "row" }, el("b", { text: "Take " + t.old + " out of scope" }), input,
+    btn("Confirm", () => decide("/api/names/tables/scope", { items: [{ table_id: t.table_id, decision: "out", reason: input.value }] }, "tablesMessage", "Table taken out of scope."), {}),
+    btn("Cancel", () => { N.open = null; render(); }))));
+}
+function renderScopeWarnings() {
+  const box = $("scopeWarnings"), w = N.R.scope_warnings || [];
+  box.replaceChildren();
+  if (!w.length) return;
+  box.appendChild(el("div", { class: "note warn" }, el("b", { text: w.length + " field(s) in in-scope tables link to, or name, a table that is out of scope" }),
+    el("div", { text: "A link to a dropped table has nowhere to point. Decide for each: bring the table back in scope, drop the field, or change what it points at." }),
+    el("div", { style: "overflow-x:auto" }, el("table", { class: "grid" }, el("thead", {}, el("tr", {}, ["Field", "In table", "Out-of-scope table", "How"].map((h) => el("th", { text: h })))),
+      el("tbody", {}, w.map((x) => el("tr", {}, el("td", { text: x.field_name }), el("td", { text: x.table_name }), el("td", { text: x.out_table_name }),
+        el("td", { text: x.kind === "link" ? "links to it" : "its name mentions it" }))))))));
+}
 function verdictTag(v) { const x = VERDICTS[v]; return x ? tag(x[0], x[1]) : tag("-"); }
 
 function renderTables() {
@@ -190,15 +226,16 @@ function renderTables() {
     ? pending + " of " + inScope.length + " table name(s) still need approval before fields can be reviewed."
     : "All " + inScope.length + " table name(s) are approved. Field review is open.";
   const locked = isPreview();
+  renderScopeWarnings();
   $("btnApproveUnchanged").disabled = locked; $("btnApproveAutoTables").disabled = locked;
   body.replaceChildren();
   for (const t of R.tables) {
     const row = el("tr", { class: t.scope === "out" ? "muted" : "" });
-    row.appendChild(el("td", {}, scopeTag(t)));
+    row.appendChild(scopeCell(t, locked));
     row.appendChild(el("td", {}, el("div", { text: t.old }), el("div", { class: "hint", text: t.table_id })));
     row.appendChild(el("td", { class: "num", text: fmt(t.field_count) }));
     if (t.scope === "out") {
-      row.appendChild(el("td", { colspan: "5", class: "hint", text: "Out of scope: skipped, no name decision needed." }));
+      row.appendChild(el("td", { colspan: "5", class: "hint", text: "Out of scope" + (t.scope_by ? " (" + t.scope_by + (t.scope_reason ? ": " + t.scope_reason : "") + ")" : "") + ": skipped, no name decision needed." }));
       body.appendChild(row); continue;
     }
     row.appendChild(el("td", {}, verdictTag(t.verdict), t.rules.length ? el("div", { class: "hint", text: ruleText(t.rules) }) : null));
@@ -211,6 +248,7 @@ function renderTables() {
     if (t.approved) actions.appendChild(btn("Withdraw", () => decide("/api/names/tables/revoke", { table_ids: [t.table_id], reason: "withdrawn from the page" }, "tablesMessage", "Approval withdrawn."), { disabled: locked }));
     row.appendChild(actions);
     body.appendChild(row);
+    if (N.open && N.open.kind === "scope_out" && N.open.table_id === t.table_id) body.appendChild(scopeOutRow(t));
   }
 }
 

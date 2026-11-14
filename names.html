@@ -62,8 +62,9 @@
 <!-- C: table names (the gate) -->
 <section class="card" id="tablesCard">
   <h2><span class="num">C</span> Table names</h2>
-  <p class="hint">Approve every table name before any field is reviewed: field names that mention a table (lookups, rollups, links) follow the approved table name. A table with no scope decision is <b>undecided</b>, which is different from <b>out</b>; undecided tables are still checked, and out tables are skipped.</p>
+  <p class="hint">Approve every table name before any field is reviewed: field names that mention a table (lookups, rollups, links) follow the approved table name. A table with no scope decision is <b>undecided</b>, which is different from <b>out</b>; undecided tables are still checked, and out tables are skipped. Use <b>In</b>, <b>Out</b> (a reason is required) or <b>Clear</b> to record the decision, and choose where an in-scope table lands: Workfront Planning only, or Planning plus Core.</p>
   <div id="gateNote" class="note"></div>
+  <div id="scopeWarnings"></div>
   <div class="row">
     <button id="btnApproveUnchanged" type="button">Approve all unchanged names</button>
     <button id="btnApproveAutoTables" type="button">Approve all auto-fixable names</button>

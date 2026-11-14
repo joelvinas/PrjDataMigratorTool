@@ -43,7 +43,7 @@ c.commit()
 B = "appS"
 rv = st.review(c, B)
 check("gate is closed at first: no fields, every in-scope table pending", rv["gate"]["ready"] is False and rv["fields"] == [] and len(rv["gate"]["pending"]) == 4, rv["gate"])
-check("every table is undecided while no scope store exists", rv["scope_available"] is False and {t["scope"] for t in rv["tables"]} == {"undecided"} and rv["scope_counts"]["undecided"] == 4)
+check("every table is undecided until a scope decision is made", {t["scope"] for t in rv["tables"]} == {"undecided"} and rv["scope_counts"]["undecided"] == 4)
 check("the other base is not mixed in", {t["table_id"] for t in rv["tables"]} == {"tA", "tB", "tC", "tD"})
 tb = {t["table_id"]: t for t in rv["tables"]}
 check("table verdicts: unchanged PASS, PO#s AUTO_FIXABLE, number prefix NEEDS_HUMAN", tb["tA"]["verdict"] == "PASS" and tb["tB"]["verdict"] == "AUTO_FIXABLE" and tb["tB"]["suggested"] == "POs"
@@ -153,15 +153,52 @@ check("invalid per-name settings are refused with a reason", (raises(st.save_set
 check("the review reports the per-name settings", st.review(c, B)["settings"]["targets"]["planning_name"]["max_len"] == 120)
 st.save_settings(c, B, {}, "JV", "back to defaults")
 
-# ---- scope (the later table_scope store): out tables are skipped and not part of the gate; undecided stays visible
-c.executescript("""CREATE TABLE table_scope (base_id TEXT NOT NULL, table_id TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('in','out')),
-                   decided_by TEXT, decided_at TIMESTAMP, reason TEXT, PRIMARY KEY (base_id, table_id));
-                   INSERT INTO table_scope VALUES ('appS','tD','out','JV','2026-02-01','not needed'), ('appS','tA','in','JV','2026-02-01','core table');""")
+# ---- scope and target decisions (migration 008)
+check("nothing is decided yet: every table is undecided", st.review(c, B)["scope_available"] and st.review(c, B)["scope_counts"] == {"in": 0, "out": 0, "undecided": 4})
+check("a scope decision needs initials", raises(st.set_scope, c, B, " ", [{"table_id": "tD", "decision": "out", "reason": "x"}]) is not None)
+e = raises(st.set_scope, c, B, "JV", [{"table_id": "tD", "decision": "out"}])
+check("'out' needs a reason", e is not None and "reason" in e.message, e and e.message)
+check("an unknown table or decision is refused", raises(st.set_scope, c, B, "JV", [{"table_id": "tNOPE", "decision": "in"}]) is not None
+      and raises(st.set_scope, c, B, "JV", [{"table_id": "tA", "decision": "maybe"}]) is not None)
+st.set_scope(c, B, "JV", [{"table_id": "tD", "decision": "out", "reason": "not needed in Workfront"}, {"table_id": "tA", "decision": "in", "reason": "core table", "target": "planning_and_core"}])
 rv = st.review(c, B); tb = {t["table_id"]: t for t in rv["tables"]}
 check("scope badges: in, out and undecided are different things", rv["scope_available"] and tb["tA"]["scope"] == "in" and tb["tD"]["scope"] == "out"
-      and tb["tB"]["scope"] == "undecided" and rv["scope_counts"] == {"in": 1, "out": 1, "undecided": 2})
+      and tb["tB"]["scope"] == "undecided" and rv["scope_counts"] == {"in": 1, "out": 1, "undecided": 2}, rv["scope_counts"])
+check("scope records who, when and why", c.execute("select decided_by, reason from table_scope where table_id='tD'").fetchone()[:] == ("JV", "not needed in Workfront") and tb["tD"]["scope_reason"] == "not needed in Workfront")
+check("target is recorded for an in-scope table", tb["tA"]["target"] == "planning_and_core" and c.execute("select target from table_targets where table_id='tA'").fetchone()[0] == "planning_and_core")
 check("an out-of-scope table and its fields are skipped; undecided ones are validated", "f10" not in {f["field_id"] for f in rv["fields"]} and "f8" in {f["field_id"] for f in rv["fields"]}
       and tb["tD"]["verdict"] is None and rv["in_scope_tables"] == 3)
+check("an out-of-scope table does not hold the gate", "tD" not in rv["gate"]["pending"])
+check("a table that is out has no target", raises(st.set_scope, c, B, "JV", [{"table_id": "tD", "target": "planning_only"}]) is not None)
+check("an invalid target is refused", raises(st.set_scope, c, B, "JV", [{"table_id": "tA", "target": "everywhere"}]) is not None)
+ev = [dict(x) for x in c.execute("select * from name_events where subject_id in ('tA','tD') and target in ('scope','target') order by event_id")]
+check("scope and target decisions are in the audit trail", [(x["subject_id"], x["target"], x["event_type"], x["new_value"]) for x in ev] ==
+      [("tD", "scope", "reject", "out"), ("tA", "scope", "approve", "in"), ("tA", "target", "approve", "planning_and_core")], ev)
+
+# fields that point at, or name, a table that is out of scope are flagged for a human decision
+st.set_scope(c, B, "JV", [{"table_id": "tB", "decision": "out", "reason": "dropped"}])
+w = st.review(c, B)["scope_warnings"]
+check("a link to an out-of-scope table, and a lookup through it, are flagged", {(x["field_id"], x["kind"], x["out_table_id"]) for x in w} == {("f6", "link", "tB"), ("f5", "link", "tB")}, w)
+st.set_scope(c, B, "JV", [{"table_id": "tB", "decision": "clear", "reason": "undo"}])
+check("clearing returns a table to undecided (no row), not to in or out", c.execute("select count(*) from table_scope where table_id='tB'").fetchone()[0] == 0
+      and {t["table_id"]: t for t in st.review(c, B)["tables"]}["tB"]["scope"] == "undecided" and not st.review(c, B)["scope_warnings"])
+st.set_scope(c, B, "JV", [{"table_id": "tC", "decision": "in"}, {"table_id": "tC", "target": "clear"}])
+st.set_scope(c, B, "JV", [{"table_id": "tA", "target": "clear"}])
+check("a target can be cleared", c.execute("select count(*) from table_targets").fetchone()[0] == 0)
+c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values ('appS','tA','Orders','fM','Hidden Total','number', ?)", (T1,)); c.commit()
+w = st.review(c, B)["scope_warnings"]
+check("a field name that mentions an out-of-scope table by name is flagged too", {(x["field_id"], x["kind"]) for x in w} == {("fM", "mention")}, w)
+c.execute("delete from airtable_fields where field_id='fM'"); c.commit()
+c.executescript("DROP TABLE table_targets; DROP TABLE table_scope;")
+rv = st.review(c, B)
+check("without migration 008 the review still works and every table is undecided", rv["scope_available"] is False and {t["scope"] for t in rv["tables"]} == {"undecided"} and rv["targets_available"] is False)
+e = raises(st.set_scope, c, B, "JV", [{"table_id": "tA", "decision": "in"}])
+check("setting scope without the tables says how to apply the migration (409)", e is not None and e.status == 409 and "migration 008" in e.message, e and e.message)
+c.executescript("""CREATE TABLE table_scope (base_id TEXT NOT NULL, table_id TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('in','out')),
+                   decided_by TEXT NOT NULL, decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, reason TEXT, PRIMARY KEY (base_id, table_id));
+                   CREATE TABLE table_targets (table_id TEXT NOT NULL PRIMARY KEY, base_id TEXT NOT NULL, target TEXT NOT NULL, decided_by TEXT NOT NULL,
+                   decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, reason TEXT);""")
+st.set_scope(c, B, "JV", [{"table_id": "tD", "decision": "out", "reason": "still out"}])
 
 # ---- exports
 files = st.report_files(c, B)

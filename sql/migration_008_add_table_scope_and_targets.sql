@@ -1,9 +1,8 @@
 -- Migration 008: table scope and target decisions (from the Migration Design prompt). Adds two tables: table_scope and table_targets.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED. Review it, then apply it yourself (or tell me to), the same way as migration 007.
--- It is deliberately NOT yet in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py: the app refuses to
--- connect to a database that lacks an expected table, so those change together, after this is applied.
--- The name review page already reads table_scope when it exists, and shows every table as 'undecided' until then.
+-- Approved by the owner on 2026-11-14 and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in server.py and
+-- sql/apply_migrations.py. Apply it to an existing database with: python sql/apply_migrations.py path/to/your.db (back it up first).
+-- Safe to run again: nothing happens when the tables already exist.
 
 -- Which tables are relevant is a human decision, not part of the ingested table definition, so it lives here and a schema re-ingest can
 -- never overwrite it. A table with NO row is UNDECIDED, which is different from 'out'. The name validator and everything downstream run on

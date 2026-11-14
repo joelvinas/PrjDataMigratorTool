@@ -99,6 +99,37 @@ def read_scope(conn, base_id):
     return out, True
 
 
+def read_targets(conn, base_id):
+    """{table_id: {target, decided_by, decided_at, reason}} from table_targets (empty when that table does not exist yet)."""
+    if not has_table(conn, "table_targets"):
+        return {}
+    return {r["table_id"]: {"target": r["target"], "decided_by": r["decided_by"], "decided_at": r["decided_at"], "reason": r["reason"]}
+            for r in conn.execute("SELECT * FROM table_targets WHERE base_id=?", (base_id,))}
+
+
+def scope_warnings(data, out_ids):
+    """In-scope fields that link to, or name, a table that is out of scope. A link to a dropped table has nowhere to point, so each one is
+    flagged for a human decision: bring the table back in, drop the field, or change what it points at."""
+    if not out_ids:
+        return []
+    tname = {t["table_id"]: t["table_name"] for t in data["tables"]}
+    fbi = {f["field_id"]: f for f in data["fields"]}
+    seen, out = set(), []
+    for f in data["fields"]:
+        if f["table_id"] in out_ids:
+            continue
+        via = f.get("linked_table_id") or (fbi.get(f.get("source_link_field_id")) or {}).get("linked_table_id")
+        if via in out_ids:
+            seen.add((f["field_id"], via))
+            out.append({"kind": "link", "field_id": f["field_id"], "field_name": f["field_name"], "table_id": f["table_id"], "table_name": f["table_name"],
+                        "out_table_id": via, "out_table_name": tname.get(via, via)})
+        for oid in sorted(out_ids):
+            if (f["field_id"], oid) not in seen and oid in tname and fn._whole(tname[oid]).search(f["field_name"]):
+                out.append({"kind": "mention", "field_id": f["field_id"], "field_name": f["field_name"], "table_id": f["table_id"], "table_name": f["table_name"],
+                            "out_table_id": oid, "out_table_name": tname[oid]})
+    return sorted(out, key=lambda w: (w["table_name"].casefold(), w["field_name"].casefold(), w["out_table_name"].casefold()))
+
+
 def settings_from_dict(d):
     d = d or {}
     known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets"}
@@ -168,6 +199,7 @@ def review(conn, base_id, settings=None):
         settings, saved = read_settings(conn, base_id)
     c = _compute(conn, base_id, settings)
     res, data = c["res"], c["data"]
+    targets = read_targets(conn, base_id)
     by_table = defaultdict(int)
     for f in data["fields"]:
         by_table[f["table_id"]] += 1
@@ -176,7 +208,8 @@ def review(conn, base_id, settings=None):
         tid = t["table_id"]
         sc = c["scope"].get(tid)
         row = {"table_id": tid, "old": t["table_name"], "field_count": by_table.get(tid, 0),
-               "scope": sc["decision"] if sc else "undecided", "scope_by": sc and sc["decided_by"], "scope_at": sc and sc["decided_at"], "scope_reason": sc and sc["reason"]}
+               "scope": sc["decision"] if sc else "undecided", "scope_by": sc and sc["decided_by"], "scope_at": sc and sc["decided_at"], "scope_reason": sc and sc["reason"],
+               "target": (targets.get(tid) or {}).get("target"), "target_by": (targets.get(tid) or {}).get("decided_by")}
         m = res["tables"].get(tid)
         if m:
             sr = c["table_rows"].get(tid) or {}
@@ -206,6 +239,7 @@ def review(conn, base_id, settings=None):
     return {"base_id": base_id, "settings": res["settings"], "settings_saved": saved, "scope_available": c["scope_ok"], "tables": tables,
             "gate": res["gate"], "summary": res["summary"], "counts": counts, "fields": fields, "clusters": res["clusters"],
             "in_scope_tables": len(res["tables"]), "out_of_scope_tables": len(c["out"]),
+            "targets_available": has_table(conn, "table_targets"), "scope_warnings": scope_warnings(data, c["out"]),
             "scope_counts": {k: sum(1 for t in tables if t["scope"] == k) for k in ("in", "out", "undecided")}}
 
 
@@ -285,6 +319,61 @@ def revoke_tables(conn, base_id, actor, table_ids, reason=""):
                 _event(conn, "table", tid, "reject", actor, None, r["new_table_name"], None, reason)
                 n += 1
     return {"revoked": n}
+
+
+SCOPE_SETUP = "Table scope is not set up in this database yet. Apply migration 008 (python sql/apply_migrations.py path/to/your.db, after a backup), then reload."
+TARGET_NAMES = ("planning_only", "planning_and_core")
+
+
+def set_scope(conn, base_id, actor, items):
+    """Record which tables are in or out of scope, and where an in-scope table lands (Planning only, or Planning plus Core). Human decisions
+    kept apart from the ingested table definitions. items: [{table_id, decision?: 'in'|'out'|'clear', reason?, target?: 'planning_only'|
+    'planning_and_core'|'clear'}]. 'out' needs a reason. 'clear' returns a table to undecided (no row), which is different from out. Each
+    change is also written to name_events (target 'scope' or 'target'); the tables themselves keep only the latest decision."""
+    actor = clean_actor(actor)
+    if not (has_table(conn, "table_scope") and has_table(conn, "table_targets")):
+        raise StoreError(SCOPE_SETUP, 409)
+    known = {t["table_id"] for t in load_fields(conn, base_id)["tables"]}
+    scope, _ok = read_scope(conn, base_id)
+    targets = read_targets(conn, base_id)
+    now, n = _now(), 0
+    with conn:
+        for it in items or []:
+            tid = str(it.get("table_id") or "")
+            if tid not in known:
+                raise StoreError("Table %s is not in this base." % tid)
+            decision, tgt = it.get("decision"), it.get("target")
+            if decision not in (None, "in", "out", "clear") or tgt not in (None, "clear") + TARGET_NAMES:
+                raise StoreError("Unknown scope or target.")
+            reason = _reason(it.get("reason"), required=(decision == "out"))
+            prev = (scope.get(tid) or {}).get("decision")
+            if decision in ("in", "out"):
+                conn.execute("""INSERT INTO table_scope(base_id, table_id, decision, decided_by, decided_at, reason) VALUES (?,?,?,?,?,?)
+                                ON CONFLICT(base_id, table_id) DO UPDATE SET decision=excluded.decision, decided_by=excluded.decided_by,
+                                decided_at=excluded.decided_at, reason=excluded.reason""", (base_id, tid, decision, actor, now, reason or None))
+                _event(conn, "table", tid, "approve" if decision == "in" else "reject", actor, "scope", prev or "undecided", decision, reason)
+                scope[tid] = {"decision": decision}
+                n += 1
+            elif decision == "clear":
+                conn.execute("DELETE FROM table_scope WHERE base_id=? AND table_id=?", (base_id, tid))
+                _event(conn, "table", tid, "needs_human", actor, "scope", prev or "undecided", "undecided", reason)
+                scope.pop(tid, None)
+                n += 1
+            if tgt in TARGET_NAMES:
+                if (scope.get(tid) or {}).get("decision") == "out":
+                    raise StoreError("A table that is out of scope has no target; bring it back in scope first.")
+                conn.execute("""INSERT INTO table_targets(table_id, base_id, target, decided_by, decided_at, reason) VALUES (?,?,?,?,?,?)
+                                ON CONFLICT(table_id) DO UPDATE SET target=excluded.target, decided_by=excluded.decided_by,
+                                decided_at=excluded.decided_at, reason=excluded.reason""", (tid, base_id, tgt, actor, now, reason or None))
+                _event(conn, "table", tid, "approve", actor, "target", (targets.get(tid) or {}).get("target"), tgt, reason)
+                targets[tid] = {"target": tgt}
+                n += 1
+            elif tgt == "clear":
+                conn.execute("DELETE FROM table_targets WHERE table_id=? AND base_id=?", (tid, base_id))
+                _event(conn, "table", tid, "needs_human", actor, "target", (targets.get(tid) or {}).get("target"), None, reason)
+                targets.pop(tid, None)
+                n += 1
+    return {"updated": n}
 
 
 def _gate_open(c):
