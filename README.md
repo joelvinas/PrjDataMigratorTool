@@ -57,6 +57,7 @@ airtable-migration-control/
 ├── names.html  names.js         Field names: review table and field names against the naming rules and approve them
 ├── fieldnames.py                field and table name validator: the rules and the pipeline (pure functions, no I/O)
 ├── fieldnames_io.py             validator command line: CSV import, read-only database loader, report files
+├── fielddesc.py                 field descriptions in the lineage syntax: generate, parse back, validate (pure functions)
 ├── fieldnames_store.py          the review page's saved decisions: approvals, abandon, import, settings, exports (tables from migration 007)
 ├── editor-kit.js                shared by Stages 2 and 3: type-ahead picker and the Markdown text box with live preview
 ├── log.html  log.js             API call log (its own page, last in the side panel)
@@ -457,7 +458,7 @@ Airtable's API does not return automations at all, so, like forms, they are reco
 
 ## Field name validator
 
-Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, the import, the reports, the command line and the review page (`/names`, with saved approvals and the abandon action) are built and tested. Not built yet: descriptions generated from the lineage syntax, an HTML report, and a comparison of values between duplicate-group members.
+Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, the import, the reports, the command line and the review page (`/names`, with saved approvals and the abandon action) are built and tested. Not built yet: an HTML report, and a comparison of values between duplicate-group members.
 
 **Three targets, each validated separately:** the Workfront Planning field name, the Workfront Core custom field name, and the Workfront Core custom field label. Names are ASCII-safe (an allowlist of letters, digits, spaces and hyphens, because data exported to CSV without the right encoding corrupts anything else), may not start with a digit, and must be unique within a table. Labels keep the original text except the characters Adobe documents as unsupported in labels (`[ ] ( ) : { }` and control characters) and emoji. The full list of rules, with an example for each, is in [docs/FIELD_NAMING_RULES.md](docs/FIELD_NAMING_RULES.md); it is generated from the same rule list the validator runs, so the two cannot disagree.
 
@@ -480,7 +481,10 @@ A proposed repair is shown beside the original for both non-PASS verdicts, and n
 - **C. Table names.** Approve every in-scope table name first. A table with no scope decision is shown as **undecided**, which is different from **out** (skipped, no decision needed); undecided tables are still checked. Set a table's scope and target here too. Approve one at a time (typing a different name if you want one), or approve all unchanged or all auto-fixable names in one click. Field review stays locked until every in-scope table is approved.
 - **D. Field review.** One grid per name (Planning name, Core name, Core label) with the original, your imported name, the proposed repair, the check and reasons, the data presence and the status. Approve a name as proposed or type another; the server re-checks it, including its duplicate group, and refuses a name that would still collide. Flag a name for later, or withdraw an approval with a reason. Approve everything that passes or is auto-fixable in one click. An approved name that no longer passes (because a setting changed) is flagged.
 - **E. Duplicate groups.** Each group is one block with every member's original and repaired name side by side and its data presence. Rename a member or abandon one that has no values; the check runs again on what remains.
-- **F. Reports.** The CSVs, the summary and the rules document, or all of them as a zip.
+- **F. Descriptions.** Every field gets a description in the lineage syntax (see below). Edit one by hand and Save to keep your text, or Reset to return to the generated one; a description that is not in the syntax or has non-ASCII characters is flagged.
+- **G. Reports.** The CSVs, the summary and the rules document, or all of them as a zip.
+
+**Descriptions (lineage syntax).** `fielddesc.py` generates, for every field, `Source: Airtable. Origins: Orders.Amount; Customers.Name.`: the original Airtable table and field names the data comes from, so a client can trace any new field back to where it was. A plain field lists itself; a lookup or rollup lists the field it reads in the linked table, then the link field it reads through; a count lists the link field; a formula lists the fields it references. A name containing a period, semicolon or double quote is wrapped in double quotes (inner quotes doubled) so every description can be read back exactly. The setting *Include Airtable's own field description* appends it as `Airtable description: ...` (off by default). Descriptions are generated from the schema each time; only a hand-edited one is saved (`field_names.description`, with who, when and why in `name_events`). `validate_description()` flags empty text, control characters, non-ASCII characters and text that is not in the syntax; it will apply a length check once one is confirmed (Adobe documents no limit, so none is applied yet). The CSV report has `description`, `description_source` (generated or saved) and `description_problems` columns, and the command line takes `--include-airtable-description`.
 
 **Abandon** is enforced by the server, not just the page: it needs a reason, and only a field that was profiled since it was last seen in the schema, has no values and is not a checkbox qualifies. Restoring an abandoned field is also recorded. Every approval, withdrawal, flag, import, abandon and settings change is a row in `name_events` (append-only, with who and when).
 
@@ -502,7 +506,7 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 
 **Limits not confirmed by Adobe.** The Planning field name limit of 250 characters is documented. The documentation states no length limit for Core custom field names or labels, so 255 is a placeholder, and the list of reserved names is empty until an authoritative source is found. Adobe requires a Core custom field API name to be unique across the whole Workfront instance; the validator checks uniqueness within a table only, and the cross-table check is a separate step.
 
-**Tests.** `python test/run_regression.py names` runs the validator's three suites (the pure rules; the import, database loader, reports and command line; and the saved decisions) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. There is no browser test of the page yet (the browser suites need Playwright); it was checked by rendering it in a real browser engine.
+**Tests.** `python test/run_regression.py names` runs the validator's four suites (the pure rules; the import, database loader, reports and command line; the saved decisions; and the descriptions) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. There is no browser test of the page yet (the browser suites need Playwright); it was checked by rendering it in a real browser engine.
 
 ## Troubleshooting
 
@@ -522,7 +526,7 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 | Stage 1: Data | `/stage1` | Schema, load order, profiling, record and attachment capture (steps 3 to 6, plus the open runbook items) | Built |
 | Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
-| Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14); descriptions still to come |
+| Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14); an HTML report still to come |
 | Stage 4 (anticipated): Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning | Slot in the side panel only; `workfront_fields` and `field_crosswalk` exist, empty |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 

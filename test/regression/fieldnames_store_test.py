@@ -200,6 +200,40 @@ c.executescript("""CREATE TABLE table_scope (base_id TEXT NOT NULL, table_id TEX
                    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, reason TEXT);""")
 st.set_scope(c, B, "JV", [{"table_id": "tD", "decision": "out", "reason": "still out"}])
 
+# ---- descriptions (lineage syntax): generated each time, hand edits saved
+c.execute("update airtable_fields set field_description='Total of the order.' where field_id='f1'"); c.commit()
+rv = st.review(c, B); fl = {f["field_id"]: f for f in rv["fields"]}
+check("every field row carries a generated lineage description", fl["f1"]["description"]["generated"] == "Source: Airtable. Origins: Orders.Amount." and fl["f1"]["description"]["saved"] is None
+      and fl["f1"]["description"]["text"] == fl["f1"]["description"]["generated"] and not fl["f1"]["description"]["edited"] and fl["f1"]["description"]["problems"] == [])
+check("a name with a period is quoted in the origins", fl["f9"]["description"]["generated"] == 'Source: Airtable. Origins: "1.2.3 Archive".Plain.', fl["f9"]["description"]["generated"])
+check("a lookup lists the link it reads through", fl["f5"]["description"]["generated"] == "Source: Airtable. Origins: Orders.PO#s.", fl["f5"]["description"]["generated"])
+check("Airtable's own description is added only when the setting is on", "Airtable description" not in fl["f1"]["description"]["generated"])
+st.save_settings(c, B, {"description_include_airtable": True}, "JV", "include")
+d1 = {f["field_id"]: f for f in st.review(c, B)["fields"]}["f1"]["description"]
+check("with the setting on, Airtable's description is appended", d1["generated"] == "Source: Airtable. Origins: Orders.Amount. Airtable description: Total of the order.", d1["generated"])
+st.save_settings(c, B, {}, "JV", "off again")
+r = st.save_descriptions(c, B, "JV", [{"field_id": "f1", "text": "Source: Airtable. Origins: Orders.Amount; Orders.Notes!. Edited by hand."}], reason="added an origin")
+d1 = {f["field_id"]: f for f in st.review(c, B)["fields"]}["f1"]["description"]
+check("a hand-edited description is saved and used", r["saved"] == 1 and d1["saved"].endswith("Edited by hand.") and d1["text"] == d1["saved"] and d1["edited"] and d1["generated"] == "Source: Airtable. Origins: Orders.Amount.")
+check("the edit is audited with who and why", [dict(x) for x in c.execute("select * from name_events where subject_id='f1' and target='description'")][0]["reason"] == "added an origin")
+check("saving text identical to the generated one stores nothing", st.save_descriptions(c, B, "JV", [{"field_id": "f2", "text": "Source: Airtable. Origins: Orders.amount."}])["saved"] == 0
+      and (c.execute("select description from field_names where airtable_field_id='f2'").fetchone() or [None])[0] is None)
+r = st.save_descriptions(c, B, "JV", [{"field_id": "f2", "text": "Just a note"}])
+check("free text is allowed but reported as a warning", r["saved"] == 1 and [w["rule"] for w in r["warnings"]] == ["NOT_LINEAGE"] and {f["field_id"]: f for f in st.review(c, B)["fields"]}["f2"]["description"]["problems"][0]["rule"] == "NOT_LINEAGE")
+e = raises(st.save_descriptions, c, B, "JV", [{"field_id": "f2", "text": "line one" + chr(10) + "line two"}])
+check("control characters are refused", e is not None and "control" in e.message, e and e.message)
+check("an unknown field is refused (404) and a decision needs initials", (raises(st.save_descriptions, c, B, "JV", [{"field_id": "nope", "text": "x"}]) or st.StoreError("", 0)).status == 404
+      and raises(st.save_descriptions, c, B, " ", [{"field_id": "f1", "text": "x"}]) is not None)
+check("an overlong description is refused", raises(st.save_descriptions, c, B, "JV", [{"field_id": "f2", "text": "x" * 4001}]) is not None)
+st.save_descriptions(c, B, "JV", [{"field_id": "f1", "text": ""}, {"field_id": "f2", "text": None}])
+check("empty text goes back to the generated description", c.execute("select description from field_names where airtable_field_id='f1'").fetchone()[0] is None
+      and not {f["field_id"]: f for f in st.review(c, B)["fields"]}["f1"]["description"]["edited"])
+st.save_descriptions(c, B, "JV", [{"field_id": "f1", "text": "Source: Airtable. Origins: Orders.Amount; Orders.Done."}])
+files = st.report_files(c, B)
+rows = {r["field_id"]: r for r in csv.DictReader(io.StringIO(files["names_report.csv"]))}
+check("the report has the description, where it came from and its problems", rows["f1"]["description"].endswith("Orders.Done.") and rows["f1"]["description_source"] == "saved"
+      and rows["f3"]["description_source"] == "generated" and rows["f3"]["description"] == "Source: Airtable. Origins: Orders.Notes!." and rows["f3"]["description_problems"] == "")
+
 # ---- exports
 files = st.report_files(c, B)
 check("report files come from the saved names", "names_report.csv" in files and "Notes" in files["names_report.csv"] and "undecided" in files["names_summary.txt"])

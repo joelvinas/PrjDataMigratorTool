@@ -15,6 +15,7 @@ import zipfile
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 
+import fielddesc as fd
 import fieldnames as fn
 import fieldnames_io as fio
 
@@ -67,6 +68,7 @@ def load_fields(conn, base_id):
     fields = _rows(conn.execute("""
         SELECT f.field_id, f.table_id, f.table_name, f.field_name, f.data_type, f.linked_table_id, f.source_link_field_id,
                f.row_count, f.null_count, f.cardinality, f.cardinality_is_capped,
+               f.source_field_id, f.referenced_field_ids, f.field_description,
                (EXISTS(SELECT 1 FROM api_call_log a WHERE a.purpose='profile_page' AND a.success=1 AND a.table_id=f.table_id AND a.timestamp >= f.updated_at)
                 AND NOT EXISTS(SELECT 1 FROM runbook_logs r WHERE r.failing_component='profile_page:' || f.table_id AND r.status='OPEN'
                                AND r.timestamp >= f.updated_at)) AS profiled
@@ -132,7 +134,7 @@ def scope_warnings(data, out_ids):
 
 def settings_from_dict(d):
     d = d or {}
-    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets"}
+    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets", "description_include_airtable"}
     try:
         return fn.Settings(**{k: v for k, v in d.items() if k in known})
     except (ValueError, TypeError) as e:
@@ -157,6 +159,20 @@ def save_settings(conn, base_id, settings, actor, reason=""):
         conn.execute("INSERT INTO name_events(subject_type, subject_id, event_type, new_value, actor, reason) VALUES ('settings', ?, 'settings', ?, ?, ?)",
                      (base_id, json.dumps(st.as_dict(), sort_keys=True), actor, reason or None))
     return st
+
+
+def descriptions(data, names, settings):
+    """{field_id: {generated, saved, text, edited, problems}} for every field of the base. 'generated' is recomputed from the schema every
+    time; 'saved' is a hand-edited description a person saved (field_names.description); 'text' is what is used (saved, else generated)."""
+    by_id = {f["field_id"]: f for f in data["fields"]}
+    out = {}
+    for f in data["fields"]:
+        gen = fd.generate_description(f, by_id, settings.description_include_airtable)
+        saved = ((names.get(f["field_id"]) or {}).get("description") or None)
+        text = saved if saved is not None else gen
+        out[f["field_id"]] = {"generated": gen, "saved": saved, "text": text, "edited": saved is not None and saved != gen,
+                              "problems": fd.validate_description(text)}
+    return out
 
 
 def _stored(conn, base_id):
@@ -218,12 +234,14 @@ def review(conn, base_id, settings=None):
         else:                                           # out of scope: no table-name decision is needed
             row.update({"suggested": None, "effective": None, "approved": False, "verdict": None, "rules": [], "approved_by": None, "approved_at": None})
         tables.append(row)
+    desc = descriptions(data, c["names"], settings)
     fields, counts = [], {t: {"approved": 0, "needs_human": 0, "unreviewed": 0, "stale": 0} for t in fn.TARGETS}
     fbi = {f["field_id"]: f for f in data["fields"]}
     for fid, e in res["fields"].items():
         n = c["names"].get(fid) or {}
         row = {"field_id": fid, "table_id": e["table_id"], "table_name": fbi[fid]["table_name"], "original": e["original"], "data_type": fbi[fid]["data_type"],
                "presence": e["presence"], "abandoned": e["abandoned"], "target_type": n.get("target_type"), "import_batch": n.get("import_batch"),
+               "description": desc[fid],
                "abandon": {"by": n.get("abandoned_by"), "at": n.get("abandoned_at"), "reason": n.get("abandoned_reason")} if e["abandoned"] else None,
                "targets": {}}
         for t, r in e["targets"].items():
@@ -473,6 +491,51 @@ def set_field_status(conn, base_id, actor, items, status, reason=""):
     return {"updated": n}
 
 
+DESCRIPTION_HARD_CAP = 4000     # only to keep the database sane; Adobe's real limit is unconfirmed (see fielddesc.DESCRIPTION_MAX_LEN)
+
+
+def save_descriptions(conn, base_id, actor, items, reason=""):
+    """Save hand-edited descriptions. items: [{field_id, text}]; empty or missing text goes back to the generated description. A description that
+    is not in the lineage syntax is allowed (a hand edit may be free text on purpose) and reported as a warning; control characters are refused.
+    Each change is written to name_events (target 'description')."""
+    actor, reason = clean_actor(actor), _reason(reason)
+    settings, _ = read_settings(conn, base_id)
+    data = load_fields(conn, base_id)
+    scope, _ok = read_scope(conn, base_id)
+    known = {f["field_id"]: f for f in data["fields"]}
+    _, names = _stored(conn, base_id)
+    gen = descriptions(data, names, settings)
+    now, n, warnings = _now(), 0, []
+    with conn:
+        for it in items or []:
+            fid = str(it.get("field_id") or "")
+            f = known.get(fid)
+            if not f:
+                raise StoreError("Field %s is not in this base." % fid, 404)
+            if (scope.get(f["table_id"]) or {}).get("decision") == "out":
+                raise StoreError("'%s' is in a table that is out of scope." % f["field_name"])
+            text = it.get("text")
+            text = None if text is None or str(text).strip() == "" else str(text).strip()
+            if text is not None:
+                if len(text) > DESCRIPTION_HARD_CAP:
+                    raise StoreError("A description can be at most %d characters." % DESCRIPTION_HARD_CAP)
+                problems = fd.validate_description(text)
+                errs = [p["message"] for p in problems if p["severity"] == "error"]
+                if errs:
+                    raise StoreError("'%s': %s" % (f["field_name"], " ".join(errs)))
+                warnings += [{"field_id": fid, "rule": p["rule"], "message": p["message"]} for p in problems]
+                if text == gen[fid]["generated"]:
+                    text = None                          # identical to the generated one: nothing to store
+            old = (names.get(fid) or {}).get("description")
+            if text == old:
+                continue
+            conn.execute("INSERT INTO field_names(airtable_field_id, description, updated_at) VALUES (?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET "
+                         "description=excluded.description, updated_at=excluded.updated_at", (fid, text, now))
+            _event(conn, "field", fid, "approve" if text is not None else "reject", actor, "description", old, text, reason)
+            n += 1
+    return {"saved": n, "warnings": warnings}
+
+
 def abandon(conn, base_id, actor, field_id, reason):
     """A recorded human decision, never automatic: who, when and why. Only a field that was profiled and has no value in any record qualifies
     (a checkbox never does); the server enforces this, not the page."""
@@ -554,13 +617,15 @@ def report_files(conn, base_id, settings=None):
     manual = {fid: {t: v for t, v in m.items()} for fid, m in c["manual"].items()}
     target_types = {fid: r["target_type"] for fid, r in c["names"].items() if r.get("target_type")}
     imp = {"manual": manual, "target_types": target_types, "problems": []}
+    desc = descriptions(c["data"], c["names"], settings)
     notes = []
     undecided = sum(1 for t in c["data"]["tables"] if t["table_id"] not in c["scope"])
     if not c["scope_ok"]:
         notes.append("Table scope decisions are not stored yet: every table is undecided and is validated.")
     elif undecided:
         notes.append("%d table(s) have no scope decision (undecided) and were validated like in-scope tables." % undecided)
-    return fio.build_reports(c["res"], c["data"]["fields"], imp, notes)
+    return fio.build_reports(c["res"], c["data"]["fields"], imp, notes, {fid: {"text": d["text"], "source": "saved" if d["saved"] is not None else "generated",
+                                                                               "problems": [p["rule"] for p in d["problems"]]} for fid, d in desc.items()})
 
 
 def report_zip(files):

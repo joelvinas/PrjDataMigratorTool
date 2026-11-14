@@ -149,6 +149,19 @@ check("with every table approved the gate opens without --draft and the swap is 
 check("the abandoned member shrinks the duplicate group, which resolves it", rep["fld1"]["planning_name_verdict"] == "PASS")
 skipped = [r["field_id"] for r in csv.DictReader(open(os.path.join(out, "names_report.csv"), encoding="utf-8-sig", newline=""))]
 check("skipping a table removes its fields from the report", skipped == ["fld3", "fld4", "fld5", "fld6"], skipped)
+# descriptions on the command line
+dd = os.path.join(tmp, "desc")
+k = sqlite3.connect(appr)
+k.execute("insert into field_names(airtable_field_id, description) values ('fld1', 'Source: Airtable. Origins: PO#s.Amount; PO#s.Other. By hand.') on conflict(airtable_field_id) do update set description=excluded.description")
+k.execute("insert into field_names(airtable_field_id, description) values ('fld3', 'free text') on conflict(airtable_field_id) do update set description='free text'")
+k.execute("update airtable_fields set field_description='From Airtable.' where field_id='fld6'"); k.commit(); k.close()
+fio.main(["--db", appr, "--base", "appT", "--out", dd, "--include-airtable-description"])
+drow = {r["field_id"]: r for r in csv.DictReader(open(os.path.join(dd, "names_report.csv"), encoding="utf-8-sig", newline=""))}
+check("a saved description is read and reported as saved", drow["fld1"]["description_source"] == "saved" and drow["fld1"]["description"].endswith("By hand."), drow["fld1"])
+check("a generated description follows the lineage syntax and the flag appends Airtable's text", drow["fld4"]["description"] == "Source: Airtable. Origins: Invoices.PO#s." and
+      drow["fld6"]["description"] == "Source: Airtable. Origins: Invoices.Done. Airtable description: From Airtable.", drow["fld6"]["description"])
+check("a free-text saved description is flagged", drow["fld3"]["description_problems"] == "NOT_LINEAGE")
+
 # per-name options on the command line
 po = os.path.join(tmp, "pername")
 fio.main(["--db", dbp, "--base", "appT", "--out", po, "--draft", "--target-option", "core_name.max_len=6", "--target-option", "planning_name.extra_allowed=#"])

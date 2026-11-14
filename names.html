@@ -47,6 +47,7 @@
   <div style="overflow-x:auto"><table class="grid" id="settingsGrid"><thead><tr>
     <th>Setting</th><th>Planning name</th><th>Core name</th><th>Core label</th>
   </tr></thead><tbody></tbody></table></div>
+  <div class="row"><label><input type="checkbox" id="descAirtable"> Include Airtable's own field description in generated descriptions (section F)</label></div>
   <div class="row"><button id="btnSaveSettings" type="button">Save these settings</button><span id="settingsState" class="hint"></span></div>
   <div id="previewNote" class="note warn" hidden>These settings are a preview and are not saved. Save them before approving anything, so every decision is made under settings that can be reproduced.</div>
 </section>
@@ -113,9 +114,28 @@
   <div id="dupBody"></div>
 </section>
 
-<!-- F: downloads -->
+<!-- F: descriptions -->
+<section class="card" id="descCard">
+  <h2><span class="num">F</span> Descriptions</h2>
+  <p class="hint">Every field gets a description in the lineage syntax, <code>Source: Airtable. Origins: Orders.Amount; Customers.Name.</code>, which lists the original Airtable table and field names it comes from so each new field can be traced back. They are generated from the schema each time. Edit one by hand and <b>Save</b> to keep your text, or <b>Reset</b> to return to the generated one. A description that is not in this syntax, or that has non-ASCII characters, is flagged. No length limit is checked yet because Adobe documents none; it will be added once one is confirmed.</p>
+  <div id="descLocked" class="note info" hidden>Available once every in-scope table name is approved (section C).</div>
+  <div id="descBody" hidden>
+    <div class="row">
+      <label for="dTable">Table</label><select id="dTable"></select>
+      <input id="dSearch" type="text" class="wide" placeholder="Search field name, ID or description" autocomplete="off">
+      <label><input type="checkbox" id="dEdited"> Edited by hand only</label>
+      <label><input type="checkbox" id="dProblems"> With problems only</label>
+    </div>
+    <div id="descMessage" class="msg"></div>
+    <div id="descCount" class="hint"></div>
+    <div style="overflow-x:auto"><table class="grid" id="descGrid"><thead><tr><th>Table</th><th>Field</th><th>Description</th><th>State</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
+    <div class="row"><button id="btnDescPrev" type="button">Previous</button><span id="descPageInfo" class="hint"></span><button id="btnDescNext" type="button">Next</button></div>
+  </div>
+</section>
+
+<!-- G: downloads -->
 <section class="card" id="downloadCard">
-  <h2><span class="num">F</span> Reports</h2>
+  <h2><span class="num">G</span> Reports</h2>
   <p class="hint">Built from the saved names. Open the CSVs in Excel to review with the client.</p>
   <div class="row" id="downloads"></div>
 </section>

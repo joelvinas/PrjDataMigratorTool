@@ -128,6 +128,15 @@ check("a table can be in scope and land in Planning plus Core", s_ == 200 and {t
 check("an unknown table is refused", post("/api/names/tables/scope", A(items=[{"table_id": "tblNope", "decision": "in"}]))[0] == 400)
 post("/api/names/tables/scope", A(items=[{"table_id": "tblNa0000000001", "decision": "clear", "target": "clear"}]))
 
+# ---- descriptions
+check("review rows carry the generated description", {f["field_id"]: f for f in get("/api/names/review?base_id=" + BASE)[1]["fields"]}["fldN02"]["description"]["generated"] == "Source: Airtable. Origins: Orders.Amount.")
+s_, r = post("/api/names/descriptions", A(items=[{"field_id": "fldN02", "text": "Source: Airtable. Origins: Orders.Amount; Orders.amount. Merged by hand."}], reason="two fields consolidated"))
+check("a hand-edited description is saved through the API", s_ == 200 and r["saved"] == 1 and {f["field_id"]: f for f in r["review"]["fields"]}["fldN02"]["description"]["edited"], r.get("error"))
+s_, e = post("/api/names/descriptions", A(items=[{"field_id": "fldN02", "text": "a" + chr(10) + "b"}])); check("control characters are refused", s_ == 400 and "control" in e["error"], e)
+check("saving a description needs initials", post("/api/names/descriptions", {"base_id": BASE, "items": [{"field_id": "fldN02", "text": "x"}]})[0] == 400)
+s_, r = post("/api/names/descriptions", A(items=[{"field_id": "fldN02", "text": ""}])); check("empty text resets to the generated description", s_ == 200 and not {f["field_id"]: f for f in r["review"]["fields"]}["fldN02"]["description"]["edited"])
+s_, d, h = raw("GET", "/api/names/report?base_id=" + BASE + "&file=names_report.csv"); check("the csv has description columns", b"description_source" in d and b"Source: Airtable. Origins:" in d)
+
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row
 ev = [dict(x) for x in c.execute("select * from name_events order by event_id")]

@@ -4425,6 +4425,14 @@ def api_names_tables_scope(body):
         return dict(r, review=_names(names_store.review, conn, base))
 
 
+def api_names_descriptions(body):
+    """Save hand-edited field descriptions (lineage syntax); empty text goes back to the generated description."""
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.save_descriptions, conn, base, body.get("actor"), body.get("items") or [], body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
 def api_names_fields_approve(body):
     with db() as conn:
         base = _names_base(body)
@@ -4512,7 +4520,7 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/names/settings": api_names_settings,
                "/api/names/tables/approve": api_names_tables_approve, "/api/names/tables/revoke": api_names_tables_revoke,
-               "/api/names/tables/scope": api_names_tables_scope,
+               "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
                "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
                "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
                "/api/names/import": api_names_import}

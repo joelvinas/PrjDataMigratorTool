@@ -15,6 +15,7 @@ Import CSV headers (case does not matter): field_id, old_name, new_name, new_lab
   new_dataType    the target Workfront data type, carried into the report
 """
 import argparse, csv, io, os, pathlib, re, sqlite3, sys
+import fielddesc as fd
 import fieldnames as fn
 
 COLUMNS = ("field_id", "old_name", "new_name", "new_label", "old_datatype", "new_datatype")
@@ -82,39 +83,21 @@ def parse_import(text, db_fields):
 
 
 def load_db(path, base_id):
-    """Read-only. Returns {fields, tables, approved_tables, abandoned, notes}. Fields no longer in the source are left out."""
+    """Read-only. Returns {fields, tables, approved_tables, abandoned, saved_descriptions, notes}. Fields no longer in the source are left out."""
+    import fieldnames_store as store                      # imported here: the store imports this module
     uri = pathlib.Path(path).resolve().as_uri() + "?mode=ro"
     c = sqlite3.connect(uri, uri=True)
     c.row_factory = sqlite3.Row
     try:
-        # 'profiled' = a profile_page call succeeded for the table at or after the field was last seen in the schema, and no profile failure
-        # for the table is still open. A re-ingest therefore blocks Abandon until the table is profiled again (the safe direction).
-        rows = c.execute("""
-            SELECT f.field_id, f.table_id, f.table_name, f.field_name, f.data_type, f.linked_table_id, f.source_link_field_id,
-                   f.row_count, f.null_count, f.cardinality, f.cardinality_is_capped,
-                   (EXISTS(SELECT 1 FROM api_call_log a WHERE a.purpose='profile_page' AND a.success=1 AND a.table_id=f.table_id AND a.timestamp >= f.updated_at)
-                    AND NOT EXISTS(SELECT 1 FROM runbook_logs r WHERE r.failing_component='profile_page:' || f.table_id AND r.status='OPEN'
-                                   AND r.timestamp >= f.updated_at)) AS profiled
-            FROM airtable_fields f
-            WHERE f.base_id=? AND f.updated_at >= (SELECT MAX(x.updated_at) FROM airtable_fields x WHERE x.base_id=f.base_id)
-            ORDER BY f.table_id, f.field_id""", (base_id,)).fetchall()
-        fields = [dict(r) for r in rows]
-        try:
-            tables = [dict(r) for r in c.execute("SELECT table_id, base_id, table_name FROM airtable_tables WHERE base_id=? ORDER BY table_id", (base_id,))]
-        except sqlite3.OperationalError:
-            tables = []
-        seen = {t["table_id"] for t in tables}
-        for f in fields:                                    # a database ingested before airtable_tables existed
-            if f["table_id"] not in seen:
-                seen.add(f["table_id"])
-                tables.append({"table_id": f["table_id"], "base_id": base_id, "table_name": f["table_name"]})
-        approved, abandoned, notes = {}, [], []
+        data = store.load_fields(c, base_id)
+        approved, abandoned, saved, notes = {}, [], {}, []
         try:
             approved = {r[0]: r[1] for r in c.execute("SELECT airtable_table_id, new_table_name FROM table_names WHERE status='approved' AND new_table_name IS NOT NULL")}
             abandoned = [r[0] for r in c.execute("SELECT airtable_field_id FROM field_names WHERE abandoned=1")]
+            saved = {r[0]: r[1] for r in c.execute("SELECT airtable_field_id, description FROM field_names WHERE description IS NOT NULL")}
         except sqlite3.OperationalError:
-            notes.append("Migration 007 is not applied in this database: no approved table names or abandon decisions were read.")
-        return {"fields": fields, "tables": tables, "approved_tables": approved, "abandoned": abandoned, "notes": notes}
+            notes.append("Migration 007 is not applied in this database: no approved table names, abandon decisions or saved descriptions were read.")
+        return {"fields": data["fields"], "tables": data["tables"], "approved_tables": approved, "abandoned": abandoned, "saved_descriptions": saved, "notes": notes}
     finally:
         c.close()
 
@@ -136,15 +119,18 @@ def _csv(header, rows):
     return out.getvalue()
 
 
-def build_reports(result, fields, imp=None, notes=()):
-    """-> {filename: text}. Pure: the same input gives the same text."""
+def build_reports(result, fields, imp=None, notes=(), descriptions=None):
+    """-> {filename: text}. Pure: the same input gives the same text. descriptions: {field_id: {text, source, problems}}; when omitted the
+    generated lineage description is used."""
     imp = imp or {"manual": {}, "target_types": {}, "problems": []}
     fbi = {f["field_id"]: f for f in fields}
+    if descriptions is None:
+        descriptions = {f["field_id"]: {"text": fd.generate_description(f, fbi), "source": "generated", "problems": []} for f in fields}
     T = fn.TARGETS
     head = ["table_id", "table_name", "field_id", "original_name", "airtable_type", "imported_new_name", "imported_new_label", "target_type"]
     for t in T:
         head += [t + "_verdict", t + "_rules", t + "_proposed_repair", t + "_reasons"]
-    head += ["label_quarter_style", "rows_with_value", "null_count", "cardinality", "profiled", "can_abandon", "abandoned"]
+    head += ["label_quarter_style", "rows_with_value", "null_count", "cardinality", "profiled", "can_abandon", "abandoned", "description", "description_source", "description_problems"]
     rows = []
     for fid, e in result["fields"].items():
         f, m, p = fbi[fid], imp["manual"].get(fid, {}), e["presence"]
@@ -155,6 +141,8 @@ def build_reports(result, fields, imp=None, notes=()):
         lab = e["targets"].get("core_label")
         row += [lab["quarter_style"] if lab else "", p["populated"], p["null_count"], p["cardinality_display"], "yes" if p["profiled"] else "no",
                 "yes" if p["can_abandon"] else "no", "yes" if e["abandoned"] else "no"]
+        d = descriptions.get(fid) or {"text": "", "source": "", "problems": []}
+        row += [d["text"], d["source"], " ".join(d["problems"])]
         rows.append(row)
     out = {"names_report.csv": _csv(head, rows)}
     d = []
@@ -212,6 +200,7 @@ def main(argv=None):
     ap.add_argument("--target-option", action="append", default=[], metavar="NAME.OPTION=VALUE",
                     help="an option for one name only, e.g. planning_name.allow_leading_digit=true, core_name.max_len=200, planning_name.extra_allowed=&' "
                          "(names: planning_name, core_name, core_label; options: %s). Repeatable." % ", ".join(fn.TARGET_OPTS))
+    ap.add_argument("--include-airtable-description", action="store_true", help="append each field's own Airtable description to its generated description")
     ap.add_argument("--draft", action="store_true", help="preview field results even though some table names are not approved (the report says DRAFT)")
     ap.add_argument("--skip-table", action="append", default=[], help="table ID to treat as out of scope (repeatable)")
     a = ap.parse_args(argv)
@@ -230,7 +219,7 @@ def main(argv=None):
     except ValueError as e:
         sys.exit("--target-option: %s" % e)
     st = fn.Settings(targets=per, table_swap=not a.no_table_swap, char_cleanup=not a.no_char_cleanup, leading_digits=not a.no_leading_digits,
-                     table_prefix=a.table_prefix, digit_style=a.digit_style, digit_word=a.digit_word, label_keep_quarter=not a.label_convert_quarter)
+                     description_include_airtable=a.include_airtable_description, table_prefix=a.table_prefix, digit_style=a.digit_style, digit_word=a.digit_word, label_keep_quarter=not a.label_convert_quarter)
     db = load_db(a.db, a.base)
     if not db["fields"]:
         sys.exit("No fields found for base %s." % a.base)
@@ -242,7 +231,14 @@ def main(argv=None):
     res = fn.run(db["fields"], db["tables"], st, manual=(imp or {}).get("manual"), approved_tables=db["approved_tables"],
                  abandoned=db["abandoned"], out_of_scope_tables=a.skip_table, gate=not a.draft)
     os.makedirs(a.out, exist_ok=True)
-    for name, text in build_reports(res, db["fields"], imp, notes).items():
+    fbi = {f["field_id"]: f for f in db["fields"]}
+    descs = {}
+    for fid, f in fbi.items():
+        gen = fd.generate_description(f, fbi, st.description_include_airtable)
+        saved = db["saved_descriptions"].get(fid)
+        text = saved if saved is not None else gen
+        descs[fid] = {"text": text, "source": "saved" if saved is not None else "generated", "problems": [p["rule"] for p in fd.validate_description(text)]}
+    for name, text in build_reports(res, db["fields"], imp, notes, descs).items():
         with open(os.path.join(a.out, name), "w", encoding="utf-8-sig", newline="") as fh:
             fh.write(text)
     print(open(os.path.join(a.out, "names_summary.txt"), encoding="utf-8-sig").read())

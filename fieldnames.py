@@ -84,12 +84,13 @@ class Settings(object):
     configured separately: the three step toggles, allow_leading_digit, digit_style and digit_word, max_len, extra_allowed (names: extra
     punctuation that is allowed instead of removed) and extra_blocked (labels: extra punctuation that is removed)."""
     def __init__(self, table_swap=True, char_cleanup=True, leading_digits=True, table_prefix="end",
-                 digit_style="move_to_end", digit_word="", label_keep_quarter=True, targets=None):
+                 digit_style="move_to_end", digit_word="", label_keep_quarter=True, targets=None, description_include_airtable=False):
         if table_prefix not in ("drop", "end", "plain") or digit_style not in ("move_to_end", "prefix_word"):
             raise ValueError("unknown preset")
         self.table_swap, self.char_cleanup, self.leading_digits = bool(table_swap), bool(char_cleanup), bool(leading_digits)
         self.table_prefix, self.digit_style, self.digit_word = table_prefix, digit_style, (digit_word or "").strip()
         self.label_keep_quarter = bool(label_keep_quarter)
+        self.description_include_airtable = bool(description_include_airtable)   # append Airtable's own field description to generated descriptions
         self.targets = {}
         for t, opts in (targets or {}).items():
             if t not in TARGETS:

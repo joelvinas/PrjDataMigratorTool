@@ -14,7 +14,8 @@ const RULE_TITLES = {
 const PER_PAGE = 50;
 const ACTOR_KEY = "migrationControl.reviewer";
 
-const N = { R: null, saved: null, target: "planning_name", page: 0, open: null, timer: null };
+const N = { R: null, saved: null, target: "planning_name", page: 0, descPage: 0, open: null, timer: null };
+const DESC_PER_PAGE = 25;
 const baseNow = () => $("baseId").value.trim();
 const actorNow = () => $("actor").value.trim();
 const ruleText = (ids) => (ids || []).map((r) => RULE_TITLES[r] || r).join(", ");
@@ -90,10 +91,12 @@ function controlSettings() {
   const p = s.targets.planning_name;
   Object.assign(s, { table_swap: p.table_swap, char_cleanup: p.char_cleanup, leading_digits: p.leading_digits, digit_style: p.digit_style, digit_word: p.digit_word,
     label_keep_quarter: s.targets.core_label.label_keep_quarter });
+  s.description_include_airtable = $("descAirtable").checked;
   return s;
 }
 function setControls(s) {
   $("pPrefix").value = s.table_prefix;
+  $("descAirtable").checked = !!s.description_include_airtable;
   for (const row of SETTING_ROWS) for (const t of row.on) {
     const c = $(cellId(t, row.key)), v = effective(s, t, row.key);
     if (row.type === "bool") c.checked = !!v; else c.value = v === undefined || v === null ? "" : v;
@@ -105,7 +108,7 @@ function syncWordBoxes() {
 }
 /* Two settings are the same when every option has the same effective value for every name. */
 function matrix(s) {
-  const m = { table_prefix: s.table_prefix };
+  const m = { table_prefix: s.table_prefix, description_include_airtable: String(!!s.description_include_airtable) };
   for (const t of ["planning_name", "core_name", "core_label"]) for (const row of SETTING_ROWS) if (row.on.includes(t)) m[t + "." + row.key] = String(effective(s, t, row.key));
   return JSON.stringify(m);
 }
@@ -152,9 +155,9 @@ async function decide(path, body, msgId, okText) {
 /* ---------- render: everything is rebuilt from N.R ---------- */
 function render() {
   const R = N.R, on = !!R;
-  for (const id of ["settingsCard", "importCard", "tablesCard", "fieldsCard", "downloadCard"]) $(id).hidden = !on && id !== "settingsCard" ? true : false;
+  for (const id of ["settingsCard", "importCard", "tablesCard", "fieldsCard", "descCard", "downloadCard"]) $(id).hidden = !on && id !== "settingsCard" ? true : false;
   if (!on) { $("tablesGrid").tBodies[0].replaceChildren(); $("fieldsBody").hidden = true; $("fieldsLocked").hidden = false; $("dupCard").hidden = true; return; }
-  renderSettings(); renderTables(); renderFields(); renderDuplicates(); renderDownloads();
+  renderSettings(); renderTables(); renderFields(); renderDuplicates(); renderDescriptions(); renderDownloads();
 }
 
 function renderSettings() {
@@ -378,6 +381,50 @@ function renderDuplicates() {
   }
 }
 
+/* ---------- descriptions (lineage syntax): generated each time, a hand edit is saved ---------- */
+function descMatches(f) {
+  const d = f.description, tb = $("dTable").value, q = $("dSearch").value.trim().toLowerCase();
+  if (f.abandoned) return false;
+  if (tb && f.table_id !== tb) return false;
+  if ($("dEdited").checked && !d.edited) return false;
+  if ($("dProblems").checked && !d.problems.length) return false;
+  if (q && !(f.original.toLowerCase().includes(q) || f.field_id.toLowerCase().includes(q) || d.text.toLowerCase().includes(q))) return false;
+  return true;
+}
+function descRow(f, locked) {
+  const d = f.description;
+  const box = el("textarea", { rows: "2", maxlength: "4000", "aria-label": "Description of " + f.original }, d.text);
+  box.value = d.text;
+  const save = btn("Save", () => decide("/api/names/descriptions", { items: [{ field_id: f.field_id, text: box.value }] }, "descMessage", (r) =>
+    r.saved ? "Description saved." + (r.warnings && r.warnings.length ? " Note: " + r.warnings.map((w) => w.message).join(" ") : "") : "Nothing changed."), { disabled: true });
+  const reset = btn("Reset", () => decide("/api/names/descriptions", { items: [{ field_id: f.field_id, text: "" }] }, "descMessage", "Back to the generated description."), { disabled: locked || d.saved === null });
+  box.addEventListener("input", () => { save.disabled = locked || box.value === d.text; });
+  const tr = el("tr", {});
+  tr.appendChild(el("td", { text: f.table_name }));
+  tr.appendChild(el("td", {}, el("div", { text: f.original }), el("div", { class: "hint", text: f.field_id + " \u00b7 " + f.data_type })));
+  tr.appendChild(el("td", { style: "min-width:340px" }, box));
+  tr.appendChild(el("td", {}, tag(d.edited ? "Edited by hand" : "Generated", d.edited ? "run" : ""), ...d.problems.map((p) => el("div", { class: "hint", text: p.message }))));
+  tr.appendChild(el("td", {}, el("div", { class: "row" }, save, reset)));
+  return tr;
+}
+function renderDescriptions() {
+  const R = N.R, ready = R.gate.ready;
+  $("descLocked").hidden = ready; $("descBody").hidden = !ready;
+  if (!ready) return;
+  const locked = isPreview();
+  const sel = $("dTable"), keep = sel.value;
+  sel.replaceChildren(el("option", { value: "", text: "All tables" }), ...R.tables.filter((x) => x.scope !== "out").map((x) => el("option", { value: x.table_id, text: x.old })));
+  sel.value = keep;
+  const rows = R.fields.filter(descMatches);
+  const pages = Math.max(1, Math.ceil(rows.length / DESC_PER_PAGE));
+  N.descPage = Math.min(N.descPage, pages - 1);
+  $("descCount").textContent = fmt(rows.length) + " of " + fmt(R.fields.length) + " fields shown";
+  $("descPageInfo").textContent = "Page " + (N.descPage + 1) + " of " + pages;
+  $("btnDescPrev").disabled = N.descPage === 0; $("btnDescNext").disabled = N.descPage >= pages - 1;
+  const body = $("descGrid").tBodies[0]; body.replaceChildren();
+  for (const f of rows.slice(N.descPage * DESC_PER_PAGE, (N.descPage + 1) * DESC_PER_PAGE)) body.appendChild(descRow(f, locked));
+}
+
 function renderDownloads() {
   const box = $("downloads"); box.replaceChildren();
   const base = encodeURIComponent(baseNow());
@@ -452,6 +499,11 @@ startPage("names", { onReadyChange, afterConnect }, () => {
   $("btnApprovePass").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "pass", targets: [N.target] }, "fieldsMessage", fieldsOk));
   $("btnApproveAuto").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "auto", targets: [N.target] }, "fieldsMessage", fieldsOk));
   $("btnApproveAllTargets").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "pass_and_auto" }, "fieldsMessage", fieldsOk));
+  $("descAirtable").addEventListener("change", schedulePreview);
+  for (const id of ["dTable", "dEdited", "dProblems"]) $(id).addEventListener("change", () => { N.descPage = 0; renderDescriptions(); });
+  $("dSearch").addEventListener("input", () => { N.descPage = 0; renderDescriptions(); });
+  $("btnDescPrev").addEventListener("click", () => { N.descPage = Math.max(0, N.descPage - 1); renderDescriptions(); });
+  $("btnDescNext").addEventListener("click", () => { N.descPage += 1; renderDescriptions(); });
   for (const id of ["fVerdict", "fStatus", "fTable", "fAbandoned"]) $(id).addEventListener("change", () => { N.page = 0; renderFields(); });
   $("fSearch").addEventListener("input", () => { N.page = 0; renderFields(); });
   $("btnPrev").addEventListener("click", () => { N.page = Math.max(0, N.page - 1); renderFields(); });
