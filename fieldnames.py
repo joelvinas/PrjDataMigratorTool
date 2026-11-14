@@ -46,6 +46,11 @@ RESERVED_NAMES = {t: frozenset() for t in TARGETS}
 
 # The only characters whose removal is AUTO_FIXABLE. Each is deleted with nothing put in its place.
 AUTO_DELETE_CHARS = frozenset("'\"`~!@#$%^&*()[]{};:<>,./?")
+# Whitespace that is always turned into a plain space (ASCII 32) and must never remain in a name: no-break space (160), tab, new line,
+# vertical tab, form feed, carriage return. This is AUTO_FIXABLE.
+WS_CHARS = frozenset(chr(c) for c in (160, 9, 10, 11, 12, 13))
+# Rules whose repair is AUTO_FIXABLE when nothing else is wrong (see evaluate_name).
+AUTO_RULES = frozenset({"SPECIAL_CHAR", "WHITESPACE_CHAR", "EDGE_SPACE", "DOUBLE_SPACE"})
 NAME_ALLOWED = re.compile(r"[A-Za-z0-9 \-]")
 _PUNCT_MAP = {ord(c): r for c, r in {"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", "−": "-",
                                      " ": " ", " ": " ", " ": " "}.items()}
@@ -85,8 +90,10 @@ def _squash(s):
 
 
 def delete_auto_chars(s, chars=None):
-    """The AUTO_FIXABLE repair: delete the listed characters with nothing in their place, then close up the spaces that leaves."""
+    """The AUTO_FIXABLE repair: every WS_CHARS character becomes a plain space, the listed characters are deleted with nothing in
+    their place, then repeated and edge spaces are closed up."""
     chars = AUTO_DELETE_CHARS if chars is None else chars
+    s = "".join(" " if c in WS_CHARS else c for c in s)
     return _squash("".join(c for c in s if c not in chars))
 
 
@@ -140,7 +147,8 @@ Rule = namedtuple("Rule", "id title targets step baseline check text bad good")
 
 
 def _c_empty(n, t): return n.strip() == ""
-def _c_nonascii(n, t): return any(ord(c) > 126 or ord(c) < 32 for c in n)
+def _c_nonascii(n, t): return any((ord(c) > 126 or ord(c) < 32) and c not in WS_CHARS for c in n)
+def _c_ws(n, t): return any(c in WS_CHARS for c in n)
 def _c_special(n, t):
     if PROFILES[t]["kind"] == "label":
         return any(c in LABEL_BLOCKLIST for c in n)
@@ -157,15 +165,18 @@ _NAMES = ("planning_name", "core_name")
 RULES = [
     Rule("EMPTY", "Name is empty", TARGETS, "baseline", True, _c_empty, "A name must contain at least one character.", "(blank)", "Budget"),
     Rule("NON_ASCII", "Non-ASCII character", TARGETS, "char_cleanup", True, _c_nonascii,
-         "Emoji, accented letters, smart quotes, zero-width characters, tabs and other non-ASCII characters are not allowed, because data exported to CSV "
+         "Emoji, accented letters, smart quotes, zero-width characters and other non-ASCII characters are not allowed, because data exported to CSV "
          "without the right encoding corrupts them. Proposed repair (needs approval): accents become plain letters, the rest are removed.", "Café ✨ Budget", "Cafe Budget"),
+    Rule("WHITESPACE_CHAR", "Tab, new line or no-break space", TARGETS, "char_cleanup", True, _c_ws,
+         "A no-break space (ASCII 160), tab, new line, vertical tab, form feed or carriage return must never appear in a name or label. Each is turned into a "
+         "plain space (ASCII 32), and the spaces are then closed up. AUTO_FIXABLE.", "Total\\tCost", "Total Cost"),
     Rule("SPECIAL_CHAR", "Special character", TARGETS, "char_cleanup", True, _c_special,
          "Names allow only letters, digits, spaces and hyphens. The characters ' \" ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? are AUTO_FIXABLE: they are "
          "deleted with nothing in their place (and any double space that leaves is closed up). Any other symbol, such as an underscore, a backslash, | + =, "
          "needs approval; the proposal turns an underscore or backslash into a space and deletes the rest. Labels keep the original text and remove only "
          "the characters Adobe documents as unsupported in labels: [ ] ( ) { } : and tab, newline, carriage return, form feed.", "PO Number (from PO#s)", "PO Number from POs"),
-    Rule("EDGE_SPACE", "Leading or trailing space", TARGETS, "char_cleanup", True, _c_edge, "No space at the start or end.", " Budget ", "Budget"),
-    Rule("DOUBLE_SPACE", "Double space", TARGETS, "char_cleanup", True, _c_double, "No two spaces in a row.", "Total  Cost", "Total Cost"),
+    Rule("EDGE_SPACE", "Leading or trailing space", TARGETS, "char_cleanup", True, _c_edge, "No space at the start or end. Removing them is AUTO_FIXABLE.", " Budget ", "Budget"),
+    Rule("DOUBLE_SPACE", "Double space", TARGETS, "char_cleanup", True, _c_double, "No two spaces in a row. Closing them up is AUTO_FIXABLE.", "Total  Cost", "Total Cost"),
     Rule("LEADING_DIGIT", "Starts with a digit", _NAMES, "leading_digits", True, _c_lead,
          "A name must not start with a digit. The proposed repair (needs approval) follows the chosen preset: move the leading number token behind the descriptive words, "
          "or put a chosen word in front. A name that is only a number needs a person.", "500K Acme Fund", "Acme Fund 500K"),
@@ -178,7 +189,8 @@ RULES = [
          "Names Adobe reserves cannot be used (list to be confirmed; empty for now).", "(reserved word)", "(any other name)"),
     Rule("TABLE_REF", "Old table name inside a field name", TARGETS, "table_swap", False, None,
          "When a field name contains the name of a table that is being renamed (typical for lookup and rollup fields), the table's new name is suggested. "
-         "The table is identified through the schema (link field -> linked table ID), never by guessing, and the old name must match as a whole name.",
+         "The table is identified through the schema (link field -> linked table ID), never by guessing, and the old name must match as a whole name. "
+         "Because every table name must be approved before fields are reviewed, a swap that follows the schema is AUTO_FIXABLE; a mention with no schema path is NEEDS_HUMAN.",
          "PO Number (from PO#s)  [table renamed POs]", "PO Number (from POs)"),
     Rule("DUPLICATE", "Duplicate name", _NAMES, "duplicates", True, None,
          "Names must be unique within a table, ignoring case. The check runs last, on the repaired names, so collisions created by the cleanup are caught. "
@@ -232,8 +244,8 @@ def table_names(tables, settings, approved=None):
         old_rules = violations(old, "planning_name", settings)
         if sug == old and not old_rules:
             verdict = PASS
-        elif not bad and set(old_rules) == {"SPECIAL_CHAR"} and sug == delete_auto_chars(old):
-            verdict = AUTO_FIXABLE       # only AUTO_DELETE_CHARS were removed; a number prefix or anything else is a person's decision
+        elif not bad and old_rules and set(old_rules) <= AUTO_RULES and sug == delete_auto_chars(old):
+            verdict = AUTO_FIXABLE       # only listed characters and whitespace were repaired; a number prefix or anything else is a person's decision
         else:
             verdict = NEEDS_HUMAN
         out[t["table_id"]] = {"table_id": t["table_id"], "base_id": t.get("base_id"), "old": old, "suggested": sug, "effective": eff,
@@ -261,7 +273,9 @@ def swap_table_refs(name, field, fields_by_id, tmap, base_tables):
     if tid and tid in tmap:
         old, new = tmap[tid]["old"], tmap[tid]["effective"]
         if old != new and _whole(old).search(name):
-            return _whole(old).sub(lambda m: new, name), "swapped", "table %s: %s -> %s" % (tid, old, new)
+            # 'swapped' = the new table name is approved (safe to treat as AUTO_FIXABLE); 'swapped_unapproved' = it is still only a proposal
+            return (_whole(old).sub(lambda m: new, name), "swapped" if tmap[tid]["approved"] else "swapped_unapproved",
+                    "table %s: %s -> %s" % (tid, old, new))
         return name, "none", ""
     if tid:
         return name, "none", ""
@@ -280,8 +294,10 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
     steps, reasons, rules = {}, [], violations(candidate, target, settings)
     cur = candidate
     ambiguous = False
+    swap_status = "none"
     if settings.table_swap and tmap:
         new, status, detail = swap_table_refs(cur, field, fields_by_id, tmap, base_tables)
+        swap_status = status
         steps["table_swap"] = new != cur
         if status != "none":
             rules.append("TABLE_REF")
@@ -289,6 +305,7 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
             ambiguous = True
             reasons.append("Table reference is ambiguous (%s)" % detail)
         cur = new
+    swapped_name = cur
     if settings.char_cleanup:
         new = clean_name_chars(cur) if kind == "name" else clean_label_chars(cur)
         if kind == "name":
@@ -311,8 +328,11 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
         r = RULE_BY_ID[rid]
         off = r.step in STEPS and not settings.enabled(r.step)
         reasons.append("%s%s" % (r.title, " (the '%s' step is switched off, so no fix is suggested)" % r.step if off else ""))
-    auto = (set(rules) == {"SPECIAL_CHAR"} and not remaining and not ambiguous and cur != candidate
-            and cur == delete_auto_chars(candidate, LABEL_BLOCKLIST if kind == "label" else AUTO_DELETE_CHARS))
+    # AUTO_FIXABLE: the only problems are listed characters and whitespace (plus a schema-resolved swap to an APPROVED table name), and the
+    # proposed name is exactly what deleting/normalising those gives. Anything else (accents, emoji, 1Q, leading digits, ...) needs a person.
+    allowed = AUTO_RULES | ({"TABLE_REF"} if swap_status == "swapped" else set())
+    expected = delete_auto_chars(swapped_name, LABEL_BLOCKLIST if kind == "label" else AUTO_DELETE_CHARS)
+    auto = bool(rules) and set(rules) <= allowed and not remaining and not ambiguous and cur != candidate and cur == expected
     if not rules and cur == candidate and not ambiguous:
         verdict = PASS
     elif auto:
@@ -348,17 +368,30 @@ def presence(f):
             "abandon_blocked_because": why}
 
 
-def run(fields, tables, settings=None, manual=None, approved_tables=None, abandoned=(), out_of_scope_tables=()):
+def table_gate(tmap, approved):
+    """Field review may start only when every in-scope table's new name has been approved (an unchanged name is approved too, in one click).
+    Returns {ready, pending}: pending lists the table IDs still waiting."""
+    pending = [tid for tid in tmap if tid not in (approved or {})]
+    return {"ready": not pending, "pending": pending}
+
+
+def run(fields, tables, settings=None, manual=None, approved_tables=None, abandoned=(), out_of_scope_tables=(), gate=False):
     """Validate every field for every target.
     fields: list of {field_id, table_id, table_name, field_name, data_type, linked_table_id, source_link_field_id, row_count, null_count,
             cardinality, cardinality_is_capped, profiled}. tables: list of {table_id, table_name, base_id}.
     manual: {field_id: {planning_name, core_name, core_label}} - a person's own names; they are validated and never overwritten.
     abandoned: field IDs a person abandoned (excluded, so clusters shrink). out_of_scope_tables: table IDs to skip.
-    Returns {settings, tables, fields, clusters, summary}."""
+    gate: when True and any in-scope table name is not yet approved, no field is validated: fields and clusters come back empty and
+    result['gate'] lists the pending tables. This is the hard requirement for the app; False is for drafts and tests.
+    Returns {settings, tables, gate, fields, clusters, summary}."""
     settings = settings or Settings()
     manual = manual or {}
     skip_tables, gone = set(out_of_scope_tables), set(abandoned)
     tmap = table_names([t for t in tables if t["table_id"] not in skip_tables], settings, approved_tables)
+    g = table_gate(tmap, approved_tables)
+    g["enforced"] = bool(gate)
+    if gate and not g["ready"]:
+        return {"settings": settings.as_dict(), "tables": tmap, "gate": g, "fields": OrderedDict(), "clusters": [], "summary": summarize({})}
     fields_by_id = {f["field_id"]: f for f in fields}
     tables_by_base = defaultdict(list)
     for t in tables:
@@ -405,7 +438,7 @@ def run(fields, tables, settings=None, manual=None, approved_tables=None, abando
                 r["verdict"], r["suggested"] = NEEDS_HUMAN, None
                 r["rules"] = sorted(set(r["rules"]) | {"DUPLICATE"})
                 r["reasons"].append("Duplicate name within the table (%d fields share '%s'); see group %s" % (len(members), r["final"], cid))
-    return {"settings": settings.as_dict(), "tables": tmap, "fields": results, "clusters": clusters, "summary": summarize(results)}
+    return {"settings": settings.as_dict(), "tables": tmap, "gate": g, "fields": results, "clusters": clusters, "summary": summarize(results)}
 
 
 def summarize(results):
@@ -439,7 +472,9 @@ def rules_markdown():
         p = PROFILES[t]
         L.append("- **%s** (`%s`): %s. Maximum length %d, %s." % (p["title"], t, "strict allowlist of ASCII letters, digits, spaces and hyphens" if p["kind"] == "name"
                                                                 else "keeps the original text as far as possible; only emoji, non-ASCII and reporting-problematic characters are removed", p["max_len"], p["len_status"]))
-    L += ["", "## Order the rules run in", "",
+    L += ["", "Names are unique within a table only. Adobe states that a Core custom field API name must be unique across the whole Workfront instance; "
+          "that cross-table check is a separate step and is not part of this validator.", "", "## Order the rules run in", "",
+          "0. Before any field is reviewed, every in-scope table name must be approved (an unchanged name is approved in one click).",
           "1. Table names are cleaned and a table rename map is built.", "2. Old table names inside field names are replaced (resolved through the schema).",
           "3. Characters are cleaned up and `1Q` becomes `Q1` (names only).", "4. Names that start with a digit are rearranged.",
           "5. Duplicates are checked last, on the repaired names. Always on.", "",

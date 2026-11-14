@@ -20,7 +20,7 @@ def ev(name, target="planning_name", s=S, field=None, tmap=None, fields=None, ba
 r = ev("Budget")
 check("clean name passes", r["verdict"] == PASS and r["proposed"] is None and r["rules"] == [], r)
 r = ev("Total  Cost ")
-check("double and edge spaces need approval; repair is proposed, never applied", r["verdict"] == NEEDS_HUMAN and r["suggested"] is None and r["proposed"] == "Total Cost" and r["candidate"] == "Total  Cost "
+check("double and edge spaces are AUTO_FIXABLE (proposed, still approved by a person)", r["verdict"] == AUTO_FIXABLE and r["suggested"] == "Total Cost" and r["candidate"] == "Total  Cost " and r["candidate"] == "Total  Cost "
       and {"DOUBLE_SPACE", "EDGE_SPACE"} <= set(r["rules"]), r)
 r = ev("x" * 251)
 check("over 250 chars: needs human, no fix", r["verdict"] == NEEDS_HUMAN and "TOO_LONG" in r["rules"] and r["proposed"] is None)
@@ -42,7 +42,7 @@ for ch in "_" + BS + "|+=":
 check("underscore and backslash are proposed as a space", ev("a_b")["proposed"] == "a b" and ev("a" + BS + "b")["proposed"] == "a b")
 check("a dot, slash and hash are deleted, not turned into spaces", ev("v1.2/x#")["suggested"] == "v12x")
 check("spaces left by a deletion are closed up (part of the same auto fix)", ev("Terms & Conditions")["suggested"] == "Terms Conditions" and ev("Terms & Conditions")["verdict"] == AUTO_FIXABLE)
-check("auto fix plus an unrelated problem is not auto", ev("Total  #Cost")["verdict"] == NEEDS_HUMAN and ev("1Q #Plan")["verdict"] == NEEDS_HUMAN)
+check("auto fix plus spacing is still auto; plus an unrelated problem is not", ev("Total  #Cost")["verdict"] == AUTO_FIXABLE and ev("Total  #Cost")["suggested"] == "Total Cost" and ev("1Q #Plan")["verdict"] == NEEDS_HUMAN)
 check("deleting characters that exposes a quarter token is not auto", ev("1#Q Plan")["verdict"] == NEEDS_HUMAN)
 check("auto fix that would leave an empty name needs a person", ev("#?")["verdict"] == NEEDS_HUMAN)
 check("hyphen is allowed", ev("Pre-Approved")["verdict"] == PASS)
@@ -76,7 +76,7 @@ check("label keeps 1Q; parentheses are unsupported in labels (Adobe), so deletin
 for ch in "[](){}:":
     check("Adobe-unsupported label character %r is auto-fixable" % ch, ev("Alpha%sBeta" % ch, "core_label")["verdict"] == AUTO_FIXABLE, ev("Alpha%sBeta" % ch, "core_label"))
 check("characters Adobe does not list stay in a label", all(ev("Alpha%sBeta" % ch, "core_label")["verdict"] == PASS for ch in "#_&/" + chr(92) + "|"))
-check("label tab and newline are flagged (control characters)", ev("a	b", "core_label")["verdict"] == NEEDS_HUMAN and ev("a	b", "core_label")["proposed"] == "a b")
+check("label tab and newline become spaces (auto)", ev("a" + chr(9) + "b", "core_label")["verdict"] == AUTO_FIXABLE and ev("a" + chr(9) + "b", "core_label")["suggested"] == "a b")
 r = ev("Budget \U0001F680 {x}", "core_label")
 check("label drops emoji and blocklisted characters only", r["proposed"] == "Budget x" and r["verdict"] == NEEDS_HUMAN, r)
 check("label converts 1Q only when the preset says so", ev("1Q Plan", "core_label", Settings(label_keep_quarter=False))["proposed"] == "Q1 Plan")
@@ -149,6 +149,46 @@ lab = rl["fields"]["lLook"]["targets"]["core_label"]
 check("label follows the renamed table through the schema, then Adobe-unsupported parentheses go", lab["final"] == "PO Number from POs" and "TABLE_REF" in lab["rules"] and lab["verdict"] == NEEDS_HUMAN, lab)
 check("name and label both get the swap", rl["fields"]["lLook"]["targets"]["planning_name"]["final"] == "PO Number from POs" and rl["fields"]["lLook"]["targets"]["core_name"]["final"] == "PO Number from POs")
 check("swap off leaves the label's table name alone", "TABLE_REF" not in fn.run(fl, tabs, Settings(table_swap=False))["fields"]["lLook"]["targets"]["core_label"]["rules"])
+
+# ---- Core name: letters, digits, spaces and hyphens; no leading digit; unique within a table only
+check("core name allows spaces and hyphens", ev("Pre-Approved Budget", "core_name")["verdict"] == PASS)
+check("core name must not start with a digit", ev("500K Fund", "core_name")["proposed"] == "Fund 500K" and ev("500K Fund", "core_name")["verdict"] == NEEDS_HUMAN)
+check("core name rejects every character outside the allowlist", all("SPECIAL_CHAR" in ev("A%sB" % ch, "core_name")["rules"] for ch in "_|+=" + chr(92) + "'\"`~!@#$%^&*()[]{};:<>,./?"))
+check("core name uniqueness is per table, not across tables", not fn.run(
+    [{"field_id": "c1", "table_id": "tP", "field_name": "Budget"}, {"field_id": "c2", "table_id": "tQ", "field_name": "Budget"}],
+    [{"table_id": "tP", "base_id": "b", "table_name": "P"}, {"table_id": "tQ", "base_id": "b", "table_name": "Q"}], S)["clusters"])
+
+# ---- whitespace characters are always a plain space (ASCII 32) and never remain in a name
+for code, label in ((160, "no-break space"), (9, "tab"), (10, "new line"), (13, "carriage return"), (12, "form feed"), (11, "vertical tab")):
+    for t in fn.TARGETS:
+        r = ev("Total" + chr(code) + "Cost", t)
+        check("%s becomes a plain space, auto-fixable (%s)" % (label, t), r["verdict"] == AUTO_FIXABLE and r["suggested"] == "Total Cost" and "WHITESPACE_CHAR" in r["rules"] and "NON_ASCII" not in r["rules"], r)
+check("whitespace characters at the edges and doubled are closed up", ev(chr(160) + "A" + chr(9) + chr(10) + "B" + chr(13))["suggested"] == "A B")
+r = ev("A" + chr(160) + "B", s=Settings(char_cleanup=False))
+check("a no-break space can never pass, even with cleanup off", r["verdict"] == NEEDS_HUMAN and "WHITESPACE_CHAR" in r["rules"], r)
+check("other unusual spaces (thin space) are not on the auto list", ev("A" + chr(0x2009) + "B")["verdict"] == NEEDS_HUMAN)
+
+# ---- table approval gate and approved-table swap
+gf = [{"field_id": "gLink", "table_id": "tG", "field_name": "PO#s", "data_type": "multipleRecordLinks", "linked_table_id": "tH"},
+      {"field_id": "gLook", "table_id": "tG", "field_name": "PO Number (from PO#s)", "data_type": "multipleLookupValues", "source_link_field_id": "gLink"}]
+gt = [{"table_id": "tG", "base_id": "b", "table_name": "Invoices"}, {"table_id": "tH", "base_id": "b", "table_name": "PO#s"}]
+g0 = fn.run(gf, gt, S, gate=True)
+check("gate: no field is reviewed until every table name is approved", not g0["fields"] and not g0["clusters"] and g0["gate"] == {"ready": False, "pending": ["tG", "tH"], "enforced": True}, g0["gate"])
+g1 = fn.run(gf, gt, S, approved_tables={"tG": "Invoices"}, gate=True)
+check("gate: one table still pending still blocks", not g1["fields"] and g1["gate"]["pending"] == ["tH"])
+g2 = fn.run(gf, gt, S, approved_tables={"tG": "Invoices", "tH": "POs"}, gate=True)
+check("gate: opens when every table is approved, an unchanged name counts", g2["gate"]["ready"] and len(g2["fields"]) == 2)
+lk = g2["fields"]["gLook"]["targets"]["planning_name"]
+check("swap to an APPROVED table name is auto-fixable", lk["verdict"] == AUTO_FIXABLE and lk["suggested"] == "PO Number from POs", lk)
+check("swap to an approved name is auto for the Core name and label too", g2["fields"]["gLook"]["targets"]["core_name"]["verdict"] == AUTO_FIXABLE
+      and g2["fields"]["gLook"]["targets"]["core_label"]["verdict"] == AUTO_FIXABLE)
+g3 = fn.run(gf, gt, S)
+check("without the gate, a swap to an unapproved name stays NEEDS_HUMAN", g3["fields"]["gLook"]["targets"]["planning_name"]["verdict"] == NEEDS_HUMAN and not g3["gate"]["enforced"])
+check("a swap plus a leading digit or quarter is not auto", fn.run(gf + [{"field_id": "gQ", "table_id": "tG", "field_name": "1Q (from PO#s)", "data_type": "multipleLookupValues", "source_link_field_id": "gLink"}],
+      gt, S, approved_tables={"tG": "Invoices", "tH": "POs"})["fields"]["gQ"]["targets"]["planning_name"]["verdict"] == NEEDS_HUMAN)
+check("an ambiguous mention (no schema path) is never auto, even with approved tables", fn.run(
+    [{"field_id": "gF", "table_id": "tG", "field_name": "Mentions PO#s here", "data_type": "formula"}], gt, S, approved_tables={"tG": "Invoices", "tH": "POs"}
+)["fields"]["gF"]["targets"]["planning_name"]["verdict"] == NEEDS_HUMAN)
 
 # ---- duplicates
 dup = [{"field_id": "d1", "table_id": "tX", "field_name": "Budget", "data_type": "number", "row_count": 10, "null_count": 0, "cardinality": 5, "profiled": True},

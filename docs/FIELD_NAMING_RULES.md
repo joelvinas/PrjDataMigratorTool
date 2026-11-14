@@ -8,6 +8,8 @@ These rules are applied by the migration's field name validator. Every proposed 
 - **Workfront Core custom field name** (`core_name`): strict allowlist of ASCII letters, digits, spaces and hyphens. Maximum length 255, PROVISIONAL (Adobe's custom form page states no length limit for API names; 255 is a placeholder).
 - **Workfront Core custom field label** (`core_label`): keeps the original text as far as possible; only emoji, non-ASCII and reporting-problematic characters are removed. Maximum length 255, PROVISIONAL (Adobe's custom form page states no length limit for labels; 255 is a placeholder).
 
+Names are unique within a table only. Adobe states that a Core custom field API name must be unique across the whole Workfront instance; that cross-table check is a separate step and is not part of this validator.
+
 ## Order the rules run in
 
 1. Table names are cleaned and a table rename map is built.
