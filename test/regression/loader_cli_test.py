@@ -69,6 +69,17 @@ loader.main(["dry-run", "--db", dbp, "--base", "appL", "--out", out, "--env", "p
 check("a production DRY run is allowed (it changes nothing) and is labelled", open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read().startswith("Dry run in PRODUCTION"))
 check("the database is still untouched after the dry runs", hashlib.sha256(open(dbp, "rb").read()).hexdigest() == h0)
 
+# ---- a dry run reads what the database already holds (state in load_id_map)
+w = sqlite3.connect(dbp)
+w.execute("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, name, workfront_id, status, attempts) VALUES ('C-T-tA','sandbox1',NULL,'','core','form','appL','tA','Orders','wfForm1','created',1)")
+w.execute("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, airtable_field_id, name, status, attempts) VALUES ('C-F-fA1','sandbox1',NULL,'','core','field','appL','tA','fA1','Order Name','pending',1)")
+w.execute("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, name, workfront_id, status, attempts) VALUES ('P-T-tA','sandbox1','wsDev','wsDev','planning','record_type','appL','tA','Orders','wfRec1','created',1)")
+w.commit(); w.close()
+res = loader.main(["dry-run", "--db", dbp, "--base", "appL", "--out", out])
+summ = open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read()
+check("a dry run skips what the database already holds as created, and says so", {r["temp_id"]: r["outcome"] for r in res["results"]}.get("P-T-tA") == "already_created" and res["counts"].get("already_created") == 1, res["counts"])
+check("a dry run says which items an earlier run started and never finished", "1 item(s) were started by an earlier run and never finished" in summ and "C-F-fA1" in summ, summ[:400])
+
 # ---- the guards
 for argv, why in ((["run", "--db", dbp, "--base", "appL"], "run"), (["run", "--db", dbp, "--base", "appL", "--env", "production"], "run in production")):
     try:
