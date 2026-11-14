@@ -72,7 +72,11 @@ check("quarter style detection", [fn.quarter_style(x) for x in ("Q1 Plan", "1Q P
 
 # ---- labels keep the client's convention
 r = ev("1Q Budget (Draft)", "core_label")
-check("label keeps 1Q and parentheses and records the convention", r["verdict"] == PASS and r["quarter_style"] == "1Q", r)
+check("label keeps 1Q; parentheses are unsupported in labels (Adobe), so deleting them is auto-fixable", r["verdict"] == AUTO_FIXABLE and r["suggested"] == "1Q Budget Draft" and r["quarter_style"] == "1Q", r)
+for ch in "[](){}:":
+    check("Adobe-unsupported label character %r is auto-fixable" % ch, ev("Alpha%sBeta" % ch, "core_label")["verdict"] == AUTO_FIXABLE, ev("Alpha%sBeta" % ch, "core_label"))
+check("characters Adobe does not list stay in a label", all(ev("Alpha%sBeta" % ch, "core_label")["verdict"] == PASS for ch in "#_&/" + chr(92) + "|"))
+check("label tab and newline are flagged (control characters)", ev("a	b", "core_label")["verdict"] == NEEDS_HUMAN and ev("a	b", "core_label")["proposed"] == "a b")
 r = ev("Budget \U0001F680 {x}", "core_label")
 check("label drops emoji and blocklisted characters only", r["proposed"] == "Budget x" and r["verdict"] == NEEDS_HUMAN, r)
 check("label converts 1Q only when the preset says so", ev("1Q Plan", "core_label", Settings(label_keep_quarter=False))["proposed"] == "Q1 Plan")
@@ -137,6 +141,15 @@ check("swap off: no TABLE_REF", "TABLE_REF" not in res_off["fields"]["fLook"]["t
 check("link field itself resolves through its own linked table", "TABLE_REF" in res["fields"]["fLink"]["targets"]["planning_name"]["rules"]
       and res["fields"]["fLink"]["targets"]["planning_name"]["final"] == "POs")
 
+# ---- labels get the table-name swap too
+fl = [{"field_id": "lLink", "table_id": "tC", "field_name": "PO#s", "data_type": "multipleRecordLinks", "linked_table_id": "tB"},
+      {"field_id": "lLook", "table_id": "tC", "field_name": "PO Number (from PO#s)", "data_type": "multipleLookupValues", "source_link_field_id": "lLink"}]
+rl = fn.run(fl, tabs, S)
+lab = rl["fields"]["lLook"]["targets"]["core_label"]
+check("label follows the renamed table through the schema, then Adobe-unsupported parentheses go", lab["final"] == "PO Number from POs" and "TABLE_REF" in lab["rules"] and lab["verdict"] == NEEDS_HUMAN, lab)
+check("name and label both get the swap", rl["fields"]["lLook"]["targets"]["planning_name"]["final"] == "PO Number from POs" and rl["fields"]["lLook"]["targets"]["core_name"]["final"] == "PO Number from POs")
+check("swap off leaves the label's table name alone", "TABLE_REF" not in fn.run(fl, tabs, Settings(table_swap=False))["fields"]["lLook"]["targets"]["core_label"]["rules"])
+
 # ---- duplicates
 dup = [{"field_id": "d1", "table_id": "tX", "field_name": "Budget", "data_type": "number", "row_count": 10, "null_count": 0, "cardinality": 5, "profiled": True},
        {"field_id": "d2", "table_id": "tX", "field_name": "budget", "data_type": "number", "row_count": 10, "null_count": 10, "cardinality": 0, "profiled": True},
@@ -169,11 +182,11 @@ check("capped 5 digit cardinality formats with comma and plus", fn.presence({"ca
 # ---- manual names are validated, never overwritten, and diffed against the rubric
 mf = [{"field_id": "m1", "table_id": "tM", "field_name": "1Q Review (old)", "data_type": "text", "profiled": True},
       {"field_id": "m2", "table_id": "tM", "field_name": "Other", "data_type": "text", "profiled": True}]
-res = fn.run(mf, [{"table_id": "tM", "base_id": "b", "table_name": "M"}], S, manual={"m1": {"planning_name": "Q1 Review", "core_label": "1Q Review (old)"}})
+res = fn.run(mf, [{"table_id": "tM", "base_id": "b", "table_name": "M"}], S, manual={"m1": {"planning_name": "Q1 Review", "core_label": "1Q Review old"}})
 m1 = res["fields"]["m1"]["targets"]
 check("a compliant manual name passes and is kept", m1["planning_name"]["verdict"] == PASS and m1["planning_name"]["final"] == "Q1 Review" and m1["planning_name"]["source"] == "manual")
 check("manual name that differs from the rubric is shown in the diff", m1["planning_name"]["differs_from_rubric"] is True and m1["planning_name"]["rubric_name"] == "Q1 Review old")
-check("manual label equal to the rubric result is not a difference", m1["core_label"]["differs_from_rubric"] is False and m1["core_label"]["rubric_name"] == "1Q Review (old)", m1["core_label"])
+check("manual label equal to the rubric result is not a difference", m1["core_label"]["differs_from_rubric"] is False and m1["core_label"]["rubric_name"] == "1Q Review old", m1["core_label"])
 check("targets without a manual name use the original", m1["core_name"]["source"] == "original")
 res = fn.run(mf, [{"table_id": "tM", "base_id": "b", "table_name": "M"}], S, manual={"m1": {"planning_name": "Bad_Name?"}})
 check("a non-compliant manual name gets a suggestion beside it, not an overwrite", res["fields"]["m1"]["targets"]["planning_name"]["candidate"] == "Bad_Name?"

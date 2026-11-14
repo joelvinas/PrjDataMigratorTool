@@ -5,8 +5,8 @@ These rules are applied by the migration's field name validator. Every proposed 
 ## Targets
 
 - **Workfront Planning field name** (`planning_name`): strict allowlist of ASCII letters, digits, spaces and hyphens. Maximum length 250, confirmed (Adobe Workfront Planning, Field overview: 250 characters).
-- **Workfront Core custom field name** (`core_name`): strict allowlist of ASCII letters, digits, spaces and hyphens. Maximum length 255, PROVISIONAL (Adobe lists 255 for object names; Core custom field name limit not confirmed).
-- **Workfront Core custom field label** (`core_label`): keeps the original text as far as possible; only emoji, non-ASCII and reporting-problematic characters are removed. Maximum length 255, PROVISIONAL (Adobe lists 255 for object names and drop-down labels; Core label limit not confirmed).
+- **Workfront Core custom field name** (`core_name`): strict allowlist of ASCII letters, digits, spaces and hyphens. Maximum length 255, PROVISIONAL (Adobe's custom form page states no length limit for API names; 255 is a placeholder).
+- **Workfront Core custom field label** (`core_label`): keeps the original text as far as possible; only emoji, non-ASCII and reporting-problematic characters are removed. Maximum length 255, PROVISIONAL (Adobe's custom form page states no length limit for labels; 255 is a placeholder).
 
 ## Order the rules run in
 
@@ -44,7 +44,7 @@ Emoji, accented letters, smart quotes, zero-width characters, tabs and other non
 
 ### SPECIAL_CHAR - Special character
 
-Names allow only letters, digits, spaces and hyphens. The characters ' " ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? are AUTO_FIXABLE: they are deleted with nothing in their place (and any double space that leaves is closed up). Any other symbol, such as an underscore, a backslash, | + =, needs approval; the proposal turns an underscore or backslash into a space and deletes the rest. Labels keep the original text and remove only the characters on the reporting blocklist (provisional).
+Names allow only letters, digits, spaces and hyphens. The characters ' " ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? are AUTO_FIXABLE: they are deleted with nothing in their place (and any double space that leaves is closed up). Any other symbol, such as an underscore, a backslash, | + =, needs approval; the proposal turns an underscore or backslash into a space and deletes the rest. Labels keep the original text and remove only the characters Adobe documents as unsupported in labels: [ ] ( ) { } : and tab, newline, carriage return, form feed.
 
 - Applies to: planning_name, core_name, core_label
 - Pipeline step: char_cleanup (baseline, always checked)
@@ -102,7 +102,7 @@ Names Adobe reserves cannot be used (list to be confirmed; empty for now).
 
 When a field name contains the name of a table that is being renamed (typical for lookup and rollup fields), the table's new name is suggested. The table is identified through the schema (link field -> linked table ID), never by guessing, and the old name must match as a whole name.
 
-- Applies to: planning_name, core_name
+- Applies to: planning_name, core_name, core_label
 - Pipeline step: table_swap
 - Example: `PO Number (from PO#s)  [table renamed POs]` becomes `PO Number (from POs)`
 

@@ -32,13 +32,15 @@ STEPS = ("table_swap", "char_cleanup", "leading_digits")   # the toggles, in pip
 PROFILES = {
     "planning_name": {"kind": "name", "max_len": 250, "len_status": "confirmed (Adobe Workfront Planning, Field overview: 250 characters)",
                       "title": "Workfront Planning field name"},
-    "core_name": {"kind": "name", "max_len": 255, "len_status": "PROVISIONAL (Adobe lists 255 for object names; Core custom field name limit not confirmed)",
+    "core_name": {"kind": "name", "max_len": 255, "len_status": "PROVISIONAL (Adobe's custom form page states no length limit for API names; 255 is a placeholder)",
                   "title": "Workfront Core custom field name"},
-    "core_label": {"kind": "label", "max_len": 255, "len_status": "PROVISIONAL (Adobe lists 255 for object names and drop-down labels; Core label limit not confirmed)",
+    "core_label": {"kind": "label", "max_len": 255, "len_status": "PROVISIONAL (Adobe's custom form page states no length limit for labels; 255 is a placeholder)",
                    "title": "Workfront Core custom field label"},
 }
-# PROVISIONAL: characters removed from labels because they are problematic in reporting. Everything else printable ASCII is kept.
-LABEL_BLOCKLIST = frozenset('\\{}[]|<>')
+# Characters Adobe documents as unsupported in custom field labels and API names (Experience League, 'Create a custom form'):
+# tab, newline, carriage return, form feed (caught by the control-character rule) and [ ] ( ) : { }.
+# Adobe also says special characters in a label do not display correctly in reports without listing them; emoji are not mentioned there.
+LABEL_BLOCKLIST = frozenset('[](){}:')
 # PROVISIONAL and empty: names Adobe reserves (to be confirmed). Compared case-insensitively.
 RESERVED_NAMES = {t: frozenset() for t in TARGETS}
 
@@ -161,7 +163,7 @@ RULES = [
          "Names allow only letters, digits, spaces and hyphens. The characters ' \" ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? are AUTO_FIXABLE: they are "
          "deleted with nothing in their place (and any double space that leaves is closed up). Any other symbol, such as an underscore, a backslash, | + =, "
          "needs approval; the proposal turns an underscore or backslash into a space and deletes the rest. Labels keep the original text and remove only "
-         "the characters on the reporting blocklist (provisional).", "PO Number (from PO#s)", "PO Number from POs"),
+         "the characters Adobe documents as unsupported in labels: [ ] ( ) { } : and tab, newline, carriage return, form feed.", "PO Number (from PO#s)", "PO Number from POs"),
     Rule("EDGE_SPACE", "Leading or trailing space", TARGETS, "char_cleanup", True, _c_edge, "No space at the start or end.", " Budget ", "Budget"),
     Rule("DOUBLE_SPACE", "Double space", TARGETS, "char_cleanup", True, _c_double, "No two spaces in a row.", "Total  Cost", "Total Cost"),
     Rule("LEADING_DIGIT", "Starts with a digit", _NAMES, "leading_digits", True, _c_lead,
@@ -174,7 +176,7 @@ RULES = [
          "each label's convention is recorded instead.", "1Q Budget", "Q1 Budget"),
     Rule("RESERVED", "Reserved name", TARGETS, "baseline", True, _c_reserved,
          "Names Adobe reserves cannot be used (list to be confirmed; empty for now).", "(reserved word)", "(any other name)"),
-    Rule("TABLE_REF", "Old table name inside a field name", _NAMES, "table_swap", False, None,
+    Rule("TABLE_REF", "Old table name inside a field name", TARGETS, "table_swap", False, None,
          "When a field name contains the name of a table that is being renamed (typical for lookup and rollup fields), the table's new name is suggested. "
          "The table is identified through the schema (link field -> linked table ID), never by guessing, and the old name must match as a whole name.",
          "PO Number (from PO#s)  [table renamed POs]", "PO Number (from POs)"),
@@ -278,7 +280,7 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
     steps, reasons, rules = {}, [], violations(candidate, target, settings)
     cur = candidate
     ambiguous = False
-    if kind == "name" and settings.table_swap and tmap:
+    if settings.table_swap and tmap:
         new, status, detail = swap_table_refs(cur, field, fields_by_id, tmap, base_tables)
         steps["table_swap"] = new != cur
         if status != "none":
