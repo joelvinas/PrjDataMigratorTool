@@ -3,6 +3,7 @@
 
     python loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX [--out out/loader]
     python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX [--env sandbox|production] [--out out/loader]
+    python loader.py config  [--config config.json]     (which Workfront credentials are set: yes or no only)
 
 The database is opened READ-ONLY and nothing is sent anywhere. `plan` lists everything the migration would create in Workfront Planning and
 Workfront Core (record types, fields, select options in Airtable order, and the fields that link a Core object to its Planning record), each
@@ -16,6 +17,7 @@ import argparse, csv, io, os, pathlib, sqlite3, sys
 
 import fieldnames_io as fio
 import fieldnames_store as store
+import loadconfig as lc
 import loadplan as lp
 import loadrun as lr
 
@@ -71,6 +73,8 @@ def _write(out, name, text):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build the migration load plan and dry-run it (read-only; nothing is sent to Workfront).")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    pc = sub.add_parser("config", help="say which Workfront credentials are configured (yes or no only; a value is never shown)")
+    pc.add_argument("--config", default="config.json")
     for name in ("plan", "dry-run", "run"):
         p = sub.add_parser(name)
         p.add_argument("--db", required=True)
@@ -80,6 +84,14 @@ def main(argv=None):
         if name != "plan":
             p.add_argument("--env", default="sandbox", choices=("sandbox", "production"), help="the environment (default: sandbox)")
     a = ap.parse_args(argv)
+    if a.cmd == "config":
+        try:
+            st = lc.status(lc.read_config(a.config))
+        except lc.ConfigError as e:
+            sys.exit(str(e))
+        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  %-10s %-9s %s" % (e, s, "configured" if st[e][s] else "not configured") for e in lc.ENVIRONMENTS for s in lc.SYSTEMS]
+        print("\n".join(lines))
+        return st
     if a.cmd == "run":
         sys.exit("Creating items in Workfront is not implemented yet: the request shapes for Workfront Planning and Workfront Core are not verified and no credentials are "
                  "configured. Use 'plan' and 'dry-run'. See docs/LOADER_PLAN.md.")
