@@ -591,3 +591,22 @@ CREATE TABLE attachment_map (
     UNIQUE (source_record_uid, airtable_field_id, airtable_attachment_id, environment),
     FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
 );
+
+-- 17. The history of link direction decisions (migration 018)
+-- field_relationships keeps only the latest decision, so every confirm, change, clear and auto-set is also appended here: who, when, why and the old
+-- and new choice. Append-only. Field IDs and choices only: no record value.
+CREATE TABLE link_direction_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    airtable_field_id TEXT NOT NULL,              -- the link field the event is about
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('confirm', 'change', 'clear', 'auto_set')),   -- auto_set = the partner of a field a person chose on
+    old_relationship_type TEXT,                   -- NULL when there was no decision before
+    old_tiebreaker TEXT,
+    new_relationship_type TEXT,                   -- NULL after a clear
+    new_tiebreaker TEXT,
+    actor TEXT NOT NULL,                          -- initials or a short name (the app has no logins)
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_link_direction_events_field ON link_direction_events(airtable_field_id, event_id);

@@ -1,4 +1,4 @@
--- Migration 018 (PROPOSED, not applied): the history of link direction decisions. Adds ONE table: link_direction_events.
+-- Migration 018 (applied 14 November 2026): the history of link direction decisions. Adds ONE table: link_direction_events.
 -- Additive only. Safe to run more than once. Holds field IDs, direction choices, who, when and why. No record value.
 --
 -- Why: field_relationships (migration 015) keeps only the LATEST decision per link field, so a changed or cleared direction loses what it was

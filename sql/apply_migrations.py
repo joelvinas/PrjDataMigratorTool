@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the migrations (001 to 017) to an existing database. Standard library only.
+"""Apply the migrations (001 to 018) to an existing database. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
@@ -51,6 +51,7 @@ def main():
         conn.executescript(open(os.path.join(HERE, "migration_016_load_id_map_workspace_key.sql"), encoding="utf-8").read())
         added.append("load_id_map.workspace_key")
     conn.executescript(open(os.path.join(HERE, "migration_017_add_record_id_map.sql"), encoding="utf-8").read())
+    conn.executescript(open(os.path.join(HERE, "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
     dropped, kept = [], []
     for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():

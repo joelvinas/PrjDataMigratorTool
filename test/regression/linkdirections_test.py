@@ -77,6 +77,10 @@ row = {x["airtable_field_id"]: x for x in c.execute("SELECT * FROM field_relatio
 check("clearing returns both ends to undecided", row["fOC"]["confirmed"] == 0 and row["fCO"]["confirmed"] == 0 and row["fCO"]["relationship_type"] is None and row["fCO"]["approved_by"] is None)
 
 # ---- history (migration 018, proposed): written only when the table exists
+check("the schema library already includes the history table (migration 018 applied)", ld.has_events_table(c))
+c.execute("DROP TABLE link_direction_events"); c.commit()   # simulate a database that has not had 018 yet
+ld.decide(c, "JV", "fOC", "many_to_one", None, "no history table yet")
+ld.decide(c, "JV", "fOC", "clear", None, "")
 check("before migration 018 nothing is written to a history and nothing breaks", not ld.has_events_table(c))
 c.executescript(open(os.path.join(ROOT, "sql", "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
 c.executescript(open(os.path.join(ROOT, "sql", "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
