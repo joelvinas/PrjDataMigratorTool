@@ -54,6 +54,9 @@ AUTO_RULES = frozenset({"SPECIAL_CHAR", "WHITESPACE_CHAR", "EDGE_SPACE", "DOUBLE
 NAME_ALLOWED = re.compile(r"[A-Za-z0-9 \-]")
 _PUNCT_MAP = {ord(c): r for c, r in {"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", "−": "-",
                                      " ": " ", " ": " ", " ": " "}.items()}
+# Latin letters that Unicode does not decompose into an ASCII letter plus an accent: a fixed, deterministic spelling for each.
+_LATIN_MAP = {0xDF: "ss", 0xE6: "ae", 0xC6: "AE", 0x153: "oe", 0x152: "OE", 0xF8: "o", 0xD8: "O", 0x142: "l", 0x141: "L",
+              0x111: "d", 0x110: "D", 0xF0: "d", 0xD0: "D", 0xFE: "th", 0xDE: "Th", 0x131: "i"}
 _QTR_1Q = re.compile(r"(?<![A-Za-z0-9])([1-4])Q(?![A-Za-z])(\d?)")
 _QTR_Q1 = re.compile(r"(?<![A-Za-z0-9])Q([1-4])(?![A-Za-z0-9])")
 _LEAD = re.compile(r"^(\d[A-Za-z0-9\-]*)\s+(.*\S)$")
@@ -81,7 +84,7 @@ class Settings(object):
 
 def _translit(s):
     """Map smart quotes and dashes, then drop accents (NFKD). Deterministic."""
-    s = s.translate(_PUNCT_MAP)
+    s = s.translate(_PUNCT_MAP).translate(_LATIN_MAP)
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
@@ -323,6 +326,9 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
             steps.setdefault("leading_digits", False)
             reasons.append("Starts with a digit and the '%s' preset cannot be applied (%s)" % (
                 settings.digit_style, "no word given" if settings.digit_style == "prefix_word" and not settings.digit_word else "nothing follows the number"))
+    lost = sum(1 for c in _translit(candidate) if ord(c) > 126 and unicodedata.category(c).startswith("L"))
+    if settings.char_cleanup and lost:
+        reasons.append("%d letter(s) outside A-Z could not be converted and were removed; check the spelling of the proposed name" % lost)
     remaining = violations(cur, target, settings)
     for rid in remaining:
         r = RULE_BY_ID[rid]

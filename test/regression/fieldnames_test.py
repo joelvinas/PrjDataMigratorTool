@@ -59,6 +59,15 @@ check("composed and decomposed accents give the same result", ev("é")["propose
 check("CJK that cannot be transliterated is removed", ev("Budget 中文")["proposed"] == "Budget")
 check("name made only of emoji is needs human (empty after repair)", ev("\U0001F680")["verdict"] == NEEDS_HUMAN)
 
+# ---- letters Unicode does not decompose get a fixed spelling; letters that cannot be converted are flagged, not hidden
+check("sharp s and ligatures have a fixed spelling", ev("Gr" + chr(0xF6) + chr(0xDF) + "e")["proposed"] == "Grosse" and ev("Stra" + chr(0xDF) + "e " + chr(0xE6) + chr(0xF8))["proposed"] == "Strasse aeo")
+r = ev("C" + chr(0x43E) + "lor")
+check("a look-alike Cyrillic letter is removed and the proposal is flagged for a spelling check", r["verdict"] == NEEDS_HUMAN and r["proposed"] == "Clor"
+      and any("check the spelling" in x for x in r["reasons"]), r)
+check("CJK letters are flagged the same way", any("check the spelling" in x for x in ev(chr(0x9867) + chr(0x5BA2) + " Notes")["reasons"]))
+check("accents that convert cleanly are not flagged", not any("check the spelling" in x for x in ev("Caf" + chr(0xE9))["reasons"]) and ev("Caf" + chr(0xE9))["proposed"] == "Cafe")
+check("emoji removal is not a spelling warning", not any("check the spelling" in x for x in ev("Budget " + chr(0x1F680))["reasons"]))
+
 # ---- quarter convention
 check("1Q becomes Q1 as a proposal that needs approval", ev("1Q Budget")["proposed"] == "Q1 Budget" and ev("1Q Budget")["verdict"] == NEEDS_HUMAN)
 check("2Q in the middle", ev("Plan 2Q Review")["proposed"] == "Plan Q2 Review")
