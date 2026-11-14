@@ -240,6 +240,49 @@ function ageInfo(iso, now) {
   if (hours > AGE_STALE_HOURS) return { level: "stale", text: "stale: pulled " + text };
   return { level: "fresh", text: "pulled " + text };
 }
+/* ---------- sortable grids: a header marked data-sort="text" or "num" sorts the table on click (ascending, descending, then back to the natural order) ---------- */
+const sortStates = {};
+function sortableTable(id) {
+  const t = $(id);
+  if (!t || t.dataset.sortable) return;
+  t.dataset.sortable = "1";
+  Array.from(t.tHead.rows[0].cells).forEach((th, col) => {
+    if (!th.dataset.sort) return;
+    th.classList.add("sortable");
+    th.setAttribute("tabindex", "0");
+    th.setAttribute("role", "button");
+    th.setAttribute("title", "Click to sort");
+    const go = () => {
+      const s = sortStates[id];
+      sortStates[id] = !s || s.col !== col ? { col, dir: 1 } : s.dir === 1 ? { col, dir: -1 } : null;
+      applySort(id);
+    };
+    th.addEventListener("click", go);
+    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+}
+function applySort(id) {
+  const t = $(id);
+  if (!t || !t.tBodies[0]) return;
+  const body = t.tBodies[0], s = sortStates[id];
+  const rows = Array.from(body.rows);
+  rows.forEach((r, i) => { if (r._i === undefined) r._i = i; });
+  Array.from(t.tHead.rows[0].cells).forEach((th, col) => {
+    th.classList.toggle("sorted-asc", !!s && s.col === col && s.dir === 1);
+    th.classList.toggle("sorted-desc", !!s && s.col === col && s.dir === -1);
+    if (th.dataset.sort) th.setAttribute("aria-sort", s && s.col === col ? (s.dir === 1 ? "ascending" : "descending") : "none");
+  });
+  const kind = s ? t.tHead.rows[0].cells[s.col].dataset.sort : null;
+  const val = (r) => { const c = r.cells[s.col]; const v = c ? (c.dataset.sort !== undefined ? c.dataset.sort : c.textContent) : ""; return kind === "num" ? (parseFloat(String(v).replace(/,/g, "")) || 0) : String(v).trim(); };
+  rows.sort((a, b) => {
+    if (!s) return a._i - b._i;
+    const x = val(a), y = val(b);
+    const c = kind === "num" ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: "base" });
+    return c ? c * s.dir : a._i - b._i;
+  });
+  rows.forEach((r) => body.appendChild(r));
+}
+
 function ageTag(iso) {
   const a = ageInfo(iso);
   return a ? el("span", { class: "tag age-" + a.level, text: a.text, title: "Data older than " + AGE_STALE_HOURS + " hours is stale; older than " + AGE_OBSOLETE_HOURS + " hours is obsolete. Pull it again before relying on it." }) : "";

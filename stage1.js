@@ -209,6 +209,7 @@ function renderLinkDirections(r) {
     }
   }
   tbl.hidden = false;
+  applySort("linkTable");
 }
 
 async function saveLink(items, reason, done) {
@@ -271,6 +272,7 @@ async function loadDepgraph() {
       el("td", { class: "num", text: m.dependency_depth }), el("td", { text: m.parent_table_ids.map((p) => names[p] || p).join(", ") }), el("td", { text: flags })));
   });
   t.hidden = g.stored_matrix.length === 0;
+  applySort("orderTable");
   drawGraph(g, selfTables);
 }
 
@@ -503,9 +505,10 @@ async function registerRecords() {
   if (!base) { setMsg("regSummary", "Choose a base in step 5 (Results) first.", "err"); return; }
   setMsg("regSummary", "Working...", "");
   const d = await api("POST", "/api/records/register", { base_id: base });
-  d.tables.forEach((r) => body.appendChild(el("tr", {}, el("td", {}, r.table_name, ageTag(r.captured_at)), el("td", { class: "num", text: fmt(r.total) }), el("td", { class: "num", text: fmt(r.new) }),
+  d.tables.forEach((r) => body.appendChild(el("tr", {}, el("td", { "data-sort": r.table_name }, r.table_name, ageTag(r.captured_at)), el("td", { text: r.table_id }), el("td", { class: "num", "data-sort": r.total, text: fmt(r.total) }), el("td", { class: "num", text: fmt(r.new) }),
     el("td", { class: "num", text: fmt(r.already) }), el("td", { class: "num", text: fmt(r.skipped_invalid) }))));
   t.hidden = d.tables.length === 0;
+  applySort("regTable");
   setMsg("regSummary", d.tables.length + " table(s) registered: " + fmt(d.totals.new) + " new record(s), " + fmt(d.totals.already) + " already registered. " + fmt(d.registered_total) + " record(s) registered for this base in all." +
     (d.not_registered.length ? " " + d.not_registered.length + " table(s) not registered (no usable saved file)." : ""), d.not_registered.length ? "warn" : "ok");
   d.not_registered.forEach((n) => sk.appendChild(el("p", { class: "hint", text: "Not registered: " + n.table_name + ". " + n.reason })));
@@ -551,6 +554,7 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   });
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
+  for (const id of ["linkTable", "regTable", "orderTable"]) sortableTable(id);
   $("btnRecompute").addEventListener("click", recompute);
   $("btnLinkRefresh").addEventListener("click", guard(() => loadLinkDirections(true)));
   $("btnLinkAccept").addEventListener("click", guard(acceptSuggestions));

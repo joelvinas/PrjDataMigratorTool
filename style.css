@@ -172,4 +172,9 @@ tr.muted td { color: var(--muted); background: #fafbfc; }
 tr.reason td { background: #f3f7fe; }
 table.grid td input[type=text] { width: 100%; min-width: 170px; }
 
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { text-decoration: underline; }
+th.sortable:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+th.sortable.sorted-asc::after { content: " B2"; font-size: 0.7em; }
+th.sortable.sorted-desc::after { content: " BC"; font-size: 0.7em; }
 #linkTable tr.undecided td { background: rgba(255, 243, 168, 0.35); }

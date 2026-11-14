@@ -69,7 +69,7 @@
   <div id="linkSummary"></div>
   <div id="linkMessage" class="msg"></div>
   <div style="overflow-x:auto"><table id="linkTable" class="grid" hidden>
-    <thead><tr><th>Link field</th><th>Links to</th><th>Paired with</th><th>Suggested</th><th>Direction</th><th>Tiebreaker</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th data-sort="text">Link field</th><th data-sort="text">Links to</th><th data-sort="text">Paired with</th><th data-sort="text">Suggested</th><th>Direction</th><th>Tiebreaker</th><th data-sort="text">Status</th><th></th></tr></thead>
     <tbody></tbody>
   </table></div>
   <h3>Load order</h3>
@@ -86,7 +86,7 @@
   <div id="depMessage" class="msg"></div>
   <div id="depNotes"></div>
   <table id="orderTable" class="grid" hidden>
-    <thead><tr><th class="num">Load #</th><th>Table</th><th>Table ID</th><th class="num">Depth</th><th>Parents</th><th>Notes</th></tr></thead>
+    <thead><tr><th class="num" data-sort="num">Load #</th><th data-sort="text">Table</th><th data-sort="text">Table ID</th><th class="num" data-sort="num">Depth</th><th data-sort="text">Parents</th><th data-sort="text">Notes</th></tr></thead>
     <tbody></tbody>
   </table>
   <h3>Dependency graph</h3>
@@ -207,7 +207,7 @@
   <div class="row"><button id="btnRegister">Register record IDs from the saved files</button></div>
   <div id="regSummary" class="msg"></div>
   <div class="scroll"><table id="regTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th class="num">Records in file</th><th class="num">New</th><th class="num">Already registered</th><th class="num">Skipped (not an ID)</th></tr></thead>
+    <thead><tr><th data-sort="text">Table</th><th data-sort="text">Table ID</th><th class="num" data-sort="num">Records in file</th><th class="num" data-sort="num">New</th><th class="num" data-sort="num">Already registered</th><th class="num" data-sort="num">Skipped (not an ID)</th></tr></thead>
     <tbody></tbody>
   </table></div>
   <div id="regSkipped"></div>
