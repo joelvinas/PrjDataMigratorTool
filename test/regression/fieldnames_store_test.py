@@ -235,6 +235,7 @@ check("the report has the description, where it came from and its problems", row
       and rows["f3"]["description_source"] == "generated" and rows["f3"]["description"] == "Source: Airtable. Origins: Orders.Notes!." and rows["f3"]["description_problems"] == "")
 
 # ---- consolidation groups (migration 009, proposed): several fields of one table become one
+c.executescript("DROP TABLE field_group_members; DROP TABLE field_groups;")      # the tables are in the schema now; drop them to test the not-applied path
 rv0 = st.review(c, B)
 check("without migration 009 there are no groups and the page can say so", rv0["groups_available"] is False and rv0["groups"] == [])
 e = raises(st.create_group, c, B, "JV", "f1", ["f1", "f2"], "review", "same data")

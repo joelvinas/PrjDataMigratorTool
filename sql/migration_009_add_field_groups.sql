@@ -1,9 +1,8 @@
 -- Migration 009: field consolidation groups. Adds two tables: field_groups and field_group_members.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED. Review it, then apply it yourself (or tell me to), the same way as migrations 007 and 008.
--- It is deliberately NOT yet in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py: the app refuses to
--- connect to a database that lacks an expected table, so those change together, after this is approved and applied.
--- The Field names page already reads and writes these tables when they exist, and says how to apply this migration when they do not.
+-- Approved by the owner on 2026-11-14 and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in server.py and
+-- sql/apply_migrations.py. Apply it to an existing database with: python sql/apply_migrations.py path/to/your.db (back it up first).
+-- Safe to run again: nothing happens when the tables already exist.
 
 -- A consolidation group is several Airtable fields of ONE table that will become ONE Workfront field. A person chooses the survivor (the
 -- field whose name and settings carry forward), records why, and says what the loader should do later when two members are both filled

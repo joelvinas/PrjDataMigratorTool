@@ -13,7 +13,7 @@ sch=open("test/sample_schema.json").read(); err=open("test/sample_schema_errors.
 
 st,r=call("GET","/api/status"); check("token configured, not leaked", r["token_configured"] and "patMOCK" not in json.dumps(r))
 st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("nonexistent db offers create", r["exists"] is False)
-st,r=call("POST","/api/db/create",{"path":"t.db"}); check("create db ready", r["ready"] and len(r["created_tables"])==23)
+st,r=call("POST","/api/db/create",{"path":"t.db"}); check("create db ready", r["ready"] and len(r["created_tables"])==25)
 st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("reconnect ready", r["ready"] and r["foreign_keys"])
 # missing table detection
 c=sqlite3.connect("t.db"); c.execute("DROP TABLE form_links"); c.commit(); c.close()
@@ -162,7 +162,7 @@ orig=open(__import__("os").path.join(__import__("os").path.dirname(__import__("o
 a=sqlite3.connect(":memory:"); a.executescript(orig)
 oldcols={t:[x[1] for x in a.execute('pragma table_info(%s)'%t)] for t in srv.EXPECTED_TABLES}
 changed={t for t in srv.EXPECTED_TABLES if oldcols[t]!=srv.EXPECTED_COLUMNS[t][:len(oldcols[t])] and set(oldcols[t])!=set(srv.EXPECTED_COLUMNS[t])}
-check("only airtable_fields differs and only the tables from migrations 003 to 008 are new", {x for x in srv.EXPECTED_TABLES if oldcols[x] and set(oldcols[x])!=set(srv.EXPECTED_COLUMNS[x])}=={"airtable_fields"} and {x for x in srv.EXPECTED_TABLES if not oldcols[x]}=={"airtable_tables","airtable_views","airtable_attachment_stats","form_specs","form_items","form_logic","form_links","automation_specs","automation_items","automation_logic","automation_field_refs","automation_links","field_names","table_names","name_events","table_scope","table_targets"})
+check("only airtable_fields differs and only the tables from migrations 003 to 009 are new", {x for x in srv.EXPECTED_TABLES if oldcols[x] and set(oldcols[x])!=set(srv.EXPECTED_COLUMNS[x])}=={"airtable_fields"} and {x for x in srv.EXPECTED_TABLES if not oldcols[x]}=={"airtable_tables","airtable_views","airtable_attachment_stats","form_specs","form_items","form_logic","form_links","automation_specs","automation_items","automation_logic","automation_field_refs","automation_links","field_names","table_names","name_events","table_scope","table_targets","field_groups","field_group_members"})
 check("only the approved columns were added", set(srv.EXPECTED_COLUMNS["airtable_fields"])-set(oldcols["airtable_fields"])=={"prefers_single_record_link","cardinality_is_capped"}|set(srv.OPTION_COLUMNS) and not set(oldcols["airtable_fields"])-set(srv.EXPECTED_COLUMNS["airtable_fields"]))
 # old database: app refuses, migration fixes it, data survives
 old=sqlite3.connect("old.db"); old.executescript(orig); old.execute("insert into airtable_fields(base_id,table_id,table_name,field_id,field_name,data_type,row_count,null_count,cardinality) values('appOld00001','tblOld','Old','fldOld','F','singleLineText',7,1,3)"); old.commit(); old.close()

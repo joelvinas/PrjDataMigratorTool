@@ -40,6 +40,7 @@ schema = {"tables": [
 post("/api/db/create", {"path": "names_ui.db"})
 post("/api/db/connect", {"path": "names_ui.db"})
 post("/api/schema/ingest", {"base_id": BASE, "source": "json", "schema_json": json.dumps(schema)})
+cx0 = sqlite3.connect("names_ui.db"); cx0.executescript("DROP TABLE field_group_members; DROP TABLE field_groups;"); cx0.commit(); cx0.close()      # drop them to test the not-applied path
 os.makedirs("data_extract/" + BASE, exist_ok=True)
 json.dump({"format": "airtable-table-extract/1", "base_id": BASE, "table_id": TA, "table_name": "Orders", "captured_at": "2026-01-01T00:00:00Z",
            "fields": [{"field_id": "fldU02"}, {"field_id": "fldU03"}],
