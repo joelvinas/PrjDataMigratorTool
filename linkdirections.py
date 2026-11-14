@@ -185,6 +185,24 @@ def sync(conn, rows):
     return {"added": added, "updated": updated}
 
 
+def has_events_table(conn):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='link_direction_events'").fetchone() is not None
+
+
+def _event(conn, field_id, event_type, actor, reason, old, new):
+    """Append to the history (migration 018) when that table exists; before it is applied nothing is written and nothing breaks."""
+    if not has_events_table(conn):
+        return
+    base = conn.execute("SELECT base_id FROM field_relationships WHERE airtable_field_id=?", (field_id,)).fetchone()[0]
+    conn.execute("INSERT INTO link_direction_events(airtable_field_id, base_id, event_type, old_relationship_type, old_tiebreaker, new_relationship_type, new_tiebreaker, actor, reason) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)", (field_id, base, event_type, old[0], old[1], new[0], new[1], actor, reason))
+
+
+def _current(conn, field_id):
+    r = conn.execute("SELECT relationship_type, tiebreaker, confirmed FROM field_relationships WHERE airtable_field_id=?", (field_id,)).fetchone()
+    return (r[0], r[1]), bool(r[2])
+
+
 def decide(conn, actor, field_id, relationship_type, tiebreaker, reason=""):
     """Record a person's choice on one field and set its partner (auto-set). relationship_type 'clear' returns the pair to undecided."""
     actor = (actor or "").strip()
@@ -202,6 +220,9 @@ def decide(conn, actor, field_id, relationship_type, tiebreaker, reason=""):
     if relationship_type == "clear":
         with conn:
             for fid in [row[0]] + ([partner] if partner else []):
+                old, was = _current(conn, fid)
+                if was:
+                    _event(conn, fid, "clear", actor, reason, old, (None, None))
                 conn.execute("UPDATE field_relationships SET relationship_type=NULL, tiebreaker=NULL, confirmed=0, derived=0, auto_set=0, approved_by=NULL, approved_at=NULL, "
                              "reason=NULL, updated_at=CURRENT_TIMESTAMP WHERE airtable_field_id=?", (fid,))
         return {"field_id": row[0], "partner_field_id": partner, "cleared": True}
@@ -214,6 +235,11 @@ def decide(conn, actor, field_id, relationship_type, tiebreaker, reason=""):
         tiebreaker = None
     now = _now()
     with conn:
+        old, was = _current(conn, row[0])
+        _event(conn, row[0], "change" if was else "confirm", actor, reason, old, (relationship_type, tiebreaker))
+        if partner:
+            pold, _w = _current(conn, partner)
+            _event(conn, partner, "auto_set", actor, "set with its pair field: " + reason, pold, (MIRROR[relationship_type], TIE_MIRROR.get(tiebreaker) if tiebreaker else None))
         conn.execute("UPDATE field_relationships SET relationship_type=?, tiebreaker=?, confirmed=1, derived=0, auto_set=0, approved_by=?, approved_at=?, reason=?, "
                      "updated_at=CURRENT_TIMESTAMP WHERE airtable_field_id=?", (relationship_type, tiebreaker, actor, now, reason, row[0]))
         if partner:

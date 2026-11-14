@@ -76,6 +76,20 @@ ld.decide(c, "JV", "fOC", "clear", None, "")
 row = {x["airtable_field_id"]: x for x in c.execute("SELECT * FROM field_relationships")}
 check("clearing returns both ends to undecided", row["fOC"]["confirmed"] == 0 and row["fCO"]["confirmed"] == 0 and row["fCO"]["relationship_type"] is None and row["fCO"]["approved_by"] is None)
 
+# ---- history (migration 018, proposed): written only when the table exists
+check("before migration 018 nothing is written to a history and nothing breaks", not ld.has_events_table(c))
+c.executescript(open(os.path.join(ROOT, "sql", "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
+c.executescript(open(os.path.join(ROOT, "sql", "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
+check("migration 018 can be run twice", ld.has_events_table(c))
+ld.decide(c, "JV", "fOC", "many_to_one", None, "first")
+ld.decide(c, "KR", "fOC", "one_to_one", "this_first", "second")
+ld.decide(c, "KR", "fOC", "clear", None, "third")
+ev = [tuple(r) for r in c.execute("SELECT airtable_field_id, event_type, old_relationship_type, new_relationship_type, actor FROM link_direction_events ORDER BY event_id")]
+check("every confirm, change, auto-set and clear is appended with who and the old and new choice", ev == [
+    ("fOC", "confirm", None, "many_to_one", "JV"), ("fCO", "auto_set", None, "one_to_many", "JV"),
+    ("fOC", "change", "many_to_one", "one_to_one", "KR"), ("fCO", "auto_set", "one_to_many", "one_to_one", "KR"),
+    ("fOC", "clear", "one_to_one", None, "KR"), ("fCO", "clear", "one_to_one", None, "KR")], ev)
+
 # ---- the confirmed load order
 def seq(g): return {m["table_name"]: m["load_order_sequence"] for m in g["matrix"]}
 for fid, typ, tie in (("fOC", "many_to_one", None), ("fIO", "many_to_one", None), ("fNC", "many_to_one", None), ("fAT", "many_to_many", "this_first"), ("fIC", "many_to_one", None)):
