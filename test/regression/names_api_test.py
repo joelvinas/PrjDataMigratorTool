@@ -192,6 +192,24 @@ s_, r = post("/api/names/compare", A(field_ids=["fldN02", "fldN03"])); check("a 
 import shutil; shutil.rmtree("data_extract", ignore_errors=True)
 check("the page script has the compare control", b"compareGroup" in raw("GET", "/names.js")[1])
 
+# ---- consolidation (migration 009, proposed): tables are applied to the test database directly
+s_, e = post("/api/names/groups/create", A(survivor_id="fldN04", field_ids=["fldN04", "fldN05"], reason="same data")); check("without migration 009 creating a group says how to apply it (409)", s_ == 409 and "migration 009" in e["error"], e)
+cx = sqlite3.connect("names_api.db"); cx.executescript(open("sql/migration_009_add_field_groups.sql", encoding="utf-8").read()); cx.commit(); cx.close()
+s_, r = post("/api/names/groups/create", A(survivor_id="fldN04", field_ids=["fldN05", "fldN04"], conflict_rule="survivor_wins", reason="same data under two names"))
+rv_ = r.get("review", {}); gl = rv_.get("groups", [])
+check("a group is created through the API and the review shows it", s_ == 200 and len(gl) == 1 and gl[0]["conflict_rule"] == "survivor_wins" and gl[0]["survivor_name"] == "Notes!" and rv_["groups_available"], r.get("error"))
+fl_ = {f["field_id"]: f for f in rv_["fields"]}
+check("the merged field is consolidated and the survivor's description lists both origins", fl_["fldN05"]["consolidated"]["survivor_id"] == "fldN04" and "Orders.Notes!; Orders.Caf" in fl_["fldN04"]["description"]["generated"].replace("é", ""), fl_["fldN04"]["description"]["generated"])
+s_, e = post("/api/names/fields/approve", A(items=[{"field_id": "fldN05", "target": "planning_name"}])); check("a merged field cannot be approved", s_ == 400 and "consolidated" in e["error"], e)
+s_, e = post("/api/names/groups/create", A(survivor_id="fldN04", field_ids=["fldN04", "fldN01"], reason="x")); check("a field already in a group is refused", s_ == 400 and "already in a consolidation group" in e["error"], e)
+check("a group needs a reason and initials", post("/api/names/groups/create", A(survivor_id="fldN01", field_ids=["fldN01", "fldN02"], reason=""))[0] == 400
+      and post("/api/names/groups/create", {"base_id": BASE, "survivor_id": "fldN01", "field_ids": ["fldN01", "fldN02"], "reason": "x"})[0] == 400)
+s_, d, h = raw("GET", "/api/names/report.html?base_id=" + BASE); check("the HTML report lists the consolidation", s_ == 200 and b"Consolidated fields" in d and b"same data under two names" in d)
+s_, d, h = raw("GET", "/api/names/report?base_id=" + BASE + "&file=names_report.csv"); check("the CSV marks the merged field CONSOLIDATED", b"CONSOLIDATED" in d and b"consolidated_into" in d)
+s_, e = post("/api/names/groups/dissolve", A(group_id=gl[0]["group_id"], reason="")); check("dissolving needs a reason", s_ == 400)
+s_, e = post("/api/names/groups/dissolve", A(group_id=99999, reason="x")); check("dissolving an unknown group is a 404", s_ == 404)
+s_, r = post("/api/names/groups/dissolve", A(group_id=gl[0]["group_id"], reason="different data after all")); check("a group can be dissolved", s_ == 200 and r["review"]["groups"] == [] and {f["field_id"]: f for f in r["review"]["fields"]}["fldN05"]["consolidated"] is None, r.get("error"))
+
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row
 ev = [dict(x) for x in c.execute("select * from name_events order by event_id")]

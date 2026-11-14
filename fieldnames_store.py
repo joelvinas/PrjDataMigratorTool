@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import fielddesc as fd
 import fieldnames as fn
 import fieldnames_io as fio
+import fieldgroups as fgp
 import fieldnames_report as fr
 
 ACTOR_MAX = 40
@@ -110,6 +111,25 @@ def read_targets(conn, base_id):
             for r in conn.execute("SELECT * FROM table_targets WHERE base_id=?", (base_id,))}
 
 
+def read_groups(conn, base_id):
+    """([group, ...], available). A group is {group_id, table_id, survivor_id, member_ids (survivor first), conflict_rule, reason, decided_by,
+    decided_at}. Empty and unavailable until migration 009 (field_groups, field_group_members) exists."""
+    if not (has_table(conn, "field_groups") and has_table(conn, "field_group_members")):
+        return [], False
+    groups = []
+    for g in conn.execute("SELECT * FROM field_groups WHERE base_id=? ORDER BY group_id", (base_id,)).fetchall():
+        members = [r[0] for r in conn.execute("SELECT field_id FROM field_group_members WHERE group_id=? ORDER BY member_order, field_id", (g["group_id"],))]
+        groups.append({"group_id": g["group_id"], "table_id": g["table_id"], "survivor_id": g["survivor_field_id"], "member_ids": members,
+                       "conflict_rule": g["conflict_rule"], "reason": g["reason"], "decided_by": g["decided_by"], "decided_at": g["decided_at"]})
+    return groups, True
+
+
+def _live_groups(groups, data):
+    """Groups whose fields are all still in the schema; a group with a field that has left the source is ignored rather than half applied."""
+    live = {f["field_id"] for f in data["fields"]}
+    return [g for g in groups if g["survivor_id"] in live and all(m in live for m in g["member_ids"])]
+
+
 def scope_warnings(data, out_ids):
     """In-scope fields that link to, or name, a table that is out of scope. A link to a dropped table has nowhere to point, so each one is
     flagged for a human decision: bring the table back in, drop the field, or change what it points at."""
@@ -162,13 +182,15 @@ def save_settings(conn, base_id, settings, actor, reason=""):
     return st
 
 
-def descriptions(data, names, settings):
+def descriptions(data, names, settings, groups=()):
     """{field_id: {generated, saved, text, edited, problems}} for every field of the base. 'generated' is recomputed from the schema every
     time; 'saved' is a hand-edited description a person saved (field_names.description); 'text' is what is used (saved, else generated)."""
     by_id = {f["field_id"]: f for f in data["fields"]}
+    surv = fgp.survivors(groups)
     out = {}
     for f in data["fields"]:
-        gen = fd.generate_description(f, by_id, settings.description_include_airtable, settings.description_emoji_mode)
+        merged = [by_id[m] for m in surv[f["field_id"]]["member_ids"][1:] if m in by_id] if f["field_id"] in surv else []
+        gen = fd.generate_description(f, by_id, settings.description_include_airtable, settings.description_emoji_mode, merged)
         saved = ((names.get(f["field_id"]) or {}).get("description") or None)
         text = saved if saved is not None else gen
         out[f["field_id"]] = {"generated": gen, "saved": saved, "text": text, "edited": saved is not None and saved != gen,
@@ -203,10 +225,13 @@ def _compute(conn, base_id, settings, override=None):
     for (fid, target), name in (override or {}).items():
         manual.setdefault(fid, {})[target] = name
     abandoned = [fid for fid, r in names.items() if r["abandoned"]]
-    res = fn.run(data["fields"], data["tables"], settings, manual=manual, approved_tables=approved, abandoned=abandoned,
+    groups, groups_ok = read_groups(conn, base_id)
+    groups = _live_groups(groups, data)
+    merged = fgp.merged_ids(groups)                          # merged members are not fields of their own: they leave the review like abandoned ones
+    res = fn.run(data["fields"], data["tables"], settings, manual=manual, approved_tables=approved, abandoned=abandoned + [m for m in merged if m not in abandoned],
                  out_of_scope_tables=out_tables, gate=True)
     return {"data": data, "scope": scope, "scope_ok": scope_ok, "out": set(out_tables), "table_rows": table_rows, "names": names,
-            "approved": approved, "manual": manual, "abandoned": abandoned, "res": res}
+            "approved": approved, "manual": manual, "abandoned": abandoned, "res": res, "groups": groups, "groups_ok": groups_ok, "merged": merged}
 
 
 def review(conn, base_id, settings=None):
@@ -235,15 +260,18 @@ def review(conn, base_id, settings=None):
         else:                                           # out of scope: no table-name decision is needed
             row.update({"suggested": None, "effective": None, "approved": False, "verdict": None, "rules": [], "approved_by": None, "approved_at": None})
         tables.append(row)
-    desc = descriptions(data, c["names"], settings)
+    desc = descriptions(data, c["names"], settings, c["groups"])
     fields, counts = [], {t: {"approved": 0, "needs_human": 0, "unreviewed": 0, "stale": 0} for t in fn.TARGETS}
     fbi = {f["field_id"]: f for f in data["fields"]}
     for fid, e in res["fields"].items():
         n = c["names"].get(fid) or {}
         row = {"field_id": fid, "table_id": e["table_id"], "table_name": fbi[fid]["table_name"], "original": e["original"], "data_type": fbi[fid]["data_type"],
-               "presence": e["presence"], "abandoned": e["abandoned"], "target_type": n.get("target_type"), "import_batch": n.get("import_batch"),
+               "presence": e["presence"], "abandoned": e["abandoned"] and fid not in c["merged"], "target_type": n.get("target_type"), "import_batch": n.get("import_batch"),
                "description": desc[fid],
-               "abandon": {"by": n.get("abandoned_by"), "at": n.get("abandoned_at"), "reason": n.get("abandoned_reason")} if e["abandoned"] else None,
+               "abandon": {"by": n.get("abandoned_by"), "at": n.get("abandoned_at"), "reason": n.get("abandoned_reason")} if e["abandoned"] and fid not in c["merged"] else None,
+               "consolidated": ({"group_id": c["merged"][fid]["group_id"], "survivor_id": c["merged"][fid]["survivor_id"], "survivor_name": fbi[c["merged"][fid]["survivor_id"]]["field_name"],
+                                 "conflict_rule": c["merged"][fid]["conflict_rule"], "reason": c["merged"][fid]["reason"], "by": c["merged"][fid]["decided_by"],
+                                 "at": c["merged"][fid]["decided_at"]} if fid in c["merged"] else None),
                "targets": {}}
         for t, r in e["targets"].items():
             status = n.get(_COL[t][1]) or "unreviewed"
@@ -255,8 +283,17 @@ def review(conn, base_id, settings=None):
             counts[t][status] += 1
             counts[t]["stale"] += 1 if stale else 0
         fields.append(row)
+    summary = dict(res["summary"])
+    summary["consolidated"] = sum(1 for fid in c["merged"] if fid in res["fields"])
+    summary["abandoned"] = max(0, summary["abandoned"] - summary["consolidated"])
+    groups_out = []
+    for g in c["groups"]:
+        groups_out.append({"group_id": g["group_id"], "table_id": g["table_id"], "table_name": fbi[g["survivor_id"]]["table_name"], "survivor_id": g["survivor_id"],
+                           "survivor_name": fbi[g["survivor_id"]]["field_name"], "conflict_rule": g["conflict_rule"], "conflict_rule_text": fgp.RULE_TEXT[g["conflict_rule"]],
+                           "reason": g["reason"], "by": g["decided_by"], "at": g["decided_at"],
+                           "members": [{"field_id": m, "name": fbi[m]["field_name"], "role": "survivor" if i == 0 else "merged"} for i, m in enumerate(g["member_ids"])]})
     return {"base_id": base_id, "settings": res["settings"], "settings_saved": saved, "scope_available": c["scope_ok"], "tables": tables,
-            "gate": res["gate"], "summary": res["summary"], "counts": counts, "fields": fields, "clusters": res["clusters"],
+            "gate": res["gate"], "summary": summary, "groups": groups_out, "groups_available": c["groups_ok"], "counts": counts, "fields": fields, "clusters": res["clusters"],
             "in_scope_tables": len(res["tables"]), "out_of_scope_tables": len(c["out"]),
             "targets_available": has_table(conn, "table_targets"), "scope_warnings": scope_warnings(data, c["out"]),
             "scope_counts": {k: sum(1 for t in tables if t["scope"] == k) for k in ("in", "out", "undecided")}}
@@ -438,6 +475,8 @@ def approve_fields(conn, base_id, actor, items=None, mode=None, targets=None, re
         fid, t = str(it.get("field_id") or ""), str(it.get("target") or "")
         if fid not in res or t not in fn.TARGETS:
             raise StoreError("Unknown field or target.")
+        if fid in c["merged"]:
+            raise StoreError("'%s' is consolidated into another field; dissolve the group first." % res[fid]["original"])
         if res[fid]["abandoned"]:
             raise StoreError("That field is abandoned; un-abandon it first.")
         r = res[fid]["targets"][t]
@@ -483,6 +522,8 @@ def set_field_status(conn, base_id, actor, items, status, reason=""):
             fid, t = str(it.get("field_id") or ""), str(it.get("target") or "")
             if fid not in c["res"]["fields"] or t not in fn.TARGETS:
                 raise StoreError("Unknown field or target.")
+            if fid in c["merged"]:
+                raise StoreError("That field is consolidated into another; dissolve the group first.")
             row = c["names"].get(fid) or {}
             old = row.get(_COL[t][1]) or "unreviewed"
             conn.execute("INSERT INTO field_names(airtable_field_id, %s, updated_at) VALUES (?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET %s=excluded.%s, updated_at=excluded.updated_at"
@@ -505,7 +546,9 @@ def save_descriptions(conn, base_id, actor, items, reason=""):
     scope, _ok = read_scope(conn, base_id)
     known = {f["field_id"]: f for f in data["fields"]}
     _, names = _stored(conn, base_id)
-    gen = descriptions(data, names, settings)
+    groups = _live_groups(read_groups(conn, base_id)[0], data)
+    gen = descriptions(data, names, settings, groups)
+    merged = fgp.merged_ids(groups)
     now, n, warnings = _now(), 0, []
     with conn:
         for it in items or []:
@@ -515,6 +558,8 @@ def save_descriptions(conn, base_id, actor, items, reason=""):
                 raise StoreError("Field %s is not in this base." % fid, 404)
             if (scope.get(f["table_id"]) or {}).get("decision") == "out":
                 raise StoreError("'%s' is in a table that is out of scope." % f["field_name"])
+            if fid in merged:
+                raise StoreError("'%s' is consolidated into another field, so it has no description of its own." % f["field_name"])
             text = it.get("text")
             text = None if text is None or str(text).strip() == "" else str(text).strip()
             if text is not None:
@@ -537,6 +582,58 @@ def save_descriptions(conn, base_id, actor, items, reason=""):
     return {"saved": n, "warnings": warnings}
 
 
+GROUPS_SETUP = "Consolidation is not set up in this database yet. Apply migration 009 (python sql/apply_migrations.py path/to/your.db, after a backup), then reload."
+
+
+def create_group(conn, base_id, actor, survivor_id, field_ids, conflict_rule, reason):
+    """Consolidate several fields of one table into one: record the survivor, the others (merged), the conflict rule the loader will use later and
+    why. The merged members leave the name review and the duplicate checks; the survivor's description lists every origin. Reversible."""
+    actor, reason = clean_actor(actor), _reason(reason, required=True)
+    if not (has_table(conn, "field_groups") and has_table(conn, "field_group_members")):
+        raise StoreError(GROUPS_SETUP, 409)
+    data = load_fields(conn, base_id)
+    by_id = {f["field_id"]: f for f in data["fields"]}
+    scope, _ok = read_scope(conn, base_id)
+    _, names = _stored(conn, base_id)
+    grouped = {m for g in _live_groups(read_groups(conn, base_id)[0], data) for m in g["member_ids"]}
+    try:
+        ordered = fgp.validate_group(str(survivor_id or ""), [str(x) for x in field_ids or []], by_id, {fid for fid, r in names.items() if r["abandoned"]}, grouped,
+                                     conflict_rule or "review", [t for t, v in scope.items() if v["decision"] == "out"])
+    except ValueError as e:
+        raise StoreError(str(e))
+    now = _now()
+    with conn:
+        gid = conn.execute("INSERT INTO field_groups(base_id, table_id, survivor_field_id, conflict_rule, reason, decided_by, decided_at) VALUES (?,?,?,?,?,?,?)",
+                           (base_id, by_id[ordered[0]]["table_id"], ordered[0], conflict_rule or "review", reason, actor, now)).lastrowid
+        for i, fid in enumerate(ordered):
+            conn.execute("INSERT INTO field_group_members(group_id, field_id, member_order) VALUES (?,?,?)", (gid, fid, i))
+        _event(conn, "field", ordered[0], "approve", actor, "consolidation", None, json.dumps({"group_id": gid, "members": ordered, "conflict_rule": conflict_rule or "review"}), reason)
+        for fid in ordered[1:]:
+            _event(conn, "field", fid, "approve", actor, "consolidation", None, ordered[0], reason)
+    return {"group_id": gid}
+
+
+def dissolve_group(conn, base_id, actor, group_id, reason):
+    """Undo a consolidation: the members become ordinary fields again. The decision history stays in name_events."""
+    actor, reason = clean_actor(actor), _reason(reason, required=True)
+    if not (has_table(conn, "field_groups") and has_table(conn, "field_group_members")):
+        raise StoreError(GROUPS_SETUP, 409)
+    try:
+        gid = int(group_id)
+    except (TypeError, ValueError):
+        raise StoreError("That consolidation group does not exist.", 404)
+    g = next((x for x in read_groups(conn, base_id)[0] if x["group_id"] == gid), None)
+    if not g:
+        raise StoreError("That consolidation group does not exist.", 404)
+    with conn:
+        conn.execute("DELETE FROM field_group_members WHERE group_id=?", (gid,))
+        conn.execute("DELETE FROM field_groups WHERE group_id=?", (gid,))
+        _event(conn, "field", g["survivor_id"], "reject", actor, "consolidation", json.dumps({"group_id": gid, "members": g["member_ids"]}), None, reason)
+        for fid in g["member_ids"][1:]:
+            _event(conn, "field", fid, "reject", actor, "consolidation", g["survivor_id"], None, reason)
+    return {"dissolved": True}
+
+
 def abandon(conn, base_id, actor, field_id, reason):
     """A recorded human decision, never automatic: who, when and why. Only a field that was profiled and has no value in any record qualifies
     (a checkbox never does); the server enforces this, not the page."""
@@ -546,6 +643,8 @@ def abandon(conn, base_id, actor, field_id, reason):
     f = next((x for x in data["fields"] if x["field_id"] == field_id), None)
     if not f:
         raise StoreError("That field is not in this base.", 404)
+    if any(field_id in g["member_ids"] for g in _live_groups(read_groups(conn, base_id)[0], data)):
+        raise StoreError("This field is in a consolidation group; dissolve the group first.")
     p = fn.presence(f)
     if not p["can_abandon"]:
         raise StoreError("This field cannot be abandoned: %s." % (p["abandon_blocked_because"] or "it has values"))
@@ -618,14 +717,15 @@ def report_files(conn, base_id, settings=None):
     manual = {fid: {t: v for t, v in m.items()} for fid, m in c["manual"].items()}
     target_types = {fid: r["target_type"] for fid, r in c["names"].items() if r.get("target_type")}
     imp = {"manual": manual, "target_types": target_types, "problems": []}
-    desc = descriptions(c["data"], c["names"], settings)
+    desc = descriptions(c["data"], c["names"], settings, c["groups"])
     notes = []
     undecided = sum(1 for t in c["data"]["tables"] if t["table_id"] not in c["scope"])
     if not c["scope_ok"]:
         notes.append("Table scope decisions are not stored yet: every table is undecided and is validated.")
     elif undecided:
         notes.append("%d table(s) have no scope decision (undecided) and were validated like in-scope tables." % undecided)
-    return fio.build_reports(c["res"], c["data"]["fields"], imp, notes, {fid: {"text": d["text"], "source": "saved" if d["saved"] is not None else "generated",
+    consolidated = {fid: g["survivor_id"] for fid, g in c["merged"].items()}
+    return fio.build_reports(c["res"], c["data"]["fields"], imp, notes, consolidated=consolidated, descriptions={fid: {"text": d["text"], "source": "saved" if d["saved"] is not None else "generated",
                                                                                "problems": [p["rule"] for p in d["problems"]]} for fid, d in desc.items()})
 
 

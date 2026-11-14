@@ -234,6 +234,63 @@ rows = {r["field_id"]: r for r in csv.DictReader(io.StringIO(files["names_report
 check("the report has the description, where it came from and its problems", rows["f1"]["description"].endswith("Orders.Done.") and rows["f1"]["description_source"] == "saved"
       and rows["f3"]["description_source"] == "generated" and rows["f3"]["description"] == "Source: Airtable. Origins: Orders.Notes!." and rows["f3"]["description_problems"] == "")
 
+# ---- consolidation groups (migration 009, proposed): several fields of one table become one
+rv0 = st.review(c, B)
+check("without migration 009 there are no groups and the page can say so", rv0["groups_available"] is False and rv0["groups"] == [])
+e = raises(st.create_group, c, B, "JV", "f1", ["f1", "f2"], "review", "same data")
+check("creating a group without the tables says how to apply the migration (409)", e is not None and e.status == 409 and "migration 009" in e.message, e and e.message)
+c.executescript(open(os.path.join(ROOT, "sql", "migration_009_add_field_groups.sql"), encoding="utf-8").read())
+check("with the tables there are no groups yet", st.review(c, B)["groups_available"] is True and st.review(c, B)["groups"] == [])
+n_live = sum(st.review(c, B)["summary"]["planning_name"]["verdicts"].values())
+check("a group needs a reason and initials", raises(st.create_group, c, B, "JV", "f1", ["f1", "f2"], "review", "") is not None and raises(st.create_group, c, B, " ", "f1", ["f1", "f2"], "review", "x") is not None)
+check("the survivor must be one of the members and the rule must exist", raises(st.create_group, c, B, "JV", "f3", ["f1", "f2"], "review", "x") is not None
+      and "conflict rule" in raises(st.create_group, c, B, "JV", "f1", ["f1", "f2"], "maybe", "x").message)
+check("fields of different tables cannot be grouped", "same table" in raises(st.create_group, c, B, "JV", "f1", ["f1", "f8"], "review", "x").message)
+st.abandon(c, B, "JV", "f2", "empty, to test grouping")
+e = raises(st.create_group, c, B, "JV", "f1", ["f1", "f2"], "review", "x")
+check("an abandoned field cannot be grouped, and the message names it", e is not None and "'amount' is abandoned" in e.message, e and e.message)
+st.unabandon(c, B, "JV", "f2", "test over")
+check("nothing was created by the refused attempts", c.execute("select count(*) from field_groups").fetchone()[0] == 0)
+r = st.create_group(c, B, "JV", "f1", ["f2", "f1"], None, "the same data under two names")
+rv = st.review(c, B); fl = {f["field_id"]: f for f in rv["fields"]}
+check("a group is created; the default conflict rule is review (a person decides)", r["group_id"] >= 1 and rv["groups"][0]["conflict_rule"] == "review" and rv["groups"][0]["survivor_id"] == "f1"
+      and [(m["field_id"], m["role"]) for m in rv["groups"][0]["members"]] == [("f1", "survivor"), ("f2", "merged")], rv["groups"])
+check("the merged member is shown as consolidated, not abandoned, and has no verdicts", fl["f2"]["consolidated"]["survivor_name"] == "Amount" and fl["f2"]["abandoned"] is False and fl["f2"]["targets"] == {} and fl["f1"]["consolidated"] is None)
+check("it drops out of the counts (summary says consolidated 1)", rv["summary"]["consolidated"] == 1 and sum(rv["summary"]["planning_name"]["verdicts"].values()) == n_live - 1 and rv["summary"]["abandoned"] == 0)
+check("the survivor's description lists every origin", fl["f1"]["description"]["generated"] == "Source: Airtable. Origins: Orders.Amount; Orders.amount.", fl["f1"]["description"]["generated"])
+check("the group records who, when, why and the member order", dict(c.execute("select decided_by, reason, conflict_rule from field_groups").fetchone()) == {"decided_by": "JV", "reason": "the same data under two names", "conflict_rule": "review"}
+      and [tuple(x) for x in c.execute("select field_id, member_order from field_group_members order by member_order")] == [("f1", 0), ("f2", 1)])
+ev = [dict(x) for x in c.execute("select * from name_events where target='consolidation' order by event_id")]
+check("the audit trail records the survivor's group and each merged field", len(ev) == 2 and ev[0]["subject_id"] == "f1" and '"members": ["f1", "f2"]' in ev[0]["new_value"] and ev[1]["subject_id"] == "f2" and ev[1]["new_value"] == "f1", ev)
+check("a merged field cannot be approved, flagged or described", "consolidated" in raises(st.approve_fields, c, B, "JV", items=[{"field_id": "f2", "target": "planning_name"}]).message
+      and "consolidated" in raises(st.set_field_status, c, B, "JV", [{"field_id": "f2", "target": "planning_name"}], "needs_human").message
+      and "consolidated" in raises(st.save_descriptions, c, B, "JV", [{"field_id": "f2", "text": "x"}]).message)
+check("a field in a group cannot be abandoned", "consolidation group" in raises(st.abandon, c, B, "JV", "f2", "empty").message)
+check("a field cannot be in two groups", "already in a consolidation group" in raises(st.create_group, c, B, "JV", "f3", ["f3", "f2"], "review", "x").message
+      and "already in a consolidation group" in raises(st.create_group, c, B, "JV", "f1", ["f1", "f3"], "review", "x").message)
+files = st.report_files(c, B)
+crow = {r["field_id"]: r for r in csv.DictReader(io.StringIO(files["names_report.csv"]))}
+check("the CSV marks the merged field CONSOLIDATED with its survivor, and the summary counts it", crow["f2"]["planning_name_verdict"] == "CONSOLIDATED" and crow["f2"]["consolidated_into"] == "f1" and crow["f2"]["abandoned"] == "no"
+      and crow["f1"]["consolidated_into"] == "" and "Consolidated into another field (excluded): 1" in files["names_summary.txt"])
+html_g = st.report_html(c, B, "Sample", "", "2026-01-01 00:00:00")
+check("the HTML report lists the consolidation with its reason and conflict rule", "Consolidated fields" in html_g and "the same data under two names" in html_g and "a person resolves each record where they differ" in html_g)
+check("the merged field is left out of the report's grids, and the survivor is still in them", '<span class="small">f2</span>' not in html_g and '<span class="small">f1</span>' in html_g)
+c.execute("update airtable_fields set updated_at='2025-01-01 00:00:00.000000' where field_id='f2'"); c.commit()
+rv_gone = st.review(c, B)
+check("a group with a field that has left the schema is ignored rather than half applied", rv_gone["groups"] == [] and "f2" not in {f["field_id"] for f in rv_gone["fields"]}
+      and {f["field_id"]: f for f in rv_gone["fields"]}["f1"]["consolidated"] is None and {f["field_id"]: f for f in rv_gone["fields"]}["f1"]["description"]["generated"] == "Source: Airtable. Origins: Orders.Amount.")
+c.execute("update airtable_fields set updated_at=? where field_id='f2'", (T1,)); c.commit()
+check("dissolving needs a reason and an existing group", raises(st.dissolve_group, c, B, "JV", r["group_id"], "") is not None and (raises(st.dissolve_group, c, B, "JV", 999, "x") or st.StoreError("", 0)).status == 404)
+st.dissolve_group(c, B, "JV", r["group_id"], "different data after all")
+rv = st.review(c, B); fl = {f["field_id"]: f for f in rv["fields"]}
+check("dissolving makes the members ordinary fields again and the description single-origin", rv["groups"] == [] and fl["f2"]["consolidated"] is None and "planning_name" in fl["f2"]["targets"]
+      and fl["f1"]["description"]["generated"] == "Source: Airtable. Origins: Orders.Amount." and rv["summary"]["consolidated"] == 0)
+check("dissolving leaves the history in the audit trail", [x[0] for x in c.execute("select event_type from name_events where target='consolidation' and subject_id='f2' order by event_id")] == ["approve", "reject"]
+      and c.execute("select count(*) from field_groups").fetchone()[0] == 0 and c.execute("select count(*) from field_group_members").fetchone()[0] == 0)
+check("a field can be grouped again after its group was dissolved, with a different rule", st.create_group(c, B, "JV", "f2", ["f1", "f2"], "first_filled", "again")["group_id"] > r["group_id"]
+      and st.review(c, B)["groups"][0]["conflict_rule_text"].startswith("the first non-empty value"))
+st.dissolve_group(c, B, "JV", st.review(c, B)["groups"][0]["group_id"], "cleanup")
+
 # ---- the HTML report
 HOSTILE = "<img src=x onerror=alert(1)> & \"q\""
 c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values ('appS','tA','Orders','fH', ?, 'singleLineText', ?)", (HOSTILE, T1)); c.commit()

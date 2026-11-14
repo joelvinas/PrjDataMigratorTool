@@ -116,7 +116,7 @@ def build_html(rv, events, css, base_label, generated):
     ready = rv["gate"]["ready"]
     st = fn.Settings(**rv["settings"])
     fields = rv["fields"]
-    live = [f for f in fields if not f["abandoned"]]
+    live = [f for f in fields if not f["abandoned"] and not f.get("consolidated")]
     P = []
     add = P.append
     add('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -125,7 +125,7 @@ def build_html(rv, events, css, base_label, generated):
     add('<p class="meta">%s &middot; generated %s UTC &middot; names, counts and decisions only (no record values)</p>' % (h(base_label), h(generated)))
     toc = ["About this report", "Summary", "Settings in force", "Table names"]
     if ready:
-        toc += ["Field names (one grid per name)", "Duplicate groups", "Your names against the rules", "Descriptions", "Abandoned fields"]
+        toc += ["Field names (one grid per name)", "Duplicate groups", "Your names against the rules", "Descriptions", "Abandoned fields", "Consolidated fields"]
     toc += ["Decisions recorded", "The rules", "Method and checks"]
     add('<nav class="toc box"><b>Contents</b><ol>%s</ol></nav>' % "".join('<li><a href="#s%d">%s</a></li>' % (i + 1, h(t)) for i, t in enumerate(toc)))
     n = [0]
@@ -171,7 +171,7 @@ def build_html(rv, events, css, base_label, generated):
         steps = [("table_swap", "Step 2: table-name swap"), ("char_cleanup", "Step 3: character cleanup"), ("leading_digits", "Step 4: leading digits")]
         add("<h3>Names each step would change</h3>")
         add(table(["Step"] + [TARGET_TITLES[t] for t in fn.TARGETS], [[lab] + [sm[t]["steps"].get(k, 0) for t in fn.TARGETS] for k, lab in steps], num=range(1, 4)))
-        add("<p>%d duplicate group(s); %d abandoned field(s) excluded from the counts above.</p>" % (len(rv["clusters"]), sm["abandoned"]))
+        add("<p>%d duplicate group(s); %d abandoned and %d consolidated field(s) excluded from the counts above.</p>" % (len(rv["clusters"]), sm["abandoned"], sm.get("consolidated", 0)))
     else:
         add("<p>Field results are not available until table names are approved.</p>")
     add("<p>Tables: %d in scope, %d approved so far.</p>" % (rv["in_scope_tables"], rv["in_scope_tables"] - len(rv["gate"]["pending"])))
@@ -265,6 +265,14 @@ def build_html(rv, events, css, base_label, generated):
         add("<p>Abandoning is a recorded human decision: a field with no value in any record, never abandoned automatically because an empty field can still be used by a form or an automation.</p>")
         add(table(["Table", "Field", "Data", "By", "When", "Why"], [[f["table_name"], lines(f["original"], small(f["field_id"])), data_cell(f["presence"]), f["abandon"]["by"], f["abandon"]["at"], f["abandon"]["reason"]]
                                                                      for f in gone]) if gone else "<p>None.</p>")
+
+        # ---- consolidated
+        section("Consolidated fields")
+        add("<p>Several Airtable fields that become one Workfront field. The survivor carries forward; the merged members drop out of the name review and the duplicate checks, "
+            "and the survivor's description lists every origin. The conflict rule says what the loader will do later when two members are both filled and differ.</p>")
+        add(table(["Table", "Survivor", "Merged into it", "If both are filled and differ", "Why", "Decided by", "When"], [
+            [g["table_name"], g["survivor_name"], lines(*[m["name"] for m in g["members"] if m["role"] == "merged"]), g["conflict_rule_text"], g["reason"], g["by"], g["at"]]
+            for g in rv["groups"]]) if rv["groups"] else "<p>None.</p>")
 
     # ---- decisions
     section("Decisions recorded")

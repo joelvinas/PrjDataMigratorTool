@@ -14,7 +14,7 @@ const RULE_TITLES = {
 const PER_PAGE = 50;
 const ACTOR_KEY = "migrationControl.reviewer";
 
-const N = { R: null, saved: null, target: "planning_name", page: 0, descPage: 0, open: null, timer: null, cmp: {} };
+const N = { R: null, saved: null, target: "planning_name", page: 0, descPage: 0, open: null, timer: null, cmp: {}, g: { table: "", sel: [], survivor: "", rule: "review" }, gcmp: null };
 const DESC_PER_PAGE = 25;
 const baseNow = () => $("baseId").value.trim();
 const actorNow = () => $("actor").value.trim();
@@ -126,7 +126,7 @@ async function load() {
   if (!/^app[A-Za-z0-9]{4,}$/.test(base)) { N.R = null; render(); return; }
   try {
     const r = await api("GET", "/api/names/review?base_id=" + encodeURIComponent(base));
-    N.saved = r.settings; N.R = r; N.page = 0; N.cmp = {}; setControls(r.settings);
+    N.saved = r.settings; N.R = r; N.page = 0; N.cmp = {}; N.gcmp = null; setControls(r.settings);
     say("pageMessage", "");
   } catch (e) { N.R = null; say("pageMessage", e.message, "err"); }
   render();
@@ -263,7 +263,7 @@ function renderTables() {
 /* ---------- field review ---------- */
 function fieldMatches(f) {
   const t = f.targets[N.target];
-  if (f.abandoned) return $("fAbandoned").checked;
+  if (f.abandoned || f.consolidated) return $("fAbandoned").checked;
   if (!t) return false;
   const v = $("fVerdict").value, s = $("fStatus").value, tb = $("fTable").value, q = $("fSearch").value.trim().toLowerCase();
   if (v && t.verdict !== v) return false;
@@ -357,9 +357,74 @@ function renderFields() {
       body.appendChild(el("tr", { class: "muted" }, el("td", { text: f.table_name }), el("td", {}, el("div", { text: f.original }), el("div", { class: "hint", text: f.field_id })), presenceCell(f),
         el("td", { colspan: "4", class: "hint", text: "Abandoned by " + (f.abandon.by || "?") + " on " + (f.abandon.at || "?") + ": " + (f.abandon.reason || "") }),
         el("td", {}, btn("Restore", () => { N.open = { kind: "unabandon", field_id: f.field_id }; render(); }, { disabled: locked }))));
+    } else if (f.consolidated) {
+      const cn = f.consolidated;
+      body.appendChild(el("tr", { class: "muted" }, el("td", { text: f.table_name }), el("td", {}, el("div", { text: f.original }), el("div", { class: "hint", text: f.field_id })), presenceCell(f),
+        el("td", { colspan: "4", class: "hint", text: "Consolidated into \u201c" + cn.survivor_name + "\u201d by " + (cn.by || "?") + " on " + (cn.at || "?") + ": " + (cn.reason || "") }),
+        el("td", {}, btn("Dissolve group", () => { N.open = { kind: "dissolve", group_id: cn.group_id }; render(); }, { disabled: locked }))));
     } else body.appendChild(fieldRow(f, N.target, locked));
     if (N.open && N.open.field_id === f.field_id) body.appendChild(reasonRow(f, 8));
+    if (f.consolidated && N.open && N.open.kind === "dissolve" && N.open.group_id === f.consolidated.group_id) body.appendChild(dissolveRow(f.consolidated.group_id, 8));
   }
+}
+
+/* ---------- consolidation: several fields of one table become one ---------- */
+function dissolveRow(groupId, cols) {
+  const input = el("input", { type: "text", class: "wide", maxlength: "500", placeholder: "Why is this group being dissolved? (required)", "aria-label": "Reason" });
+  setTimeout(() => input.focus(), 0);
+  return el("tr", { class: "reason" }, el("td", { colspan: String(cols) }, el("div", { class: "row" }, el("b", { text: "Dissolve this consolidation" }), input,
+    btn("Confirm", () => decide("/api/names/groups/dissolve", { group_id: groupId, reason: input.value }, "gMessage", "Group dissolved: its fields are ordinary fields again.")),
+    btn("Cancel", () => { N.open = null; render(); }))));
+}
+function renderGroupsList() {
+  const R = N.R, box = $("groupsList"), locked = isPreview();
+  box.replaceChildren();
+  if (!R.groups.length) { box.appendChild(el("p", { class: "hint", text: R.groups_available ? "None." : "Not available until migration 009 is applied." })); return; }
+  for (const g of R.groups) {
+    const merged = g.members.filter((m) => m.role === "merged").map((m) => m.name).join(", ");
+    box.appendChild(el("div", { class: "note ok" },
+      el("b", { text: g.table_name + ": \u201c" + g.survivor_name + "\u201d survives; " + merged + (g.members.length > 2 ? " are" : " is") + " merged into it" }),
+      el("div", { class: "hint", text: "If both are filled and differ: " + g.conflict_rule_text + ". Decided by " + g.by + " on " + g.at + ": " + g.reason }),
+      el("div", { class: "row" }, btn("Dissolve", () => { N.open = { kind: "dissolve", group_id: g.group_id }; render(); }, { disabled: locked })),
+      N.open && N.open.kind === "dissolve" && N.open.group_id === g.group_id ? el("table", { class: "grid" }, el("tbody", {}, dissolveRow(g.group_id, 1))) : null));
+  }
+}
+function renderConsolidate() {
+  const R = N.R, avail = R.groups_available, locked = isPreview();
+  $("consNeeds").hidden = avail; $("consBody").hidden = !avail;
+  renderGroupsList();
+  if (!avail) return;
+  const live = R.fields.filter((f) => !f.abandoned && !f.consolidated);
+  const usable = R.tables.filter((t) => t.scope !== "out" && live.filter((f) => f.table_id === t.table_id).length >= 2);
+  const sel = $("gTable");
+  sel.replaceChildren(el("option", { value: "", text: "Choose a table" }), ...usable.map((t) => el("option", { value: t.table_id, text: t.old })));
+  if (!usable.some((t) => t.table_id === N.g.table)) N.g = { table: "", sel: [], survivor: "", rule: N.g.rule };
+  sel.value = N.g.table;
+  const box = $("gFields"); box.replaceChildren();
+  for (const f of live.filter((x) => x.table_id === N.g.table)) {
+    const cb = el("input", { type: "checkbox", id: "gf_" + f.field_id, "aria-label": f.original });
+    cb.checked = N.g.sel.includes(f.field_id);
+    cb.addEventListener("change", () => {
+      N.g.sel = cb.checked ? N.g.sel.concat([f.field_id]) : N.g.sel.filter((x) => x !== f.field_id);
+      N.g.survivor = N.g.sel.includes(N.g.survivor) ? N.g.survivor : (N.g.sel[0] || "");
+      N.gcmp = null; renderConsolidate();
+    });
+    box.appendChild(el("label", { class: "chip" }, cb, " " + f.original + " ", el("span", { class: "hint", text: f.data_type })));
+  }
+  const sv = $("gSurvivor");
+  sv.replaceChildren(...N.g.sel.map((id) => el("option", { value: id, text: (live.find((f) => f.field_id === id) || { original: id }).original })));
+  if (N.g.sel.includes(N.g.survivor)) sv.value = N.g.survivor;
+  $("gRule").value = N.g.rule;
+  const n = N.g.sel.length, okN = n >= 2 && n <= 8;
+  $("gHint").textContent = N.g.table ? (n + " selected" + (okN ? "" : " (choose 2 to 8)")) : "";
+  $("btnGCompare").disabled = !okN; $("btnGCreate").disabled = !okN || locked;
+  const out = $("gCompare"); out.replaceChildren();
+  const v = comparisonView(N.gcmp);
+  if (v) out.appendChild(v);
+}
+async function consolidateCompare() {
+  try { N.gcmp = await api("POST", "/api/names/compare", { base_id: baseNow(), field_ids: N.g.sel }); } catch (e) { N.gcmp = { error: e.message }; }
+  renderConsolidate();
 }
 
 /* Compare the values of a duplicate group's fields from the saved record file. Only counts and record IDs come back, never a value. */
@@ -390,9 +455,11 @@ function comparisonView(r) {
 }
 function renderDuplicates() {
   const R = N.R, card = $("dupCard"), body = $("dupBody");
-  card.hidden = !R.gate.ready || !R.clusters.length;
+  card.hidden = !R.gate.ready;
   body.replaceChildren();
   if (card.hidden) return;
+  renderConsolidate();
+  if (!R.clusters.length) { body.appendChild(el("p", { class: "hint", text: "No duplicate names remain." })); return; }
   const byId = Object.fromEntries(R.fields.map((f) => [f.field_id, f]));
   const locked = isPreview();
   for (const c of R.clusters) {
@@ -407,7 +474,9 @@ function renderDuplicates() {
     }
     body.appendChild(el("div", { class: "note warn" },
       el("b", { text: label + " in " + tname + ": " + c.members.length + " fields would share the name “" + c.members[0].final + "”" }),
-      el("div", { class: "row" }, btn("Compare values", () => compareGroup(c)), el("span", { class: "hint", text: "Do the duplicates hold the same data? Uses the saved record file (counts only)." })),
+      el("div", { class: "row" }, btn("Compare values", () => compareGroup(c)),
+        btn("Consolidate these", () => { N.g = { table: c.table_id, sel: c.members.map((m) => m.field_id), survivor: c.members[0].field_id, rule: "review" }; N.gcmp = null; renderConsolidate(); $("gTable").scrollIntoView({ block: "center" }); }, { disabled: locked || !R.groups_available }),
+        el("span", { class: "hint", text: "Do the duplicates hold the same data? Compare uses the saved record file (counts only)." })),
       comparisonView(N.cmp[c.cluster_id]),
       el("div", { style: "overflow-x:auto" }, el("table", { class: "grid" },
         el("thead", {}, el("tr", {}, ["Table", "Field", "Data", "Your name", "Repaired name", "Check", "Status", "Decision"].map((h) => el("th", { text: h })))), tbody))));
@@ -417,7 +486,7 @@ function renderDuplicates() {
 /* ---------- descriptions (lineage syntax): generated each time, a hand edit is saved ---------- */
 function descMatches(f) {
   const d = f.description, tb = $("dTable").value, q = $("dSearch").value.trim().toLowerCase();
-  if (f.abandoned) return false;
+  if (f.abandoned || f.consolidated) return false;
   if (tb && f.table_id !== tb) return false;
   if ($("dEdited").checked && !d.edited) return false;
   if ($("dProblems").checked && !d.problems.length) return false;
@@ -537,6 +606,15 @@ startPage("names", { onReadyChange, afterConnect }, () => {
   $("btnApprovePass").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "pass", targets: [N.target] }, "fieldsMessage", fieldsOk));
   $("btnApproveAuto").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "auto", targets: [N.target] }, "fieldsMessage", fieldsOk));
   $("btnApproveAllTargets").addEventListener("click", () => decide("/api/names/fields/approve", { mode: "pass_and_auto" }, "fieldsMessage", fieldsOk));
+  $("gTable").addEventListener("change", () => { N.g = { table: $("gTable").value, sel: [], survivor: "", rule: $("gRule").value }; N.gcmp = null; renderConsolidate(); });
+  $("gSurvivor").addEventListener("change", () => { N.g.survivor = $("gSurvivor").value; });
+  $("gRule").addEventListener("change", () => { N.g.rule = $("gRule").value; });
+  $("btnGCompare").addEventListener("click", guarded(consolidateCompare));
+  $("btnGCreate").addEventListener("click", async () => {
+    const ids = N.g.sel.slice(), survivor = $("gSurvivor").value || ids[0];
+    const r = await decide("/api/names/groups/create", { survivor_id: survivor, field_ids: ids, conflict_rule: $("gRule").value, reason: $("gReason").value }, "gMessage", "Fields consolidated. The merged fields have left the review.");
+    if (r) { N.g = { table: N.g.table, sel: [], survivor: "", rule: "review" }; $("gReason").value = ""; N.gcmp = null; renderConsolidate(); }
+  });
   $("descAirtable").addEventListener("change", schedulePreview);
   $("descEmoji").addEventListener("change", schedulePreview);
   for (const id of ["dTable", "dEdited", "dProblems"]) $(id).addEventListener("change", () => { N.descPage = 0; renderDescriptions(); });

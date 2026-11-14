@@ -91,13 +91,14 @@ def load_db(path, base_id):
     try:
         data = store.load_fields(c, base_id)
         approved, abandoned, saved, notes = {}, [], {}, []
+        groups = store._live_groups(store.read_groups(c, base_id)[0], data)
         try:
             approved = {r[0]: r[1] for r in c.execute("SELECT airtable_table_id, new_table_name FROM table_names WHERE status='approved' AND new_table_name IS NOT NULL")}
             abandoned = [r[0] for r in c.execute("SELECT airtable_field_id FROM field_names WHERE abandoned=1")]
             saved = {r[0]: r[1] for r in c.execute("SELECT airtable_field_id, description FROM field_names WHERE description IS NOT NULL")}
         except sqlite3.OperationalError:
             notes.append("Migration 007 is not applied in this database: no approved table names, abandon decisions or saved descriptions were read.")
-        return {"fields": data["fields"], "tables": data["tables"], "approved_tables": approved, "abandoned": abandoned, "saved_descriptions": saved, "notes": notes}
+        return {"fields": data["fields"], "tables": data["tables"], "approved_tables": approved, "abandoned": abandoned, "saved_descriptions": saved, "groups": groups, "notes": notes}
     finally:
         c.close()
 
@@ -119,10 +120,11 @@ def _csv(header, rows):
     return out.getvalue()
 
 
-def build_reports(result, fields, imp=None, notes=(), descriptions=None):
+def build_reports(result, fields, imp=None, notes=(), descriptions=None, consolidated=None):
     """-> {filename: text}. Pure: the same input gives the same text. descriptions: {field_id: {text, source, problems}}; when omitted the
     generated lineage description is used."""
     imp = imp or {"manual": {}, "target_types": {}, "problems": []}
+    consolidated = consolidated or {}
     fbi = {f["field_id"]: f for f in fields}
     if descriptions is None:
         descriptions = {f["field_id"]: {"text": fd.generate_description(f, fbi), "source": "generated", "problems": []} for f in fields}
@@ -130,19 +132,19 @@ def build_reports(result, fields, imp=None, notes=(), descriptions=None):
     head = ["table_id", "table_name", "field_id", "original_name", "airtable_type", "imported_new_name", "imported_new_label", "target_type"]
     for t in T:
         head += [t + "_verdict", t + "_rules", t + "_proposed_repair", t + "_reasons"]
-    head += ["label_quarter_style", "rows_with_value", "null_count", "cardinality", "profiled", "can_abandon", "abandoned", "description", "description_source", "description_problems"]
+    head += ["label_quarter_style", "rows_with_value", "null_count", "cardinality", "profiled", "can_abandon", "abandoned", "description", "description_source", "description_problems", "consolidated_into"]
     rows = []
     for fid, e in result["fields"].items():
         f, m, p = fbi[fid], imp["manual"].get(fid, {}), e["presence"]
         row = [e["table_id"], f["table_name"], fid, e["original"], f["data_type"], m.get("planning_name", ""), m.get("core_label", ""), imp["target_types"].get(fid, "")]
         for t in T:
             r = e["targets"].get(t)
-            row += [r["verdict"], " ".join(r["rules"]), r["proposed"] or "", " | ".join(r["reasons"])] if r else ["ABANDONED", "", "", ""]
+            row += [r["verdict"], " ".join(r["rules"]), r["proposed"] or "", " | ".join(r["reasons"])] if r else ["CONSOLIDATED" if fid in consolidated else "ABANDONED", "", "", ""]
         lab = e["targets"].get("core_label")
         row += [lab["quarter_style"] if lab else "", p["populated"], p["null_count"], p["cardinality_display"], "yes" if p["profiled"] else "no",
-                "yes" if p["can_abandon"] else "no", "yes" if e["abandoned"] else "no"]
+                "yes" if p["can_abandon"] else "no", "yes" if e["abandoned"] and fid not in consolidated else "no"]
         d = descriptions.get(fid) or {"text": "", "source": "", "problems": []}
-        row += [d["text"], d["source"], " ".join(d["problems"])]
+        row += [d["text"], d["source"], " ".join(d["problems"]), consolidated.get(fid, "")]
         rows.append(row)
     out = {"names_report.csv": _csv(head, rows)}
     d = []
@@ -176,7 +178,8 @@ def build_reports(result, fields, imp=None, notes=(), descriptions=None):
         L[2:2] = (["BLOCKED: field review cannot start until every table name is approved. %d table(s) waiting: %s" % (len(g["pending"]), names), ""]
                   if g["enforced"] else
                   ["DRAFT: %d table name(s) are not approved yet, so swapped names below are proposals only: %s" % (len(g["pending"]), names), ""])
-    L += ["Abandoned fields excluded: %d" % s["abandoned"], "Duplicate groups: %d" % len(result["clusters"]),
+    ncons = len(consolidated)
+    L += ["Abandoned fields excluded: %d" % (s["abandoned"] - ncons), "Consolidated into another field (excluded): %d" % ncons, "Duplicate groups: %d" % len(result["clusters"]),
           "Import problems: %d (%d errors)" % (len(imp["problems"]), sum(1 for p in imp["problems"] if p["severity"] == "error"))]
     L += [""] + list(notes)
     out["names_summary.txt"] = "\n".join(L) + "\n"
@@ -231,17 +234,20 @@ def main(argv=None):
         text, note = decode_csv(open(a.imp, "rb").read())
         imp = parse_import(text, db["fields"])
         notes += [note] if note else []
+    merged = {m: g["survivor_id"] for g in db["groups"] for m in g["member_ids"][1:]}
     res = fn.run(db["fields"], db["tables"], st, manual=(imp or {}).get("manual"), approved_tables=db["approved_tables"],
-                 abandoned=db["abandoned"], out_of_scope_tables=a.skip_table, gate=not a.draft)
+                 abandoned=db["abandoned"] + [m for m in merged if m not in db["abandoned"]], out_of_scope_tables=a.skip_table, gate=not a.draft)
     os.makedirs(a.out, exist_ok=True)
     fbi = {f["field_id"]: f for f in db["fields"]}
     descs = {}
+    surv = {g["survivor_id"]: g for g in db["groups"]}
     for fid, f in fbi.items():
-        gen = fd.generate_description(f, fbi, st.description_include_airtable, st.description_emoji_mode)
+        gen = fd.generate_description(f, fbi, st.description_include_airtable, st.description_emoji_mode,
+                                      [fbi[m] for m in surv[fid]["member_ids"][1:]] if fid in surv else [])
         saved = db["saved_descriptions"].get(fid)
         text = saved if saved is not None else gen
         descs[fid] = {"text": text, "source": "saved" if saved is not None else "generated", "problems": [p["rule"] for p in fd.validate_description(text)]}
-    for name, text in build_reports(res, db["fields"], imp, notes, descs).items():
+    for name, text in build_reports(res, db["fields"], imp, notes, descs, merged).items():
         with open(os.path.join(a.out, name), "w", encoding="utf-8-sig", newline="") as fh:
             fh.write(text)
     print(open(os.path.join(a.out, "names_summary.txt"), encoding="utf-8-sig").read())

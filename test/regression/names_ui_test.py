@@ -1,5 +1,5 @@
 """Browser test of the Field names page (/names): drives the real page in Chromium through the whole workflow. Fabricated names only."""
-import json, os, shutil, time, urllib.request
+import json, os, shutil, sqlite3, time, urllib.request
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:
@@ -113,6 +113,14 @@ with sync_playwright() as p:
     until(lambda: pg.is_visible("#fieldsBody"), "the gate to open")
     check("approving the last table opens field review", "approved" in text("#gateNote").lower() and not pg.is_visible("#fieldsLocked") and pg.locator("#fieldsGrid tbody tr").count() >= 9)
 
+    # ---- consolidation needs migration 009: without it the page says so; then apply the proposed DDL to this test database only
+    check("without migration 009 the consolidation panel says how to enable it", pg.is_visible("#consNeeds") and pg.is_hidden("#consBody") and "migration 009" in text("#consNeeds"))
+    cx = sqlite3.connect("names_ui.db"); cx.executescript(open("sql/migration_009_add_field_groups.sql", encoding="utf-8").read()); cx.commit(); cx.close()
+    pg.reload()
+    pg.fill("#baseId", BASE)
+    until(lambda: pg.is_visible("#fieldsBody") and pg.is_visible("#consBody"), "the page to reload with consolidation available")
+    check("with the tables the consolidation panel is available", pg.is_hidden("#consNeeds") and pg.is_disabled("#btnGCreate") and pg.is_disabled("#btnGCompare"))
+
     # ---- a hostile field name is shown as text and never runs
     check("a hostile field name is displayed as text and does not run", pg.evaluate("window.__xss") is None and frow("onerror").count() == 1 and pg.locator("#fieldsGrid img").count() == 0)
 
@@ -179,6 +187,44 @@ with sync_playwright() as p:
     members.nth(1).get_by_role("button", name="Approve", exact=True).click()
     until(lambda: pg.locator("#dupBody > .note.warn").count() == 1, "the Planning name group to resolve")
     check("renaming one member resolves that name's group; the Core name group remains until it is handled too", "Core name in Orders" in text("#dupBody") and "Planning name in Orders" not in text("#dupBody"))
+
+    # ---- consolidation: select fields, compare, consolidate, see the effects, dissolve
+    core_block = pg.locator("#dupBody > .note.warn").first
+    core_block.get_by_role("button", name="Consolidate these").click()
+    until(lambda: pg.locator("#gFields input:checked").count() == 2, "the duplicate members to be preselected")
+    check("'Consolidate these' preselects the group's fields in the panel", pg.input_value("#gTable") == TA and not pg.is_disabled("#btnGCompare") and pg.locator("#gSurvivor option").count() == 2)
+    pg.click("#btnGCompare")
+    until(lambda: "Compared 3 saved records" in text("#gCompare"), "the panel comparison")
+    check("the panel compares the selected fields' values (counts only)", "UISECRET" not in pg.inner_text("body"))
+    pg.click("#btnGCreate")
+    msg("#gMessage", "reason")
+    check("consolidating needs a reason", "reason" in text("#gMessage").lower() and pg.locator("#groupsList .note.ok").count() == 0)
+    pg.select_option("#gRule", "survivor_wins")
+    pg.fill("#gReason", "the same data under two names")
+    pg.click("#btnGCreate")
+    until(lambda: pg.locator("#groupsList .note.ok").count() == 1, "the group to be created")
+    check("the group is listed with its conflict rule, who and why", "survives" in text("#groupsList") and "survivor's value" in text("#groupsList") and "the same data under two names" in text("#groupsList"))
+    until(lambda: "No duplicate names remain." in text("#dupBody"), "the duplicate groups to clear")
+    check("the merged field leaves the duplicate groups (both names)", "No duplicate names remain." in text("#dupBody"))
+    pg.fill("#fSearch", "amount")
+    until(lambda: pg.locator("#fieldsGrid tbody tr:not(.reason)").count() == 1, "the grid to hide the merged field")
+    check("the merged field is hidden from the grid by default", pg.locator("#fieldsGrid tbody tr:not(.reason)").count() == 1)
+    pg.check("#fAbandoned")
+    until(lambda: pg.locator("#fieldsGrid tbody tr:not(.reason)").count() == 2, "the merged field to be listed")
+    check("it is listed, marked consolidated, when abandoned and consolidated fields are shown", "Consolidated into" in text("#fieldsGrid tbody") and pg.get_by_role("button", name="Dissolve group").count() == 1)
+    pg.uncheck("#fAbandoned")
+    pg.fill("#fSearch", "")
+    check("the survivor's description lists both origins", "Orders.amount" in pg.locator("#descGrid tbody tr").filter(has_text="Amount").first.locator("textarea").input_value())
+    pg.locator("#groupsList").get_by_role("button", name="Dissolve", exact=True).click()
+    until(lambda: pg.locator("#groupsList tr.reason").count() == 1, "the dissolve form")
+    pg.locator("#groupsList tr.reason").get_by_role("button", name="Confirm").click()
+    msg("#gMessage", "reason")
+    check("dissolving needs a reason", "reason" in text("#gMessage").lower() and pg.locator("#groupsList .note.ok").count() == 1)
+    pg.locator("#groupsList tr.reason input").fill("different data after all")
+    pg.locator("#groupsList tr.reason").get_by_role("button", name="Confirm").click()
+    until(lambda: pg.locator("#groupsList .note.ok").count() == 0, "the group to be dissolved")
+    until(lambda: "Core name in Orders" in text("#dupBody"), "the duplicate group to return")
+    check("dissolving returns the fields to the review and the duplicate group comes back", "Core name in Orders" in text("#dupBody") and "Orders.amount" not in pg.locator("#descGrid tbody tr").filter(has_text="Amount").first.locator("textarea").input_value())
 
     # ---- withdraw needs a reason
     pg.fill("#fSearch", "Notes")

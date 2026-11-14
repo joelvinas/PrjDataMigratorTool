@@ -92,7 +92,7 @@
       <label for="fTable">Table</label>
       <select id="fTable"></select>
       <input id="fSearch" type="text" class="wide" placeholder="Search field name or ID" autocomplete="off">
-      <label><input type="checkbox" id="fAbandoned"> Show abandoned</label>
+      <label><input type="checkbox" id="fAbandoned"> Show abandoned and consolidated</label>
     </div>
     <div class="row">
       <button id="btnApprovePass" type="button">Approve all that pass (this name)</button>
@@ -108,11 +108,29 @@
   </div>
 </section>
 
-<!-- E: duplicate groups -->
+<!-- E: duplicate groups and consolidation -->
 <section class="card" id="dupCard" hidden>
-  <h2><span class="num">E</span> Duplicate groups</h2>
-  <p class="hint">A duplicate is a group problem: every member is shown with its original and repaired name side by side. Rename a member, or abandon one that has no values; the check runs again on what remains.</p>
+  <h2><span class="num">E</span> Duplicate groups and consolidation</h2>
+  <p class="hint">A duplicate is a group problem: every member is shown with its original and repaired name side by side. Rename a member, abandon one that has no values, compare their values, or consolidate them into one field; the check runs again on what remains.</p>
   <div id="dupBody"></div>
+  <h3>Consolidate fields</h3>
+  <p class="hint">Several Airtable fields of one table that should become <b>one</b> Workfront field. Pick the fields, choose the one that survives, say what the loader should do later when two of them are filled and differ, and why. The merged fields leave the review and the duplicate checks, and the survivor's description lists every origin. A group can be dissolved at any time.</p>
+  <div id="consNeeds" class="note info" hidden>Consolidation needs migration 009 (<code>python sql/apply_migrations.py path/to/your.db</code>, after a backup). Until then the groups below cannot be saved.</div>
+  <div id="consBody">
+    <div class="row"><label for="gTable">Table</label><select id="gTable"></select><span id="gHint" class="hint"></span></div>
+    <div id="gFields" class="chips"></div>
+    <div class="row">
+      <label for="gSurvivor">Field that survives</label><select id="gSurvivor"></select>
+      <label for="gRule">If both are filled and differ</label>
+      <select id="gRule"><option value="review">A person resolves each record</option><option value="survivor_wins">Keep the survivor's value</option><option value="first_filled">Use the first non-empty value, survivor first</option></select>
+    </div>
+    <div class="row"><input id="gReason" type="text" class="wide" maxlength="500" placeholder="Why are these fields being consolidated? (required)" autocomplete="off">
+      <button id="btnGCompare" type="button">Compare values</button><button id="btnGCreate" type="button" class="primary">Consolidate</button></div>
+    <div id="gMessage" class="msg"></div>
+    <div id="gCompare"></div>
+  </div>
+  <h3>Consolidated fields</h3>
+  <div id="groupsList"></div>
 </section>
 
 <!-- F: descriptions -->

@@ -4514,6 +4514,21 @@ def api_names_compare(body):
     return out
 
 
+def api_names_groups_create(body):
+    """Consolidate several fields of one table into one (survivor, merged members, conflict rule, reason). Reversible."""
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.create_group, conn, base, body.get("actor"), body.get("survivor_id"), body.get("field_ids"), body.get("conflict_rule"), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_groups_dissolve(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.dissolve_group, conn, base, body.get("actor"), body.get("group_id"), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
 def api_names_import(body):
     with db() as conn:
         base = _names_base(body)
@@ -4605,7 +4620,8 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
                "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
                "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
-               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare}
+               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare,
+               "/api/names/groups/create": api_names_groups_create, "/api/names/groups/dissolve": api_names_groups_dissolve}
 
 
 class Handler(BaseHTTPRequestHandler):

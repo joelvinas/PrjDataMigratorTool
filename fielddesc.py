@@ -136,13 +136,19 @@ def field_origins(f, fields_by_id, emoji_mode="remove"):
     return out or own
 
 
-def generate_description(f, fields_by_id, include_airtable_description=False, emoji_mode="remove"):
+def generate_description(f, fields_by_id, include_airtable_description=False, emoji_mode="remove", merged=()):
     """The generated description for one field (a row from airtable_fields). Deterministic. Emoji in the names (and in Airtable's own description)
-    are removed, or spelled out as their word when emoji_mode is 'word'."""
+    are removed, or spelled out as their word when emoji_mode is 'word'. merged: the fields consolidated into this one (it is their survivor); their
+    origins are listed after its own, so the description traces every source."""
     rest = None
     if include_airtable_description and (f.get("field_description") or "").strip():
         rest = "Airtable description: " + _no_emoji(f["field_description"], emoji_mode)
-    return format_lineage("Airtable", field_origins(f, fields_by_id, emoji_mode), rest)
+    origins = list(field_origins(f, fields_by_id, emoji_mode))
+    for m in merged:
+        for o in field_origins(m, fields_by_id, emoji_mode):
+            if o not in origins:
+                origins.append(o)
+    return format_lineage("Airtable", origins, rest)
 
 
 def validate_description(text, max_len=None):
