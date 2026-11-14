@@ -110,8 +110,12 @@
       <option value="tables">Selected tables</option>
     </select>
     <select id="scopeBase" hidden></select>
-    <select id="scopeTable" multiple size="8" hidden title="Hold Ctrl or Shift to choose several tables"></select>
-    <span id="scopeTableHint" class="hint" hidden>Hold Ctrl or Shift to choose several tables.</span>
+  </div>
+  <div class="row" id="rowScopeTable" hidden>
+    <select id="scopeTable" multiple size="8" title="Hold Ctrl or Shift to choose several tables"></select>
+    <span id="scopeTableHint" class="hint">Hold Ctrl or Shift to choose several tables.</span>
+  </div>
+  <div class="row">
     <label for="cap">Distinct-value cap per field</label>
     <input id="cap" type="number" min="100" value="1000" class="short">
   </div>

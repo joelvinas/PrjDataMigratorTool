@@ -83,8 +83,7 @@ function fillScopeSelectors() {
 function updateScopeVisibility() {
   const s = $("scope").value;
   $("scopeBase").hidden = s !== "base";
-  $("scopeTable").hidden = s !== "tables";
-  $("scopeTableHint").hidden = s !== "tables";
+  $("rowScopeTable").hidden = s !== "tables";
 }
 
 /* ---------- step 4: dependency graph ---------- */
