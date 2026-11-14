@@ -14,7 +14,7 @@ const RULE_TITLES = {
 const PER_PAGE = 50;
 const ACTOR_KEY = "migrationControl.reviewer";
 
-const N = { R: null, saved: null, target: "planning_name", page: 0, descPage: 0, open: null, timer: null };
+const N = { R: null, saved: null, target: "planning_name", page: 0, descPage: 0, open: null, timer: null, cmp: {} };
 const DESC_PER_PAGE = 25;
 const baseNow = () => $("baseId").value.trim();
 const actorNow = () => $("actor").value.trim();
@@ -126,7 +126,7 @@ async function load() {
   if (!/^app[A-Za-z0-9]{4,}$/.test(base)) { N.R = null; render(); return; }
   try {
     const r = await api("GET", "/api/names/review?base_id=" + encodeURIComponent(base));
-    N.saved = r.settings; N.R = r; N.page = 0; setControls(r.settings);
+    N.saved = r.settings; N.R = r; N.page = 0; N.cmp = {}; setControls(r.settings);
     say("pageMessage", "");
   } catch (e) { N.R = null; say("pageMessage", e.message, "err"); }
   render();
@@ -362,6 +362,32 @@ function renderFields() {
   }
 }
 
+/* Compare the values of a duplicate group's fields from the saved record file. Only counts and record IDs come back, never a value. */
+async function compareGroup(c) {
+  try {
+    N.cmp[c.cluster_id] = await api("POST", "/api/names/compare", { base_id: baseNow(), field_ids: c.members.map((m) => m.field_id) });
+  } catch (e) { N.cmp[c.cluster_id] = { error: e.message }; }
+  renderDuplicates();
+}
+function comparisonView(r) {
+  if (!r) return null;
+  if (r.error) return el("div", { class: "note err", text: r.error });
+  const pairs = r.pairs.map((p) => {
+    const k = p.counts, ex = Object.entries(p.examples || {}).map(([b, ids]) => b.replace("_", " ") + ": " + ids.join(", ")).join(" · ");
+    return el("tr", {}, el("td", { text: p.a.field_name + " (" + p.a.data_type + ")" }), el("td", { text: p.b.field_name + " (" + p.b.data_type + ")" }),
+      el("td", {}, tag(p.verdict.replace("_", " "), p.verdict === "conflict" ? "stale" : p.verdict === "agree" ? "run" : "done"), el("div", { class: "hint", text: p.verdict_text })),
+      el("td", { class: "num", text: fmt(k.agree + k.reordered + k.loose + k.conflict) }),
+      el("td", { text: "same " + fmt(k.agree) + " · reordered " + fmt(k.reordered) + " · formatting " + fmt(k.loose) + " · conflict " + fmt(k.conflict) }),
+      el("td", { class: "num", text: fmt(k.only_a) }), el("td", { class: "num", text: fmt(k.only_b) }), el("td", { class: "num", text: fmt(k.both_empty) }),
+      el("td", { class: "hint", text: ex ? "Records to look up in Airtable: " + ex : "" }));
+  });
+  return el("div", { class: "note info" },
+    el("div", { text: "Compared " + fmt(r.record_count) + " saved records of " + r.table_name + (r.captured_at ? ", captured " + r.captured_at : "") + ". Only counts and record IDs are shown, never a value." }),
+    ...r.notes.map((n) => el("div", { class: "hint", text: n })),
+    el("div", { style: "overflow-x:auto" }, el("table", { class: "grid" },
+      el("thead", {}, el("tr", {}, ["Field", "Against", "Verdict", "Both filled", "How they agree", "Only first", "Only second", "Both empty", "Pointers"].map((h) => el("th", { text: h })))),
+      el("tbody", {}, pairs))));
+}
 function renderDuplicates() {
   const R = N.R, card = $("dupCard"), body = $("dupBody");
   card.hidden = !R.gate.ready || !R.clusters.length;
@@ -381,6 +407,8 @@ function renderDuplicates() {
     }
     body.appendChild(el("div", { class: "note warn" },
       el("b", { text: label + " in " + tname + ": " + c.members.length + " fields would share the name “" + c.members[0].final + "”" }),
+      el("div", { class: "row" }, btn("Compare values", () => compareGroup(c)), el("span", { class: "hint", text: "Do the duplicates hold the same data? Uses the saved record file (counts only)." })),
+      comparisonView(N.cmp[c.cluster_id]),
       el("div", { style: "overflow-x:auto" }, el("table", { class: "grid" },
         el("thead", {}, el("tr", {}, ["Table", "Field", "Data", "Your name", "Repaired name", "Check", "Status", "Decision"].map((h) => el("th", { text: h })))), tbody))));
   }

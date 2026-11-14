@@ -149,6 +149,48 @@ s_, d, h = raw("GET", "/api/names/report.mhtml?base_id=" + BASE); check("it can 
 check("the report needs a valid base", raw("GET", "/api/names/report.html")[0] == 400 and raw("GET", "/api/names/report.html?base_id=appNothingHere1")[0] == 404)
 check("no token in the report", "patMOCK" not in page)
 
+# ---- compare the values of duplicate fields (from a saved record file; counts and record IDs only)
+import os
+TA, TB = "tblNa0000000001", "tblNb0000000001"
+os.makedirs("data_extract/" + BASE, exist_ok=True)
+def extract(table, records, fields, **k):
+    doc = {"format": "airtable-table-extract/1", "base_id": BASE, "table_id": table, "table_name": "T", "captured_at": "2026-01-01T00:00:00Z", "fields": [{"field_id": f} for f in fields],
+           "records": records, "record_count": len(records)}
+    doc.update(k)
+    json.dump(doc, open("data_extract/%s/%s.json" % (BASE, table), "w", encoding="utf-8"))
+RECS = [{"id": "recAAA01", "fields": {"fldN02": 10, "fldN03": 10, "fldN04": "SECRET-ALPHA-1", "fldN05": "SECRET-ALPHA-1"}},
+        {"id": "recAAA02", "fields": {"fldN02": 20, "fldN03": "20", "fldN04": "SECRET-BETA-2"}},
+        {"id": "recAAA03", "fields": {"fldN02": 30, "fldN05": "SECRET-GAMMA-3"}}, {"id": "recAAA04", "fields": {"fldN03": 40}},
+        {"id": "recAAA05", "fields": {}}, {"id": "recAAA06", "fields": {"fldN02": 1, "fldN03": 2, "fldN04": "SECRET-DELTA-4", "fldN05": "SECRET-EPSILON-5"}}]
+extract(TA, RECS, ["fldN02", "fldN03", "fldN04", "fldN05"])
+s_, r = post("/api/names/compare", A(field_ids=["fldN02", "fldN03"]))
+k = r["pairs"][0]["counts"] if s_ == 200 else {}
+check("the values of two fields are compared from the saved file", s_ == 200 and (k["agree"], k["loose"], k["only_a"], k["only_b"], k["both_empty"], k["conflict"]) == (1, 1, 1, 1, 1, 1) and r["record_count"] == 6, r)
+check("the verdict, record IDs to look up, and the file's capture time come back", r["pairs"][0]["verdict"] == "conflict" and r["pairs"][0]["examples"]["conflict"] == ["recAAA06"] and r["captured_at"] == "2026-01-01T00:00:00Z")
+s_, r2 = post("/api/names/compare", A(field_ids=["fldN04", "fldN05", "fldN02"]))
+blob = json.dumps(r) + json.dumps(r2)
+check("three fields are compared pairwise with a filled-together histogram", s_ == 200 and len(r2["pairs"]) == 3 and sum(r2["filled_together"].values()) == 6, r2)
+check("no record value appears in either response (only counts, IDs, names and text)", "SECRET" not in blob and "recAAA" in blob)
+s_, d, h = raw("GET", "/api/names/review?base_id=" + BASE); s2, d2, h2 = raw("GET", "/api/calllog")
+check("values appear nowhere else the page can reach", b"SECRET" not in d and b"SECRET" not in d2 and b"SECRET" not in open("names_api.db", "rb").read())
+s_, r = post("/api/names/compare", A(field_ids=["fldN03", "fldN02"]))
+check("a saved file out of step with the last profile is flagged", s_ == 200 and any("out of date" in n for n in r["notes"]), r.get("notes"))
+s_, e = post("/api/names/compare", A(field_ids=["fldM01", "fldM02"])); check("no saved record file: a plain message says how to get one", s_ == 404 and "Also save every record" in e["error"], e)
+check("fields of different tables cannot be compared", post("/api/names/compare", A(field_ids=["fldN02", "fldM01"]))[0] == 400)
+check("it needs 2 to 8 distinct fields", post("/api/names/compare", A(field_ids=["fldN02"]))[0] == 400 and post("/api/names/compare", A(field_ids=["fldN02", "fldN02"]))[0] == 400
+      and post("/api/names/compare", A(field_ids=["fldN0%d" % i for i in range(1, 9)] + ["fldM01"]))[0] == 400 and post("/api/names/compare", A())[0] == 400)
+check("an unknown field is refused", post("/api/names/compare", A(field_ids=["fldN02", "fldNope"]))[0] == 404)
+open("data_extract/%s/%s.json" % (BASE, TB), "w", encoding="utf-8").write("{SECRET-GARBAGE not json")
+s_, e = post("/api/names/compare", A(field_ids=["fldM01", "fldM02"])); check("an unreadable file is refused without echoing its content", s_ == 400 and "SECRET" not in e["error"], e)
+extract(TB, [], ["fldM01", "fldM02"], format="something-else")
+s_, e = post("/api/names/compare", A(field_ids=["fldM01", "fldM02"])); check("a file in the wrong format is refused", s_ == 400 and "format" in e["error"], e)
+extract(TB, [{"id": "recBBB01", "fields": {}}], ["fldM01", "fldM02"], table_id="tblSomeoneElse")
+check("a file that belongs to another table is refused", post("/api/names/compare", A(field_ids=["fldM01", "fldM02"]))[0] == 400)
+extract(TA, RECS, ["fldN02", "fldN04"])
+s_, r = post("/api/names/compare", A(field_ids=["fldN02", "fldN03"])); check("a field missing from the saved file is flagged as probably added later", s_ == 200 and any("not in the saved file" in n for n in r["notes"]), r.get("notes"))
+import shutil; shutil.rmtree("data_extract", ignore_errors=True)
+check("the page script has the compare control", b"compareGroup" in raw("GET", "/names.js")[1])
+
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row
 ev = [dict(x) for x in c.execute("select * from name_events order by event_id")]

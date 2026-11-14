@@ -35,6 +35,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import fieldcompare as names_compare
 import fieldnames_report as names_report
 import fieldnames_store as names_store
 from contextlib import contextmanager
@@ -4462,6 +4463,57 @@ def api_names_fields_unabandon(body):
         return dict(r, review=_names(names_store.review, conn, base))
 
 
+COMPARE_MAX_BYTES = 300 * 1024 * 1024        # a saved record file is loaded whole, so refuse an absurdly large one
+
+
+def api_names_compare(body):
+    """Compare the values of 2 to 8 fields of one table (duplicate-group members) from the saved record file. Returns counts and record IDs only:
+    the file is read into memory, compared and discarded; no value reaches the response, the database or a log."""
+    base = _names_base(body)
+    ids = []
+    for x in body.get("field_ids") if isinstance(body.get("field_ids"), list) else []:
+        if str(x) not in ids:
+            ids.append(str(x))
+    if not 2 <= len(ids) <= names_compare.MAX_FIELDS:
+        raise AppError("Choose between 2 and %d fields to compare." % names_compare.MAX_FIELDS)
+    with db() as conn:
+        rows = {r["field_id"]: dict(r) for r in conn.execute(
+            "SELECT field_id, table_id, table_name, field_name, data_type, row_count FROM airtable_fields WHERE base_id=? AND field_id IN (%s)" % ",".join("?" * len(ids)), [base] + ids)}
+    if len(rows) != len(ids):
+        raise AppError("One of those fields is not in this base.", 404)
+    tables = {r["table_id"] for r in rows.values()}
+    if len(tables) != 1:
+        raise AppError("Only fields of the same table can be compared.")
+    tid = tables.pop()
+    tname = rows[ids[0]]["table_name"]
+    path = _extract_path(base, tid)
+    if not os.path.isfile(path):
+        raise AppError("There is no saved record file for the table \"%s\". Run profiling for that table with \"Also save every record to JSON files\" ticked "
+                       "(Stage 1, step 5), then compare again." % tname, 404)
+    if os.path.getsize(path) > COMPARE_MAX_BYTES:
+        raise AppError("The saved record file for \"%s\" is too large to compare here." % tname)
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        raise AppError("The saved record file for \"%s\" could not be read. Save it again by profiling the table." % tname)
+    if not (isinstance(doc, dict) and doc.get("format") == "airtable-table-extract/1" and doc.get("table_id") == tid and isinstance(doc.get("records"), list)):
+        raise AppError("The saved record file for \"%s\" is not in the expected format. Save it again by profiling the table." % tname)
+    in_file = {f.get("field_id") for f in doc.get("fields") or [] if isinstance(f, dict)}
+    fields = [{"field_id": i, "field_name": rows[i]["field_name"], "data_type": rows[i]["data_type"]} for i in ids]
+    res = names_compare.compare_group([r for r in doc["records"] if isinstance(r, dict)], fields)
+    notes = []
+    pc = rows[ids[0]]["row_count"]
+    if pc and pc != len(doc["records"]):
+        notes.append("The saved file has %d records but the last profile counted %d, so the file may be out of date." % (len(doc["records"]), pc))
+    for i in ids:
+        if in_file and i not in in_file:
+            notes.append("\"%s\" is not in the saved file (it may have been added after the file was captured), so it looks empty." % rows[i]["field_name"])
+    out = {"table_id": tid, "table_name": tname, "captured_at": doc.get("captured_at"), "record_count": len(doc["records"]), "notes": notes}
+    out.update(res)
+    return out
+
+
 def api_names_import(body):
     with db() as conn:
         base = _names_base(body)
@@ -4553,7 +4605,7 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
                "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
                "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
-               "/api/names/import": api_names_import}
+               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare}
 
 
 class Handler(BaseHTTPRequestHandler):
