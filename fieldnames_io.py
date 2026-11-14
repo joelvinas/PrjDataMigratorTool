@@ -209,12 +209,27 @@ def main(argv=None):
     ap.add_argument("--no-char-cleanup", action="store_true")
     ap.add_argument("--no-leading-digits", action="store_true")
     ap.add_argument("--label-convert-quarter", action="store_true", help="propose 1Q -> Q1 in labels too (default: labels keep the client's convention)")
+    ap.add_argument("--target-option", action="append", default=[], metavar="NAME.OPTION=VALUE",
+                    help="an option for one name only, e.g. planning_name.allow_leading_digit=true, core_name.max_len=200, planning_name.extra_allowed=&' "
+                         "(names: planning_name, core_name, core_label; options: %s). Repeatable." % ", ".join(fn.TARGET_OPTS))
     ap.add_argument("--draft", action="store_true", help="preview field results even though some table names are not approved (the report says DRAFT)")
     ap.add_argument("--skip-table", action="append", default=[], help="table ID to treat as out of scope (repeatable)")
     a = ap.parse_args(argv)
     if not os.path.isfile(a.db):
         sys.exit("No such database: %s" % a.db)
-    st = fn.Settings(table_swap=not a.no_table_swap, char_cleanup=not a.no_char_cleanup, leading_digits=not a.no_leading_digits,
+    per = {}
+    for item in a.target_option:
+        try:
+            key, val = item.split("=", 1)
+            name, opt = key.split(".", 1)
+        except ValueError:
+            sys.exit("--target-option must look like planning_name.max_len=200 (got %r)" % item)
+        per.setdefault(name, {})[opt] = (val.lower() in ("1", "true", "yes", "on")) if opt in fn.BOOL_OPTS else val
+    try:
+        fn.Settings(targets=per)
+    except ValueError as e:
+        sys.exit("--target-option: %s" % e)
+    st = fn.Settings(targets=per, table_swap=not a.no_table_swap, char_cleanup=not a.no_char_cleanup, leading_digits=not a.no_leading_digits,
                      table_prefix=a.table_prefix, digit_style=a.digit_style, digit_word=a.digit_word, label_keep_quarter=not a.label_convert_quarter)
     db = load_db(a.db, a.base)
     if not db["fields"]:

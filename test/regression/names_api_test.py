@@ -65,6 +65,9 @@ check("preview shows the effect of a toggle without saving it", s == 200 and p["
 check("a preview with invalid settings is refused", post("/api/names/preview", {"base_id": BASE, "settings": {"table_prefix": "bad"}})[0] == 400)
 check("saving settings needs initials", post("/api/names/settings", {"base_id": BASE, "settings": {}})[0] == 400)
 s, r = post("/api/names/settings", A(settings={"label_keep_quarter": False}, reason="test")); check("settings are saved and returned", s == 200 and r["settings"]["label_keep_quarter"] is False and r["settings_saved"])
+s, r = post("/api/names/settings", A(settings={"targets": {"core_name": {"max_len": 40}, "planning_name": {"allow_leading_digit": True}}}, reason="separate"))
+check("per-name settings are saved through the API and returned", s == 200 and r["settings"]["targets"]["core_name"]["max_len"] == 40 and r["settings"]["targets"]["planning_name"]["allow_leading_digit"] is True, r.get("error"))
+s, e = post("/api/names/preview", {"base_id": BASE, "settings": {"targets": {"planning_name": {"max_len": 5000}}}}); check("an invalid per-name setting is refused", s == 400 and "maximum length" in e["error"].lower(), e)
 post("/api/names/settings", A(settings={}))
 
 # ---- field decisions

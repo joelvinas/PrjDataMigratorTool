@@ -39,20 +39,14 @@
 <!-- A: settings -->
 <section class="card" id="settingsCard">
   <h2><span class="num">A</span> Rules and presets</h2>
-  <p class="hint">The rules run in a fixed order: table names first, then the table-name swap, character cleanup, leading digits, and last the duplicate check. Switch a step off to see what it does; the count beside it is how many names it changes. The checks that keep names safe (special characters, emoji, leading digit, spaces, length, duplicates) can never be switched off.</p>
-  <div class="row"><label><input type="checkbox" id="tSwap"> 2. Table-name swap</label> <span id="cSwap" class="hint"></span></div>
-  <div class="row"><label><input type="checkbox" id="tClean"> 3. Character cleanup (special characters, spaces, 1Q to Q1)</label> <span id="cClean" class="hint"></span></div>
-  <div class="row"><label><input type="checkbox" id="tLead"> 4. Leading digits</label> <span id="cLead" class="hint"></span></div>
+  <p class="hint">The rules run in a fixed order: table names first, then the table-name swap, character cleanup, leading digits, and last the duplicate check. The Planning name, the Core name and the Core label are configured separately below; by default they behave the same. Switch a step off to see what it does; the count under it is how many names it changes. The checks that keep names safe (special characters, emoji, spaces, length, duplicates) can never be switched off.</p>
   <div class="row">
     <label for="pPrefix">Table number prefix</label>
     <select id="pPrefix"><option value="end">Move it to the end (1.2.3 Orders becomes Orders 1-2-3)</option><option value="drop">Drop it (Orders)</option><option value="plain">Keep it as plain digits (1-2-3 Orders)</option></select>
   </div>
-  <div class="row">
-    <label for="pDigit">Name that starts with a digit</label>
-    <select id="pDigit"><option value="move_to_end">Move the number to the end (500K Fund becomes Fund 500K)</option><option value="prefix_word">Put a word in front</option></select>
-    <input id="pWord" type="text" class="short" placeholder="word" maxlength="40" autocomplete="off">
-  </div>
-  <div class="row"><label><input type="checkbox" id="pLabelQ"> Labels keep the client's own quarter style (1Q) instead of Q1</label></div>
+  <div style="overflow-x:auto"><table class="grid" id="settingsGrid"><thead><tr>
+    <th>Setting</th><th>Planning name</th><th>Core name</th><th>Core label</th>
+  </tr></thead><tbody></tbody></table></div>
   <div class="row"><button id="btnSaveSettings" type="button">Save these settings</button><span id="settingsState" class="hint"></span></div>
   <div id="previewNote" class="note warn" hidden>These settings are a preview and are not saved. Save them before approving anything, so every decision is made under settings that can be reproduced.</div>
 </section>

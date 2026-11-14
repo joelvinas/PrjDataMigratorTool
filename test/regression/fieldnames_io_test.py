@@ -149,4 +149,17 @@ check("with every table approved the gate opens without --draft and the swap is 
 check("the abandoned member shrinks the duplicate group, which resolves it", rep["fld1"]["planning_name_verdict"] == "PASS")
 skipped = [r["field_id"] for r in csv.DictReader(open(os.path.join(out, "names_report.csv"), encoding="utf-8-sig", newline=""))]
 check("skipping a table removes its fields from the report", skipped == ["fld3", "fld4", "fld5", "fld6"], skipped)
+# per-name options on the command line
+po = os.path.join(tmp, "pername")
+fio.main(["--db", dbp, "--base", "appT", "--out", po, "--draft", "--target-option", "core_name.max_len=6", "--target-option", "planning_name.extra_allowed=#"])
+prow = {r["field_id"]: r for r in csv.DictReader(open(os.path.join(po, "names_report.csv"), encoding="utf-8-sig", newline=""))}
+check("a per-name length applies to that name only", "TOO_LONG" not in prow["fld1"]["core_name_rules"] and "TOO_LONG" in prow["fld4"]["core_name_rules"]
+      and "TOO_LONG" not in prow["fld4"]["planning_name_rules"] and "TOO_LONG" not in prow["fld4"]["core_label_rules"], prow["fld4"])
+check("the options used are shown in the summary", "max_len" in open(os.path.join(po, "names_summary.txt"), encoding="utf-8-sig").read())
+for bad in (["--target-option", "nonsense"], ["--target-option", "planning_name.max_len=999"], ["--target-option", "core_label.extra_allowed=&"]):
+    try:
+        fio.main(["--db", dbp, "--base", "appT", "--out", po, "--draft"] + bad); code = 0
+    except SystemExit as e:
+        code = e.code
+    check("a bad --target-option is refused: %s" % bad[1], code not in (0, None))
 sys.exit(0 if ok else 1)

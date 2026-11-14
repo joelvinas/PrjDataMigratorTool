@@ -63,21 +63,101 @@ _LEAD = re.compile(r"^(\d[A-Za-z0-9\-]*)\s+(.*\S)$")
 _TABLE_PREFIX = re.compile(r"^(\d+(?:\.\d+)*)[.)]?\s+(.+)$")
 
 
+# Options that can be set separately for each of the three names (planning_name, core_name, core_label). Anything not set falls back to the
+# general value (the first six) or to the default shown, so by default the names behave the same.
+BOOL_OPTS = ("table_swap", "char_cleanup", "leading_digits", "allow_leading_digit", "label_keep_quarter")
+TARGET_OPTS = BOOL_OPTS + ("digit_style", "digit_word", "max_len", "extra_allowed", "extra_blocked")
+MAX_LEN_CAP = {"planning_name": 250, "core_name": 1000, "core_label": 1000}   # Planning's 250 is documented by Adobe and cannot be exceeded
+_PUNCT_POOL = frozenset(chr(c) for c in range(33, 127) if not chr(c).isalnum() and chr(c) != "-")   # printable ASCII punctuation, never a space, letter, digit or hyphen
+
+
+def _punct_string(value, what):
+    value = str(value or "")
+    if any(c not in _PUNCT_POOL for c in value):
+        raise ValueError("%s may contain only printable ASCII punctuation (no letters, digits, spaces or hyphens)." % what)
+    return "".join(sorted(set(value)))
+
+
 class Settings(object):
-    """Toggles (steps 2 to 4) and presets. table_prefix: 'drop' | 'end' | 'plain'. digit_style: 'move_to_end' | 'prefix_word'."""
+    """Toggles (steps 2 to 4) and presets. table_prefix: 'drop' | 'end' | 'plain'. digit_style: 'move_to_end' | 'prefix_word'.
+    targets: optional per-name overrides, {target: {option: value}} using TARGET_OPTS, so Planning name, Core name and Core label can be
+    configured separately: the three step toggles, allow_leading_digit, digit_style and digit_word, max_len, extra_allowed (names: extra
+    punctuation that is allowed instead of removed) and extra_blocked (labels: extra punctuation that is removed)."""
     def __init__(self, table_swap=True, char_cleanup=True, leading_digits=True, table_prefix="end",
-                 digit_style="move_to_end", digit_word="", label_keep_quarter=True):
+                 digit_style="move_to_end", digit_word="", label_keep_quarter=True, targets=None):
         if table_prefix not in ("drop", "end", "plain") or digit_style not in ("move_to_end", "prefix_word"):
             raise ValueError("unknown preset")
         self.table_swap, self.char_cleanup, self.leading_digits = bool(table_swap), bool(char_cleanup), bool(leading_digits)
         self.table_prefix, self.digit_style, self.digit_word = table_prefix, digit_style, (digit_word or "").strip()
         self.label_keep_quarter = bool(label_keep_quarter)
+        self.targets = {}
+        for t, opts in (targets or {}).items():
+            if t not in TARGETS:
+                raise ValueError("unknown name: %s" % t)
+            clean = {}
+            for k, v in (opts or {}).items():
+                if k not in TARGET_OPTS:
+                    raise ValueError("unknown option: %s" % k)
+                kind = PROFILES[t]["kind"]
+                if k in BOOL_OPTS:
+                    if k in ("leading_digits", "allow_leading_digit") and kind == "label":
+                        continue                    # labels may start with a digit and have no leading-digit step
+                    if k == "label_keep_quarter" and kind != "label":
+                        continue
+                    clean[k] = bool(v)
+                elif k == "digit_style":
+                    if v not in ("move_to_end", "prefix_word"):
+                        raise ValueError("unknown preset")
+                    clean[k] = v
+                elif k == "digit_word":
+                    clean[k] = str(v or "").strip()[:40]
+                elif k == "max_len":
+                    try:
+                        n = int(v)
+                    except (TypeError, ValueError):
+                        raise ValueError("The maximum length must be a whole number.")
+                    if not 1 <= n <= MAX_LEN_CAP[t]:
+                        raise ValueError("The maximum length for %s must be between 1 and %d." % (PROFILES[t]["title"], MAX_LEN_CAP[t]))
+                    clean[k] = n
+                elif k == "extra_allowed":
+                    if kind == "label":
+                        if v:
+                            raise ValueError("Extra allowed characters apply to names; a label is cleaned by removing characters (see extra_blocked).")
+                        continue
+                    clean[k] = _punct_string(v, "Extra allowed characters")
+                elif k == "extra_blocked":
+                    if kind != "label":
+                        if v:
+                            raise ValueError("Extra characters to remove apply to labels; a name uses an allowlist (see extra_allowed).")
+                        continue
+                    clean[k] = _punct_string(v, "Extra characters to remove")
+            if clean:
+                self.targets[t] = clean
 
-    def enabled(self, step):
-        return bool(getattr(self, step))
+    def opt(self, target, key):
+        """The value of an option for one name: its own override, else the general value, else the default."""
+        o = self.targets.get(target) or {}
+        if key in o:
+            return o[key]
+        if key in ("table_swap", "char_cleanup", "leading_digits", "digit_style", "digit_word", "label_keep_quarter"):
+            return getattr(self, key)
+        return {"max_len": PROFILES[target]["max_len"], "allow_leading_digit": False, "extra_allowed": "", "extra_blocked": ""}[key]
+
+    def enabled(self, step, target=None):
+        return bool(self.opt(target, step)) if target else bool(getattr(self, step))
 
     def as_dict(self):
-        return dict(self.__dict__)
+        d = dict(self.__dict__)
+        d["targets"] = {t: dict(o) for t, o in self.targets.items()}
+        return d
+
+
+def auto_chars(settings, target):
+    """The characters whose deletion is AUTO_FIXABLE for this name: for a name the agreed list minus anything the user allowed for it, for a
+    label Adobe's unsupported characters plus anything the user chose to remove."""
+    if PROFILES[target]["kind"] == "label":
+        return LABEL_BLOCKLIST | frozenset(settings.opt(target, "extra_blocked"))
+    return AUTO_DELETE_CHARS - frozenset(settings.opt(target, "extra_allowed"))
 
 
 # ---------------------------------------------------------------- text helpers (pure)
@@ -100,20 +180,23 @@ def delete_auto_chars(s, chars=None):
     return _squash("".join(c for c in s if c not in chars))
 
 
-def clean_name_chars(s):
-    """Names, the full proposal: keep A-Z a-z 0-9 space hyphen. AUTO_DELETE_CHARS are deleted; '_' and a backslash become a space;
-    accents become plain letters; everything else (emoji, other symbols, other non-ASCII) is deleted. Only the first part is AUTO_FIXABLE."""
-    s = _translit(delete_auto_chars(s, AUTO_DELETE_CHARS))
-    s = re.sub(r"[_\\]", " ", s)
+def clean_name_chars(s, extra_allowed=""):
+    """Names, the full proposal: keep A-Z a-z 0-9 space hyphen (and any punctuation the user allowed for this name). AUTO_DELETE_CHARS are
+    deleted; '_' and a backslash become a space; accents become plain letters; everything else (emoji, other symbols, other non-ASCII) is
+    deleted. Only the first part is AUTO_FIXABLE."""
+    keep = frozenset(extra_allowed or "")
+    s = _translit(delete_auto_chars(s, AUTO_DELETE_CHARS - keep))
+    s = "".join(" " if c in "_\\" and c not in keep else c for c in s)
     s = re.sub(r"\s", " ", s)
-    return _squash("".join(c for c in s if NAME_ALLOWED.match(c)))
+    return _squash("".join(c for c in s if NAME_ALLOWED.match(c) or c in keep))
 
 
-def clean_label_chars(s):
+def clean_label_chars(s, extra_blocked=""):
     """Labels: stay as close to the original as possible. Accents become plain letters, emoji and non-ASCII are removed,
-    and LABEL_BLOCKLIST characters are removed. Everything else is kept."""
+    and LABEL_BLOCKLIST characters (and any the user chose to remove) are removed. Everything else is kept."""
+    blocked = LABEL_BLOCKLIST | frozenset(extra_blocked or "")
     s = re.sub(r"\s", " ", _translit(s))
-    return _squash("".join(c for c in s if 32 <= ord(c) <= 126 and c not in LABEL_BLOCKLIST))
+    return _squash("".join(c for c in s if 32 <= ord(c) <= 126 and c not in blocked))
 
 
 def quarter_to_q1(s):
@@ -149,19 +232,21 @@ def _whole(old):
 Rule = namedtuple("Rule", "id title targets step baseline check text bad good")
 
 
-def _c_empty(n, t): return n.strip() == ""
-def _c_nonascii(n, t): return any((ord(c) > 126 or ord(c) < 32) and c not in WS_CHARS for c in n)
-def _c_ws(n, t): return any(c in WS_CHARS for c in n)
-def _c_special(n, t):
+def _c_empty(n, t, st): return n.strip() == ""
+def _c_nonascii(n, t, st): return any((ord(c) > 126 or ord(c) < 32) and c not in WS_CHARS for c in n)
+def _c_ws(n, t, st): return any(c in WS_CHARS for c in n)
+def _c_special(n, t, st):
     if PROFILES[t]["kind"] == "label":
-        return any(c in LABEL_BLOCKLIST for c in n)
-    return any(32 <= ord(c) <= 126 and not NAME_ALLOWED.match(c) for c in n)
-def _c_edge(n, t): return n != n.strip()
-def _c_double(n, t): return "  " in n
-def _c_lead(n, t): return bool(n[:1].isdigit())
-def _c_long(n, t): return len(n) > PROFILES[t]["max_len"]
-def _c_quarter(n, t): return bool(_QTR_1Q.search(n))
-def _c_reserved(n, t): return n.strip().casefold() in RESERVED_NAMES[t]
+        blocked = LABEL_BLOCKLIST | frozenset(st.opt(t, "extra_blocked"))
+        return any(c in blocked for c in n)
+    keep = frozenset(st.opt(t, "extra_allowed"))
+    return any(32 <= ord(c) <= 126 and not NAME_ALLOWED.match(c) and c not in keep for c in n)
+def _c_edge(n, t, st): return n != n.strip()
+def _c_double(n, t, st): return "  " in n
+def _c_lead(n, t, st): return bool(n[:1].isdigit()) and not st.opt(t, "allow_leading_digit")
+def _c_long(n, t, st): return len(n) > st.opt(t, "max_len")
+def _c_quarter(n, t, st): return bool(_QTR_1Q.search(n))
+def _c_reserved(n, t, st): return n.strip().casefold() in RESERVED_NAMES[t]
 
 
 _NAMES = ("planning_name", "core_name")
@@ -208,9 +293,9 @@ def violations(name, target, settings):
     for r in RULES:
         if r.check is None or target not in r.targets:
             continue
-        if not r.baseline and not settings.enabled(r.step):
+        if not r.baseline and not settings.enabled(r.step, target):
             continue
-        if r.check(name, target):
+        if r.check(name, target, settings):
             out.append(r.id)
     return out
 
@@ -222,14 +307,14 @@ def clean_table_name(old, settings):
     s = _translit(old).strip()
     m = _TABLE_PREFIX.match(s)
     if m:
-        num, rest = m.group(1).replace(".", "-"), clean_name_chars(m.group(2))
+        num, rest = m.group(1).replace(".", "-"), clean_name_chars(m.group(2), settings.opt("planning_name", "extra_allowed"))
         if not rest:
-            return clean_name_chars(old)
+            return clean_name_chars(old, settings.opt("planning_name", "extra_allowed"))
         s = {"drop": rest, "end": rest + " " + num, "plain": num + " " + rest}[settings.table_prefix]
     else:
-        s = clean_name_chars(s)
+        s = clean_name_chars(s, settings.opt("planning_name", "extra_allowed"))
     if s[:1].isdigit() and not (m and settings.table_prefix == "plain"):
-        s = fix_leading_digits(s, settings.digit_style, settings.digit_word) or s
+        s = fix_leading_digits(s, settings.opt("planning_name", "digit_style"), settings.opt("planning_name", "digit_word")) or s
     return s
 
 
@@ -247,7 +332,7 @@ def table_names(tables, settings, approved=None):
         old_rules = violations(old, "planning_name", settings)
         if sug == old and not old_rules:
             verdict = PASS
-        elif not bad and old_rules and set(old_rules) <= AUTO_RULES and sug == delete_auto_chars(old):
+        elif not bad and old_rules and set(old_rules) <= AUTO_RULES and sug == delete_auto_chars(old, auto_chars(settings, "planning_name")):
             verdict = AUTO_FIXABLE       # only listed characters and whitespace were repaired; a number prefix or anything else is a person's decision
         else:
             verdict = NEEDS_HUMAN
@@ -298,7 +383,7 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
     cur = candidate
     ambiguous = False
     swap_status = "none"
-    if settings.table_swap and tmap:
+    if settings.opt(target, "table_swap") and tmap:
         new, status, detail = swap_table_refs(cur, field, fields_by_id, tmap, base_tables)
         swap_status = status
         steps["table_swap"] = new != cur
@@ -309,35 +394,36 @@ def evaluate_name(candidate, target, settings, field, fields_by_id, tmap, base_t
             reasons.append("Table reference is ambiguous (%s)" % detail)
         cur = new
     swapped_name = cur
-    if settings.char_cleanup:
-        new = clean_name_chars(cur) if kind == "name" else clean_label_chars(cur)
+    if settings.opt(target, "char_cleanup"):
+        new = clean_name_chars(cur, settings.opt(target, "extra_allowed")) if kind == "name" else clean_label_chars(cur, settings.opt(target, "extra_blocked"))
         if kind == "name":
             new = quarter_to_q1(new)
-        elif not settings.label_keep_quarter:
+        elif not settings.opt(target, "label_keep_quarter"):
             new = quarter_to_q1(new)
         steps["char_cleanup"] = new != cur
         cur = new
-    if kind == "name" and settings.leading_digits and cur[:1].isdigit():
-        new = fix_leading_digits(cur, settings.digit_style, settings.digit_word)
+    style, word = settings.opt(target, "digit_style"), settings.opt(target, "digit_word")
+    if kind == "name" and settings.opt(target, "leading_digits") and not settings.opt(target, "allow_leading_digit") and cur[:1].isdigit():
+        new = fix_leading_digits(cur, style, word)
         if new:
             steps["leading_digits"] = True
             cur = new
         else:
             steps.setdefault("leading_digits", False)
             reasons.append("Starts with a digit and the '%s' preset cannot be applied (%s)" % (
-                settings.digit_style, "no word given" if settings.digit_style == "prefix_word" and not settings.digit_word else "nothing follows the number"))
+                style, "no word given" if style == "prefix_word" and not word else "nothing follows the number"))
     lost = sum(1 for c in _translit(candidate) if ord(c) > 126 and unicodedata.category(c).startswith("L"))
-    if settings.char_cleanup and lost:
+    if settings.opt(target, "char_cleanup") and lost:
         reasons.append("%d letter(s) outside A-Z could not be converted and were removed; check the spelling of the proposed name" % lost)
     remaining = violations(cur, target, settings)
     for rid in remaining:
         r = RULE_BY_ID[rid]
-        off = r.step in STEPS and not settings.enabled(r.step)
+        off = r.step in STEPS and not settings.enabled(r.step, target)
         reasons.append("%s%s" % (r.title, " (the '%s' step is switched off, so no fix is suggested)" % r.step if off else ""))
     # AUTO_FIXABLE: the only problems are listed characters and whitespace (plus a schema-resolved swap to an APPROVED table name), and the
     # proposed name is exactly what deleting/normalising those gives. Anything else (accents, emoji, 1Q, leading digits, ...) needs a person.
     allowed = AUTO_RULES | ({"TABLE_REF"} if swap_status == "swapped" else set())
-    expected = delete_auto_chars(swapped_name, LABEL_BLOCKLIST if kind == "label" else AUTO_DELETE_CHARS)
+    expected = delete_auto_chars(swapped_name, auto_chars(settings, target))
     auto = bool(rules) and set(rules) <= allowed and not remaining and not ambiguous and cur != candidate and cur == expected
     if not rules and cur == candidate and not ambiguous:
         verdict = PASS
@@ -485,6 +571,17 @@ def rules_markdown():
           "3. Characters are cleaned up and `1Q` becomes `Q1` (names only).", "4. Names that start with a digit are rearranged.",
           "5. Duplicates are checked last, on the repaired names. Always on.", "",
           "Steps 2 to 4 can be switched off for review. Rules marked *baseline* are always checked.", "",
+          "## Settings for each name",
+          "",
+          "The Planning name, the Core name and the Core label can be configured separately. By default they behave the same. Each can have its own:",
+          "",
+          "- step toggles (table-name swap, character cleanup, leading digits);",
+          "- maximum length (Planning cannot exceed Adobe's documented 250);",
+          "- permission for a name to start with a digit (names only);",
+          "- leading-digit preset and word (names only);",
+          "- extra punctuation that is allowed instead of removed (names) or extra characters that are removed (labels).",
+          "",
+          "A setting that differs from the default is recorded with who saved it and when.", "",
           "## Verdicts", "", "- **PASS**: complies.", "- **AUTO_FIXABLE**: the only problem is one or more of the characters on the auto-delete list; deleting them gives a clean name. The fix is shown next to the original and a batch of these can be approved in one action.",
           "- **NEEDS_HUMAN**: everything else. A proposed repair is shown where one exists, with the reason, and is approved one item at a time. Nothing is ever applied without approval.", "", "## Rules", ""]
     for r in RULES:

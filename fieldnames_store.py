@@ -101,7 +101,7 @@ def read_scope(conn, base_id):
 
 def settings_from_dict(d):
     d = d or {}
-    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter"}
+    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets"}
     try:
         return fn.Settings(**{k: v for k, v in d.items() if k in known})
     except (ValueError, TypeError) as e:

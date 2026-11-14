@@ -144,6 +144,15 @@ st.save_settings(c, B, {}, "JV")
 preview = st.review(c, B, fn.Settings(char_cleanup=False))
 check("a preview with different settings does not save them", preview["settings"]["char_cleanup"] is False and st.read_settings(c, B)[0].char_cleanup is True)
 
+# ---- per-name settings are saved and read back
+st.save_settings(c, B, {"targets": {"planning_name": {"allow_leading_digit": True, "max_len": 120}, "core_label": {"extra_blocked": "%"}}}, "JV", "separate rules")
+s2, saved = st.read_settings(c, B)
+check("per-name settings are saved as an event and read back", saved and s2.opt("planning_name", "allow_leading_digit") is True and s2.opt("core_name", "allow_leading_digit") is False
+      and s2.opt("planning_name", "max_len") == 120 and s2.opt("core_label", "extra_blocked") == "%")
+check("invalid per-name settings are refused with a reason", (raises(st.save_settings, c, B, {"targets": {"planning_name": {"max_len": 999}}}, "JV") or st.StoreError("")).message.startswith("Those settings are not valid"))
+check("the review reports the per-name settings", st.review(c, B)["settings"]["targets"]["planning_name"]["max_len"] == 120)
+st.save_settings(c, B, {}, "JV", "back to defaults")
+
 # ---- scope (the later table_scope store): out tables are skipped and not part of the gate; undecided stays visible
 c.executescript("""CREATE TABLE table_scope (base_id TEXT NOT NULL, table_id TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('in','out')),
                    decided_by TEXT, decided_at TIMESTAMP, reason TEXT, PRIMARY KEY (base_id, table_id));

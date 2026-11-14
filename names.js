@@ -27,21 +27,89 @@ function btn(text, handler, opts) {
   return b;
 }
 
-/* ---------- settings <-> controls ---------- */
+/* ---------- settings <-> controls ----------
+   One column per name. Each row is an option; "names" rows apply to the Planning and Core names, "label" rows to the Core label only. */
+const NAME_TARGETS = ["planning_name", "core_name"];
+const DEFAULT_MAX = { planning_name: 250, core_name: 255, core_label: 255 };
+const MAX_CAP = { planning_name: 250, core_name: 1000, core_label: 1000 };
+const SETTING_ROWS = [
+  { key: "table_swap", label: "2. Table-name swap", type: "bool", on: ["planning_name", "core_name", "core_label"], count: "table_swap" },
+  { key: "char_cleanup", label: "3. Character cleanup (special characters, spaces, 1Q to Q1 in names)", type: "bool", on: ["planning_name", "core_name", "core_label"], count: "char_cleanup" },
+  { key: "leading_digits", label: "4. Leading digits: rearrange a name that starts with a digit", type: "bool", on: NAME_TARGETS, count: "leading_digits" },
+  { key: "allow_leading_digit", label: "A name may start with a digit", type: "bool", on: NAME_TARGETS },
+  { key: "digit_style", label: "If it must not: how to rearrange", type: "style", on: NAME_TARGETS },
+  { key: "digit_word", label: "Word to put in front (when rearranging that way)", type: "text", on: NAME_TARGETS, size: "short", max: 40 },
+  { key: "max_len", label: "Maximum length", type: "number", on: ["planning_name", "core_name", "core_label"] },
+  { key: "extra_allowed", label: "Extra punctuation to allow (it is kept, not removed)", type: "text", on: NAME_TARGETS, size: "short", max: 40, hint: "for example &" },
+  { key: "extra_blocked", label: "Extra characters to remove (besides Adobe's unsupported ones)", type: "text", on: ["core_label"], size: "short", max: 40, hint: "for example %" },
+  { key: "label_keep_quarter", label: "Keep the client's quarter style (1Q)", type: "bool", on: ["core_label"] },
+];
+const cellId = (t, k) => "o_" + t + "_" + k;
+
+/* The value of an option for one name: its own setting, else the general one, else the default (the same fallbacks the server uses). */
+function effective(s, t, k) {
+  const o = (s.targets && s.targets[t]) || {};
+  if (o[k] !== undefined) return o[k];
+  if (["table_swap", "char_cleanup", "leading_digits", "digit_style", "digit_word", "label_keep_quarter"].includes(k)) return s[k];
+  return { max_len: DEFAULT_MAX[t], allow_leading_digit: false, extra_allowed: "", extra_blocked: "" }[k];
+}
+function buildSettingsGrid() {
+  const body = $("settingsGrid").tBodies[0];
+  body.replaceChildren();
+  for (const row of SETTING_ROWS) {
+    const tr = el("tr", {}, el("td", { text: row.label }));
+    for (const t of ["planning_name", "core_name", "core_label"]) {
+      const td = el("td", {});
+      if (!row.on.includes(t)) { td.appendChild(el("span", { class: "hint", text: "-" })); tr.appendChild(td); continue; }
+      let input;
+      if (row.type === "bool") input = el("input", { type: "checkbox", id: cellId(t, row.key), "aria-label": row.label });
+      else if (row.type === "number") input = el("input", { type: "number", id: cellId(t, row.key), min: "1", max: String(MAX_CAP[t]), class: "short", "aria-label": row.label });
+      else if (row.type === "style") {
+        input = el("select", { id: cellId(t, row.key), "aria-label": row.label }, el("option", { value: "move_to_end", text: "Move the number to the end" }), el("option", { value: "prefix_word", text: "Put a word in front" }));
+      } else input = el("input", { type: "text", id: cellId(t, row.key), class: row.size || "", maxlength: String(row.max || 40), placeholder: row.hint || "", autocomplete: "off", "aria-label": row.label });
+      input.addEventListener(row.type === "text" || row.type === "number" ? "input" : "change", schedulePreview);
+      td.appendChild(input);
+      if (row.count) td.appendChild(el("div", { class: "hint", id: "c_" + t + "_" + row.count }));
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+}
 function controlSettings() {
-  return {
-    table_swap: $("tSwap").checked, char_cleanup: $("tClean").checked, leading_digits: $("tLead").checked,
-    table_prefix: $("pPrefix").value, digit_style: $("pDigit").value, digit_word: $("pWord").value.trim(),
-    label_keep_quarter: $("pLabelQ").checked,
-  };
+  const s = { table_prefix: $("pPrefix").value, targets: {} };
+  for (const t of ["planning_name", "core_name", "core_label"]) {
+    const o = {};
+    for (const row of SETTING_ROWS) {
+      if (!row.on.includes(t)) continue;
+      const c = $(cellId(t, row.key));
+      o[row.key] = row.type === "bool" ? c.checked : row.type === "number" ? (parseInt(c.value, 10) || 0) : c.value.trim();
+    }
+    s.targets[t] = o;
+  }
+  /* The general values (used for table names) follow the Planning name; the label's quarter setting is its own. */
+  const p = s.targets.planning_name;
+  Object.assign(s, { table_swap: p.table_swap, char_cleanup: p.char_cleanup, leading_digits: p.leading_digits, digit_style: p.digit_style, digit_word: p.digit_word,
+    label_keep_quarter: s.targets.core_label.label_keep_quarter });
+  return s;
 }
 function setControls(s) {
-  $("tSwap").checked = !!s.table_swap; $("tClean").checked = !!s.char_cleanup; $("tLead").checked = !!s.leading_digits;
-  $("pPrefix").value = s.table_prefix; $("pDigit").value = s.digit_style; $("pWord").value = s.digit_word || "";
-  $("pLabelQ").checked = !!s.label_keep_quarter;
-  $("pWord").disabled = $("pDigit").value !== "prefix_word";
+  $("pPrefix").value = s.table_prefix;
+  for (const row of SETTING_ROWS) for (const t of row.on) {
+    const c = $(cellId(t, row.key)), v = effective(s, t, row.key);
+    if (row.type === "bool") c.checked = !!v; else c.value = v === undefined || v === null ? "" : v;
+  }
+  syncWordBoxes();
 }
-const sameSettings = (a, b) => !!a && !!b && Object.keys(a).every((k) => String(a[k]) === String(b[k]));
+function syncWordBoxes() {
+  for (const t of NAME_TARGETS) $(cellId(t, "digit_word")).disabled = $(cellId(t, "digit_style")).value !== "prefix_word";
+}
+/* Two settings are the same when every option has the same effective value for every name. */
+function matrix(s) {
+  const m = { table_prefix: s.table_prefix };
+  for (const t of ["planning_name", "core_name", "core_label"]) for (const row of SETTING_ROWS) if (row.on.includes(t)) m[t + "." + row.key] = String(effective(s, t, row.key));
+  return JSON.stringify(m);
+}
+const sameSettings = (a, b) => !!a && !!b && matrix(a) === matrix(b);
 const isPreview = () => !!N.saved && !sameSettings(controlSettings(), N.saved);
 
 /* ---------- talking to the server ---------- */
@@ -64,7 +132,7 @@ async function preview() {
   render();
 }
 function schedulePreview() {
-  $("pWord").disabled = $("pDigit").value !== "prefix_word";
+  syncWordBoxes();
   clearTimeout(N.timer);
   N.timer = setTimeout(preview, 250);
 }
@@ -91,14 +159,13 @@ function render() {
 
 function renderSettings() {
   const R = N.R, ready = R.gate.ready;
-  const count = (step) => {
-    if (!ready) return "";
-    const parts = TARGETS.filter(([t]) => !(step === "leading_digits" && t === "core_label")).map(([t, name]) => name + " " + fmt((R.summary[t].steps || {})[step] || 0));
-    return "changes: " + parts.join(", ");
-  };
-  $("cSwap").textContent = count("table_swap") || "counts appear once table names are approved";
-  $("cClean").textContent = count("char_cleanup");
-  $("cLead").textContent = count("leading_digits");
+  for (const row of SETTING_ROWS) {
+    if (!row.count) continue;
+    for (const t of row.on) {
+      const n = $("c_" + t + "_" + row.count);
+      if (n) n.textContent = ready ? "changes " + fmt(((R.summary[t] || { steps: {} }).steps || {})[row.count] || 0) + " name(s)" : "counts appear once table names are approved";
+    }
+  }
   $("previewNote").hidden = !isPreview();
   $("settingsState").textContent = isPreview() ? "Preview: not saved." : (R.settings_saved ? "Saved." : "Defaults (not saved yet).");
   $("btnSaveSettings").disabled = !isPreview() && R.settings_saved;
@@ -328,8 +395,8 @@ startPage("names", { onReadyChange, afterConnect }, () => {
   try { $("actor").value = sessionStorage.getItem(ACTOR_KEY) || ""; } catch (e) { /* storage can be blocked */ }
   $("actor").addEventListener("input", () => { try { sessionStorage.setItem(ACTOR_KEY, actorNow()); } catch (e) { /* ignore */ } });
   $("baseId").addEventListener("input", guarded(load));
-  for (const id of ["tSwap", "tClean", "tLead", "pPrefix", "pDigit", "pLabelQ"]) $(id).addEventListener("change", schedulePreview);
-  $("pWord").addEventListener("input", schedulePreview);
+  buildSettingsGrid();
+  $("pPrefix").addEventListener("change", schedulePreview);
   $("btnSaveSettings").addEventListener("click", async () => {
     if (!actorNow()) { say("pageMessage", "Enter your initials first.", "err"); $("actor").focus(); return; }
     try {

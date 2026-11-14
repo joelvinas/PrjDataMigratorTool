@@ -199,6 +199,38 @@ check("an ambiguous mention (no schema path) is never auto, even with approved t
     [{"field_id": "gF", "table_id": "tG", "field_name": "Mentions PO#s here", "data_type": "formula"}], gt, S, approved_tables={"tG": "Invoices", "tH": "POs"}
 )["fields"]["gF"]["targets"]["planning_name"]["verdict"] == NEEDS_HUMAN)
 
+# ---- each name can be configured separately (by default they behave the same)
+def raises_value(fn_, *a, **k):
+    try:
+        fn_(*a, **k)
+    except ValueError as e:
+        return str(e)
+    return None
+SP = Settings(targets={"planning_name": {"allow_leading_digit": True, "max_len": 100, "extra_allowed": "&'_"}})
+check("defaults: the three names give the same verdict for the same name", all(len({ev(n, t)["verdict"] for t in fn.TARGETS if t != "core_label"}) == 1 for n in ("Budget", "500K Fund", "A#B", "Caf" + chr(0xE9))))
+check("Planning may allow a leading digit while Core still refuses it", ev("500K Fund", "planning_name", SP)["verdict"] == PASS and ev("500K Fund", "core_name", SP)["verdict"] == NEEDS_HUMAN
+      and ev("500K Fund", "core_name", SP)["proposed"] == "Fund 500K")
+check("maximum length is per name", ev("x" * 101, "planning_name", SP)["verdict"] == NEEDS_HUMAN and ev("x" * 101, "core_name", SP)["verdict"] == PASS)
+check("Planning cannot be set above Adobe's documented 250; Core may be raised", raises_value(Settings, targets={"planning_name": {"max_len": 251}}) is not None
+      and ev("x" * 300, "core_name", Settings(targets={"core_name": {"max_len": 400}}))["verdict"] == PASS and raises_value(Settings, targets={"core_name": {"max_len": 0}}) is not None)
+check("extra allowed characters are kept for that name only", ev("Terms & Conditions", "planning_name", SP)["verdict"] == PASS and ev("Terms & Conditions", "core_name", SP)["verdict"] == AUTO_FIXABLE
+      and ev("Terms & Conditions", "core_name", SP)["suggested"] == "Terms Conditions" and ev("a_b", "planning_name", SP)["verdict"] == PASS and ev("a_b", "core_name", SP)["verdict"] == NEEDS_HUMAN)
+check("a character allowed for one name is not deleted by that name's cleanup, and others still are", ev("R&D (x)", "planning_name", SP)["suggested"] == "R&D x")
+check("extra characters to remove apply to a label", ev("50% off", "core_label", Settings(targets={"core_label": {"extra_blocked": "%"}}))["suggested"] == "50 off"
+      and ev("50% off", "core_label")["verdict"] == PASS)
+check("a step can be switched off for one name only", ev("A#B", "core_name", Settings(targets={"core_name": {"char_cleanup": False}}))["verdict"] == NEEDS_HUMAN
+      and ev("A#B", "planning_name", Settings(targets={"core_name": {"char_cleanup": False}}))["verdict"] == AUTO_FIXABLE)
+r = ev("500K Fund", "core_name", Settings(targets={"core_name": {"leading_digits": False}}))
+check("the leading-digit step can be off for Core while the check still flags it", r["verdict"] == NEEDS_HUMAN and "LEADING_DIGIT" in r["rules"] and r["proposed"] is None, r)
+check("the digit preset is per name", ev("500K Fund", "planning_name", Settings(targets={"planning_name": {"digit_style": "prefix_word", "digit_word": "Fuel"}}))["proposed"] == "Fuel 500K Fund"
+      and ev("500K Fund", "core_name", Settings(targets={"planning_name": {"digit_style": "prefix_word", "digit_word": "Fuel"}}))["proposed"] == "Fund 500K")
+check("settings survive a round trip through their dictionary form", ev("500K Fund", "planning_name", Settings(**SP.as_dict()))["verdict"] == PASS and SP.as_dict()["targets"]["planning_name"]["max_len"] == 100)
+check("only valid options are accepted", raises_value(Settings, targets={"planning_name": {"extra_allowed": "ab"}}) is not None and raises_value(Settings, targets={"planning_name": {"extra_allowed": "-"}}) is not None
+      and raises_value(Settings, targets={"core_label": {"extra_allowed": "&"}}) is not None and raises_value(Settings, targets={"core_name": {"extra_blocked": "%"}}) is not None
+      and raises_value(Settings, targets={"nope": {}}) is not None and raises_value(Settings, targets={"core_name": {"nope": 1}}) is not None)
+check("table-name proposals follow the Planning name's options", fn.clean_table_name("R&D", Settings(targets={"planning_name": {"extra_allowed": "&"}})) == "R&D" and fn.clean_table_name("R&D", Settings()) == "RD")
+check("an allowed character is part of the table check too", "SPECIAL_CHAR" not in fn.violations("R&D", "planning_name", SP) and "SPECIAL_CHAR" in fn.violations("R&D", "core_name", SP))
+
 # ---- duplicates
 dup = [{"field_id": "d1", "table_id": "tX", "field_name": "Budget", "data_type": "number", "row_count": 10, "null_count": 0, "cardinality": 5, "profiled": True},
        {"field_id": "d2", "table_id": "tX", "field_name": "budget", "data_type": "number", "row_count": 10, "null_count": 10, "cardinality": 0, "profiled": True},

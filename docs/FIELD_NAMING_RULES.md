@@ -21,6 +21,18 @@ Names are unique within a table only. Adobe states that a Core custom field API 
 
 Steps 2 to 4 can be switched off for review. Rules marked *baseline* are always checked.
 
+## Settings for each name
+
+The Planning name, the Core name and the Core label can be configured separately. By default they behave the same. Each can have its own:
+
+- step toggles (table-name swap, character cleanup, leading digits);
+- maximum length (Planning cannot exceed Adobe's documented 250);
+- permission for a name to start with a digit (names only);
+- leading-digit preset and word (names only);
+- extra punctuation that is allowed instead of removed (names) or extra characters that are removed (labels).
+
+A setting that differs from the default is recorded with who saved it and when.
+
 ## Verdicts
 
 - **PASS**: complies.
