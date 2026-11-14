@@ -35,6 +35,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import fieldnames_report as names_report
 import fieldnames_store as names_store
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -4468,6 +4469,34 @@ def api_names_import(body):
         return dict(r, review=_names(names_store.review, conn, base))
 
 
+def _names_base_label(base_id):
+    for b in (load_config()[0].get("bases") or []):
+        if b.get("baseId") == base_id and b.get("name"):
+            return "%s - %s" % (b["name"], base_id)
+    return base_id
+
+
+def _names_report_text(q):
+    base = _names_base(q)
+    with db() as conn:
+        return scrub(_names(names_store.report_html, conn, base, _names_base_label(base), REPORT_CSS + names_report.EXTRA_CSS)), base
+
+
+def api_names_report_html(q):
+    """The field and table name review as a self-contained HTML report (preview in the page, or download=1)."""
+    text, base = _names_report_text(q)
+    headers = {}
+    if (q.get("download") or [""])[0]:
+        headers["Content-Disposition"] = 'attachment; filename="field-name-review_%s_%s.html"' % (base, _stamp())
+    return (text.encode("utf-8"), "text/html; charset=utf-8", headers)
+
+
+def api_names_report_mhtml(q):
+    text, base = _names_report_text(q)
+    return (to_mhtml(text, "Field name review: %s" % base), "application/x-mimearchive",
+            {"Content-Disposition": 'attachment; filename="field-name-review_%s_%s.mhtml"' % (base, _stamp())})
+
+
 def api_names_report(q):
     """One CSV (or the summary or rules document) from the saved names, or all of them as a zip."""
     with db() as conn:
@@ -4512,7 +4541,8 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/usage": api_automations_usage, "/api/automations/report.html": api_auto_report_html,
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
               "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
-              "/api/names/review": api_names_review, "/api/names/report": api_names_report}
+              "/api/names/review": api_names_review, "/api/names/report": api_names_report,
+              "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,

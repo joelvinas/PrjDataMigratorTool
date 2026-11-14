@@ -433,6 +433,11 @@ function renderDescriptions() {
 function renderDownloads() {
   const box = $("downloads"); box.replaceChildren();
   const base = encodeURIComponent(baseNow());
+  const rb = $("reportButtons"); rb.replaceChildren();
+  const rep = (ext) => "/api/names/report." + ext + "?base_id=" + base;
+  rb.appendChild(btn("Preview report", () => { const f = $("reportFrame"); f.hidden = false; f.src = rep("html"); }));
+  rb.appendChild(el("a", { class: "btnlink primary", href: rep("html") + "&download=1", text: "Download report .html" }));
+  rb.appendChild(el("a", { class: "btnlink", href: rep("mhtml"), text: "Download report .mhtml" }));
   const link = (text, file, primary) => el("a", { class: "btnlink" + (primary ? " primary" : ""), href: "/api/names/report?base_id=" + base + "&file=" + file, text });
   box.appendChild(link("Download all (zip)", "all", true));
   for (const [text, file] of [["Review grid .csv", "names_report.csv"], ["Your names vs the rules .csv", "names_diff.csv"], ["Duplicate groups .csv", "names_duplicates.csv"],

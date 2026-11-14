@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import fielddesc as fd
 import fieldnames as fn
 import fieldnames_io as fio
+import fieldnames_report as fr
 
 ACTOR_MAX = 40
 REASON_MAX = 500
@@ -248,7 +249,7 @@ def review(conn, base_id, settings=None):
             status = n.get(_COL[t][1]) or "unreviewed"
             stale = status == "approved" and r["verdict"] != fn.PASS
             tr = {k: r.get(k) for k in ("candidate", "final", "proposed", "suggested", "verdict", "rules", "reasons", "source", "differs_from_rubric",
-                                       "rubric_name", "quarter_style")}
+                                       "rubric_name", "rubric_verdict", "quarter_style")}
             tr.update({"status": status, "approved_name": n.get(t) if status == "approved" else None, "stale": stale})
             row["targets"][t] = tr
             counts[t][status] += 1
@@ -626,6 +627,24 @@ def report_files(conn, base_id, settings=None):
         notes.append("%d table(s) have no scope decision (undecided) and were validated like in-scope tables." % undecided)
     return fio.build_reports(c["res"], c["data"]["fields"], imp, notes, {fid: {"text": d["text"], "source": "saved" if d["saved"] is not None else "generated",
                                                                                "problems": [p["rule"] for p in d["problems"]]} for fid, d in desc.items()})
+
+
+def event_summary(conn, base_id):
+    """Counts of the recorded decisions for one base (by kind and by reviewer, first and last time), for the report."""
+    where = ("((subject_type='field' AND subject_id IN (SELECT field_id FROM airtable_fields WHERE base_id=?)) "
+             "OR (subject_type='table' AND subject_id IN (SELECT table_id FROM airtable_tables WHERE base_id=?)) "
+             "OR (subject_type='settings' AND subject_id=?))")
+    args = (base_id, base_id, base_id)
+    by_type = [(r[0], r[1]) for r in conn.execute("SELECT event_type, COUNT(*) FROM name_events WHERE %s GROUP BY event_type ORDER BY COUNT(*) DESC, event_type" % where, args)]
+    by_actor = [(r[0], r[1]) for r in conn.execute("SELECT actor, COUNT(*) FROM name_events WHERE %s GROUP BY actor ORDER BY COUNT(*) DESC, actor" % where, args)]
+    row = conn.execute("SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM name_events WHERE %s" % where, args).fetchone()
+    return {"total": row[0], "first": row[1], "last": row[2], "by_type": by_type, "by_actor": by_actor}
+
+
+def report_html(conn, base_id, base_label, css, generated=None):
+    """The whole review as one HTML document, from the saved settings and decisions."""
+    rv = review(conn, base_id)
+    return fr.build_html(rv, event_summary(conn, base_id), css, base_label or base_id, generated or _now())
 
 
 def report_zip(files):

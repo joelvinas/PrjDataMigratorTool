@@ -140,6 +140,15 @@ check("saving a description needs initials", post("/api/names/descriptions", {"b
 s_, r = post("/api/names/descriptions", A(items=[{"field_id": "fldN02", "text": ""}])); check("empty text resets to the generated description", s_ == 200 and not {f["field_id"]: f for f in r["review"]["fields"]}["fldN02"]["description"]["edited"])
 s_, d, h = raw("GET", "/api/names/report?base_id=" + BASE + "&file=names_report.csv"); check("the csv has description columns", b"description_source" in d and b"Source: Airtable. Origins:" in d)
 
+# ---- the HTML report
+s_, d, h = raw("GET", "/api/names/report.html?base_id=" + BASE)
+page = d.decode("utf-8")
+check("the report previews as HTML", s_ == 200 and h["Content-Type"].startswith("text/html") and "Field and table name review" in page and "Review sign-off" in page)
+s_, d, h = raw("GET", "/api/names/report.html?base_id=" + BASE + "&download=1"); check("it can be downloaded as a file", s_ == 200 and "attachment" in h["Content-Disposition"] and h["Content-Disposition"].endswith('.html"'))
+s_, d, h = raw("GET", "/api/names/report.mhtml?base_id=" + BASE); check("it can be downloaded as an MHTML archive", s_ == 200 and h["Content-Type"] == "application/x-mimearchive" and d.startswith(b"From:") and b"multipart/related" in d)
+check("the report needs a valid base", raw("GET", "/api/names/report.html")[0] == 400 and raw("GET", "/api/names/report.html?base_id=appNothingHere1")[0] == 404)
+check("no token in the report", "patMOCK" not in page)
+
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row
 ev = [dict(x) for x in c.execute("select * from name_events order by event_id")]

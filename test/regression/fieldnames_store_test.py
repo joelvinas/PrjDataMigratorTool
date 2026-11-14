@@ -234,6 +234,36 @@ rows = {r["field_id"]: r for r in csv.DictReader(io.StringIO(files["names_report
 check("the report has the description, where it came from and its problems", rows["f1"]["description"].endswith("Orders.Done.") and rows["f1"]["description_source"] == "saved"
       and rows["f3"]["description_source"] == "generated" and rows["f3"]["description"] == "Source: Airtable. Origins: Orders.Notes!." and rows["f3"]["description_problems"] == "")
 
+# ---- the HTML report
+HOSTILE = "<img src=x onerror=alert(1)> & \"q\""
+c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values ('appS','tA','Orders','fH', ?, 'singleLineText', ?)", (HOSTILE, T1)); c.commit()
+GEN = "2026-01-01 00:00:00"
+page = st.report_html(c, B, "Sample Shop - appS", "body{}", GEN)
+check("a complete HTML document with the base and the generated time", page.startswith("<!doctype html>") and page.rstrip().endswith("</html>") and "Sample Shop - appS" in page and GEN in page)
+check("every section is present when field review is open", all(x in page for x in ("About this report", "Summary", "Settings in force", "Table names", "Field names (one grid per name)", "Duplicate groups",
+      "Your names against the rules", "Descriptions", "Abandoned fields", "Decisions recorded", "The rules", "Method and checks", "Review sign-off")))
+check("it states that it holds no record values and that nothing renames on its own", "no record values" in page and "Nothing here renames anything on its own" in page)
+check("table names, the approved name and who approved it appear", "Archive 1-2-3" in page and "Approved" in page and "JV" in page)
+check("one grid per name", all(("<h3>%s</h3>" % fn.PROFILES[t]["title"]) in page for t in fn.TARGETS))
+check("every rule is listed with its example", all(("<b>%s</b>" % r.id) in page for r in fn.RULES))
+check("the settings matrix shows each name's own value", "Maximum length" in page and "Emoji" in page and "Remove it" in page)
+check("the differences from the rules are listed", "Plain Text" in page.split("Your names against the rules")[2])
+check("the decision record is summarised by kind and reviewer", "Decisions recorded" in page and "Names imported" in page and "<td>JV</td>" in page)
+check("a hostile field name is escaped everywhere it appears", "<img src=x" not in page and "&lt;img src=x onerror=alert(1)&gt;" in page and "&quot;q&quot;" in page)
+check("deterministic: the same input and time give the same report", page == st.report_html(c, B, "Sample Shop - appS", "body{}", GEN))
+check("the sign-off block is there", 'class="sign"' in page)
+c.execute("delete from airtable_fields where field_id='fH'"); c.commit()
+st.revoke_tables(c, B, "JV", ["tC"], "reopen for the test")
+closed = st.report_html(c, B, "Sample Shop - appS", "body{}", GEN)
+check("with a table name unapproved the report says field review has not started and stops after the table names", "field review has not started" in closed and "Field names (one grid per name)" not in closed
+      and "Duplicate groups" not in closed and "Table names" in closed and "The rules" in closed)
+st.approve_tables(c, B, "JV", items=[{"table_id": "tC", "name": "Archive 1-2-3"}])
+ev = st.event_summary(c, B)
+check("the event summary counts decisions for this base only", ev["total"] > 10 and ev["by_actor"][0][0] == "JV" and dict(ev["by_type"]).get("approve", 0) > 5 and ev["first"] <= ev["last"])
+none = st.event_summary(c, "appOther")
+check("a base with no decisions has an empty summary, and its report says so", none["total"] == 0 and none["by_type"] == [] and none["first"] is None
+      and "No decisions have been recorded yet." in st.report_html(c, "appOther", "Other", "", GEN))
+
 # ---- exports
 files = st.report_files(c, B)
 check("report files come from the saved names", "names_report.csv" in files and "Notes" in files["names_report.csv"] and "undecided" in files["names_summary.txt"])
