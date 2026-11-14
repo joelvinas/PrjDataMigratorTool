@@ -49,7 +49,7 @@ def run_suite(scripts, mock_files):
             fails = [l for l in lines if l.startswith("FAIL")]
             passes = sum(1 for l in lines if l.startswith("PASS"))
             bad = len(fails) + (1 if (p.returncode != 0 and not skipped and not fails) else 0)
-            results.append((name, passes, bad, "SKIPPED: " + [l for l in lines if l.startswith("SKIP")][0][5:] if skipped else "\n".join(fails[:6]) or (lines[-1] if bad else "")))
+            results.append((name, passes, bad, "SKIPPED: " + [l for l in lines if l.startswith("SKIP")][0][5:] if skipped else "\n".join(fails[:6]) or (chr(10).join([l for l in lines if l.strip()][-6:]) if bad else "")))
     finally:
         for pr in procs:
             pr.terminate()
