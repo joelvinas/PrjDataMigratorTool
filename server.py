@@ -37,6 +37,7 @@ import urllib.error
 import urllib.request
 import fieldcompare as names_compare
 import linkdirections as ld
+import recordmap
 import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
@@ -4848,6 +4849,55 @@ def _load_extract_doc(base, tid, tname):
     return doc
 
 
+def _record_map_call(fn_, *a):
+    try:
+        return fn_(*a)
+    except recordmap.RecordMapError as e:
+        raise AppError(e.message, e.status)
+
+
+def api_records_register(body):
+    """Register the Airtable record IDs found in the saved record files (record IDs only: no value is read into the database). Tables out of scope are
+    skipped; a table with no usable saved file is listed as not registered. Safe to repeat: a registered record keeps its surrogate ID. Tables are taken
+    in table ID order and records in record ID order, so the numbers are the same for the same files."""
+    base = _names_base(body)
+    only = [str(t) for t in (body.get("table_ids") or [])] or None
+    with db() as conn:
+        if not recordmap.available(conn):
+            _record_map_call(recordmap._need, conn)
+        tabs = [dict(r) for r in conn.execute("SELECT table_id, table_name FROM airtable_tables WHERE base_id=? ORDER BY table_id", (base,))]
+        scope = {r["table_id"]: r["decision"] for r in conn.execute("SELECT table_id, decision FROM table_scope WHERE base_id=?", (base,))}
+        if only:
+            unknown = sorted(set(only) - {t["table_id"] for t in tabs})
+            if unknown:
+                raise AppError("Some of those tables are not in the database for this base.", 404)
+        done, skipped = [], []
+        for t in tabs:
+            if (only and t["table_id"] not in only) or (not only and scope.get(t["table_id"]) == "out"):
+                continue
+            try:
+                doc = _load_extract_doc(base, t["table_id"], t["table_name"])
+            except AppError as e:
+                skipped.append({"table_id": t["table_id"], "table_name": t["table_name"], "reason": str(e)})
+                continue
+            ids = [r.get("id") for r in doc["records"] if isinstance(r, dict)]
+            res = _record_map_call(recordmap.register, conn, base, t["table_id"], ids)
+            done.append(dict(res, table_id=t["table_id"], table_name=t["table_name"], captured_at=doc.get("captured_at")))
+        summary = _record_map_call(recordmap.summary, conn, base)
+    return {"base_id": base, "tables": done, "not_registered": skipped, "registered_total": summary["registered"],
+            "totals": {"new": sum(d["new"] for d in done), "already": sum(d["already"] for d in done), "skipped_invalid": sum(d["skipped_invalid"] for d in done)}}
+
+
+def api_records_registry(q):
+    """Counts only. With an environment: how many records have each pass done, how many targets, and the attachment statuses."""
+    base = _names_base(q)
+    env = (q.get("environment") or [None])[0] or None
+    system = (q.get("system") or ["core"])[0]
+    ws = (q.get("workspace_key") or [""])[0]
+    with db() as conn:
+        return _record_map_call(recordmap.summary, conn, base, env, system, ws)
+
+
 def api_select_values(body):
     """The select-value inventory: for every single or multiple select field of the base (or one table), the values that sit in the saved records
     compared with the options the schema declares. Counts, record IDs and declared option names only; an undeclared value's text is never returned.
@@ -5014,7 +5064,7 @@ STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
@@ -5032,7 +5082,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/links/directions/decide": api_link_directions_decide,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,

@@ -496,6 +496,21 @@ async function checkSelectValues() {
   d.tables.forEach((tb) => tb.notes.forEach((n) => sk.appendChild(el("p", { class: "hint", text: tb.table_name + ": " + n }))));
 }
 
+async function registerRecords() {
+  const base = $("resBase").value;
+  const t = $("regTable"), body = t.querySelector("tbody"), sk = $("regSkipped");
+  clear(body); clear(sk); t.hidden = true;
+  if (!base) { setMsg("regSummary", "Choose a base in step 5 (Results) first.", "err"); return; }
+  setMsg("regSummary", "Working...", "");
+  const d = await api("POST", "/api/records/register", { base_id: base });
+  d.tables.forEach((r) => body.appendChild(el("tr", {}, el("td", {}, r.table_name, ageTag(r.captured_at)), el("td", { class: "num", text: fmt(r.total) }), el("td", { class: "num", text: fmt(r.new) }),
+    el("td", { class: "num", text: fmt(r.already) }), el("td", { class: "num", text: fmt(r.skipped_invalid) }))));
+  t.hidden = d.tables.length === 0;
+  setMsg("regSummary", d.tables.length + " table(s) registered: " + fmt(d.totals.new) + " new record(s), " + fmt(d.totals.already) + " already registered. " + fmt(d.registered_total) + " record(s) registered for this base in all." +
+    (d.not_registered.length ? " " + d.not_registered.length + " table(s) not registered (no usable saved file)." : ""), d.not_registered.length ? "warn" : "ok");
+  d.not_registered.forEach((n) => sk.appendChild(el("p", { class: "hint", text: "Not registered: " + n.table_name + ". " + n.reason })));
+}
+
 async function loadResults() {
   const q = "?base_id=" + encodeURIComponent($("resBase").value) + "&table_id=" + encodeURIComponent($("resTable").value);
   const data = await api("GET", "/api/profile/results" + q);
@@ -563,6 +578,7 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   $("downloadFiles").addEventListener("change", syncSave);
   $("btnResults").addEventListener("click", guard(loadResults));
   $("btnSelectValues").addEventListener("click", guard(checkSelectValues));
+  $("btnRegister").addEventListener("click", guard(registerRecords));
   initBaseCombo();
   $("resBase").addEventListener("change", syncReportLinks);
   $("csvBase").addEventListener("change", syncReportLinks);

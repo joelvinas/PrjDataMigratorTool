@@ -10,7 +10,7 @@ Stage 4 takes the approved names, the scope and target decisions, the consolidat
 | --- | --- | --- |
 | 4a | **The load plan and the dry run**: everything that would be created, with temporary IDs and a status; the runner's rules (sandbox by default, idempotent, one failure never stops a run) | **Built** |
 | 4b | **Field creation in the sandbox**: real Planning and Core transports (separate modules, each with its own authentication), the ID map table, the crosswalk written back, every call logged against its temporary ID | Waiting on the request-shape checks below (migrations 010 to 017 are applied) |
-| 4c | **Record load order and the record ID map**: Airtable record ID to Core object ID and Planning record ID, so links and attachments can be reattached | Not started; needs a schema proposal |
+| 4c | **Record load order and the record ID map**: Airtable record ID to Core object ID and Planning record ID, so links and attachments can be reattached | Registry built (`recordmap.py`, migration 017 applied): surrogate IDs, target mappings, pass markers, attachment map. The record load itself is not built |
 | 4d | **Attachments** as native Core documents (link expiry, download behavior against real Airtable is untested) | Not started |
 | 4e | **The Core to Planning publish pattern**: the write-once Planning ID field, the sync status, idempotent publish, the reconciliation report | Not started; needs sandbox proof first |
 

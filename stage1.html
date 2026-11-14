@@ -201,6 +201,16 @@
     <tbody></tbody>
   </table></div>
   <div id="svSkipped"></div>
+
+  <h3>Record ID registry</h3>
+  <p class="hint">Gives every Airtable record one surrogate number, so later steps (links, attachments, restarts) point to it instead of repeating base, table and record ID. Only the record IDs are read from the saved files; no value is stored. Records are numbered in sorted order, so the same files give the same numbers, and registering again keeps every number already given. Tables out of scope are skipped. It uses the base chosen in step 5 (Results).</p>
+  <div class="row"><button id="btnRegister">Register record IDs from the saved files</button></div>
+  <div id="regSummary" class="msg"></div>
+  <div class="scroll"><table id="regTable" class="grid compact" hidden>
+    <thead><tr><th>Table</th><th class="num">Records in file</th><th class="num">New</th><th class="num">Already registered</th><th class="num">Skipped (not an ID)</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <div id="regSkipped"></div>
 </section>
 </main>
 </div>
