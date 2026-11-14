@@ -197,6 +197,41 @@ def decide(conn, actor, base_id, entry, decision, reason=""):
     return "changed" if old else "decided"
 
 
+# ------------------------------------------------------------------ reading what the matrix is built from
+_STALE = "(f.updated_at < (SELECT MAX(x.updated_at) FROM airtable_fields x WHERE x.base_id = f.base_id))"
+
+
+def load_inputs(conn, base_id):
+    """(fields, automations, refs, forms, form_items) for one base: its live fields (tables out of scope left out), the LATEST saved version of each
+    automation and form, and their field references. Schema and recorded-spec metadata only; an automation's 'set to' detail is never read."""
+    out_ids = {r[0] for r in conn.execute("SELECT table_id FROM table_scope WHERE base_id=? AND decision='out'", (base_id,))} \
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='table_scope'").fetchone() else set()
+    cols = ["field_id", "field_name", "table_id", "table_name", "base_id", "data_type", "stale"]
+    fields = [dict(zip(cols, r)) for r in conn.execute("SELECT f.field_id, f.field_name, f.table_id, f.table_name, f.base_id, f.data_type, %s FROM airtable_fields f WHERE f.base_id=?" % _STALE, (base_id,))]
+    fields = [f for f in fields if not f.pop("stale") and f["table_id"] not in out_ids]
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    autos, refs, forms, items = [], [], [], []
+    if "automation_specs" in have:
+        autos = [dict(zip(("spec_id", "automation_id", "automation_name", "target_scenario_name"), r)) for r in conn.execute(
+            "SELECT s.spec_id, s.automation_id, s.automation_name, s.target_scenario_name FROM automation_specs s WHERE s.base_id=? "
+            "AND s.version_no = (SELECT MAX(version_no) FROM automation_specs WHERE automation_id = s.automation_id)", (base_id,))]
+        ids = [a["spec_id"] for a in autos]
+        if ids:
+            refs = [dict(zip(("spec_id", "field_id", "role"), r)) for r in conn.execute("SELECT spec_id, field_id, role FROM automation_field_refs WHERE spec_id IN (%s)" % ",".join("?" * len(ids)), ids)]
+    if "form_specs" in have:
+        forms = [dict(zip(("spec_id", "form_id", "form_name"), r)) for r in conn.execute(
+            "SELECT s.spec_id, s.form_id, s.form_name FROM form_specs s WHERE s.base_id=? AND s.version_no = (SELECT MAX(version_no) FROM form_specs WHERE form_id = s.form_id)", (base_id,))]
+        fids = [f["spec_id"] for f in forms]
+        if fids:
+            items = [dict(zip(("spec_id", "airtable_field_id", "item_type"), r)) for r in conn.execute("SELECT spec_id, airtable_field_id, item_type FROM form_items WHERE spec_id IN (%s)" % ",".join("?" * len(fids)), fids)]
+    return fields, autos, refs, forms, items
+
+
+def load_sources(conn, base_id):
+    """{field_id: [{automation_id, automation_name, scenario}]} for every field a recorded automation sets: what the marker is made from."""
+    return {e["field_id"]: e["writers"]["automation"] for e in build_matrix(*load_inputs(conn, base_id)) if e["fusion"]}
+
+
 def summary(entries):
     cats = {c: 0 for c in CATEGORIES}
     for e in entries:

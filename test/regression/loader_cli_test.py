@@ -80,6 +80,18 @@ summ = open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig")
 check("a dry run skips what the database already holds as created, and says so", {r["temp_id"]: r["outcome"] for r in res["results"]}.get("P-T-tA") == "already_created" and res["counts"].get("already_created") == 1, res["counts"])
 check("a dry run says which items an earlier run started and never finished", "1 item(s) were started by an earlier run and never finished" in summ and "C-F-fA1" in summ, summ[:400])
 
+# ---- the Fusion-driven marker reaches the load plan (Planning and Core descriptions alike)
+w = sqlite3.connect(dbp)
+sp = w.execute("INSERT INTO automation_specs(automation_id, version_no, automation_name, base_id, target_scenario_name, spec_json) VALUES ('aOrd', 1, 'Order sync', 'appL', 'Order sync', '{}')").lastrowid
+w.execute("INSERT INTO automation_items(spec_id, item_id, item_order, path, item_kind) VALUES (?, 's1', 1, '1', 'step')", (sp,))
+w.execute("INSERT INTO automation_field_refs(spec_id, item_id, ref_order, field_id, role) VALUES (?, 's1', 0, 'fA1', 'set')", (sp,))
+w.commit(); w.close()
+loader.main(["plan", "--db", dbp, "--base", "appL", "--out", out])
+prows = {r["temp_id"]: r for r in csv.DictReader(io.StringIO(open(os.path.join(out, "load_plan.csv"), encoding="utf-8-sig").read()))}
+mk = 'Fusion-driven: written by scenario "Order sync". Source: Airtable.'
+check("a field a recorded automation sets carries the marker in its Planning and Core descriptions", prows["P-F-fA1"]["description"].startswith(mk) and prows["C-F-fA1"]["description"].startswith(mk), (prows["P-F-fA1"]["description"], prows["C-F-fA1"]["description"]))
+check("other fields, and the record type, do not", not prows["P-F-fB1"]["description"].startswith("Fusion-driven") and not prows["P-T-tA"]["description"].startswith("Fusion-driven"))
+
 # ---- the guards
 for argv, why in ((["run", "--db", dbp, "--base", "appL"], "run"), (["run", "--db", dbp, "--base", "appL", "--env", "production"], "run in production")):
     try:

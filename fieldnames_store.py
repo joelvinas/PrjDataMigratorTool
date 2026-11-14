@@ -16,6 +16,7 @@ from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 
 import fielddesc as fd
+import fieldwriters as fw
 import fieldnames as fn
 import fieldnames_io as fio
 import fieldgroups as fgp
@@ -182,19 +183,27 @@ def save_settings(conn, base_id, settings, actor, reason=""):
     return st
 
 
-def descriptions(data, names, settings, groups=()):
-    """{field_id: {generated, saved, text, edited, problems}} for every field of the base. 'generated' is recomputed from the schema every
-    time; 'saved' is a hand-edited description a person saved (field_names.description); 'text' is what is used (saved, else generated)."""
+def descriptions(data, names, settings, groups=(), sources=None):
+    """{field_id: {generated, saved, text, edited, fusion, problems}} for every field of the base. 'generated' is recomputed from the schema every
+    time; 'saved' is a hand-edited description a person saved (field_names.description); 'text' is what is used (saved, else generated).
+    sources: {field_id: [{automation_name, scenario}]} for the fields a recorded automation sets (fieldwriters.load_sources). Those fields get the
+    Fusion-driven marker first in 'generated' and 'text', whatever a hand edit says, and a field no automation sets never carries one. The marker is
+    never stored: a saved hand edit is kept without it, and it is added again each time. None = do not add markers."""
     by_id = {f["field_id"]: f for f in data["fields"]}
     surv = fgp.survivors(groups)
     out = {}
     for f in data["fields"]:
         merged = [by_id[m] for m in surv[f["field_id"]]["member_ids"][1:] if m in by_id] if f["field_id"] in surv else []
-        gen = fd.generate_description(f, by_id, settings.description_include_airtable, settings.description_emoji_mode, merged)
+        base = fd.generate_description(f, by_id, settings.description_include_airtable, settings.description_emoji_mode, merged)
         saved = ((names.get(f["field_id"]) or {}).get("description") or None)
-        text = saved if saved is not None else gen
-        out[f["field_id"]] = {"generated": gen, "saved": saved, "text": text, "edited": saved is not None and saved != gen,
-                              "problems": fd.validate_description(text)}
+        if sources is None:
+            gen, text = base, (saved if saved is not None else base)
+        else:
+            src = sources.get(f["field_id"]) or []
+            gen = fw.with_marker(base, src)
+            text = fw.with_marker(saved if saved is not None else base, src)
+        out[f["field_id"]] = {"generated": gen, "saved": saved, "text": text, "edited": saved is not None and fw.strip_marker(saved) != base,
+                              "fusion": bool(sources and sources.get(f["field_id"])), "problems": fd.validate_description(text)}
     return out
 
 
@@ -260,7 +269,7 @@ def review(conn, base_id, settings=None):
         else:                                           # out of scope: no table-name decision is needed
             row.update({"suggested": None, "effective": None, "approved": False, "verdict": None, "rules": [], "approved_by": None, "approved_at": None})
         tables.append(row)
-    desc = descriptions(data, c["names"], settings, c["groups"])
+    desc = descriptions(data, c["names"], settings, c["groups"], fw.load_sources(conn, base_id))
     fields, counts = [], {t: {"approved": 0, "needs_human": 0, "unreviewed": 0, "stale": 0} for t in fn.TARGETS}
     fbi = {f["field_id"]: f for f in data["fields"]}
     for fid, e in res["fields"].items():
@@ -547,7 +556,7 @@ def save_descriptions(conn, base_id, actor, items, reason=""):
     known = {f["field_id"]: f for f in data["fields"]}
     _, names = _stored(conn, base_id)
     groups = _live_groups(read_groups(conn, base_id)[0], data)
-    gen = descriptions(data, names, settings, groups)
+    gen = descriptions(data, names, settings, groups)          # without markers: a hand edit is compared with, and stored as, the marker-free text
     merged = fgp.merged_ids(groups)
     now, n, warnings = _now(), 0, []
     with conn:
@@ -561,7 +570,7 @@ def save_descriptions(conn, base_id, actor, items, reason=""):
             if fid in merged:
                 raise StoreError("'%s' is consolidated into another field, so it has no description of its own." % f["field_name"])
             text = it.get("text")
-            text = None if text is None or str(text).strip() == "" else str(text).strip()
+            text = None if text is None or str(text).strip() == "" else fw.strip_marker(str(text).strip()).strip() or None     # the marker is added each time, never stored
             if text is not None:
                 if len(text) > DESCRIPTION_HARD_CAP:
                     raise StoreError("A description can be at most %d characters." % DESCRIPTION_HARD_CAP)
@@ -717,7 +726,7 @@ def report_files(conn, base_id, settings=None):
     manual = {fid: {t: v for t, v in m.items()} for fid, m in c["manual"].items()}
     target_types = {fid: r["target_type"] for fid, r in c["names"].items() if r.get("target_type")}
     imp = {"manual": manual, "target_types": target_types, "problems": []}
-    desc = descriptions(c["data"], c["names"], settings, c["groups"])
+    desc = descriptions(c["data"], c["names"], settings, c["groups"], fw.load_sources(conn, base_id))
     notes = []
     undecided = sum(1 for t in c["data"]["tables"] if t["table_id"] not in c["scope"])
     if not c["scope_ok"]:

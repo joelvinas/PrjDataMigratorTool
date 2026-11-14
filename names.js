@@ -505,7 +505,7 @@ function descRow(f, locked) {
   tr.appendChild(el("td", { text: f.table_name }));
   tr.appendChild(el("td", {}, el("div", { text: f.original }), el("div", { class: "hint", text: f.field_id + " \u00b7 " + f.data_type })));
   tr.appendChild(el("td", { style: "min-width:340px" }, box));
-  tr.appendChild(el("td", {}, tag(d.edited ? "Edited by hand" : "Generated", d.edited ? "run" : ""), ...d.problems.map((p) => el("div", { class: "hint", text: p.message }))));
+  tr.appendChild(el("td", {}, tag(d.edited ? "Edited by hand" : "Generated", d.edited ? "run" : ""), d.fusion ? tag("Fusion-driven marker added", "done") : null, ...d.problems.map((p) => el("div", { class: "hint", text: p.message }))));
   tr.appendChild(el("td", {}, el("div", { class: "row" }, save, reset)));
   return tr;
 }

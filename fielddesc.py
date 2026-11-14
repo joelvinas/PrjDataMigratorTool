@@ -16,6 +16,7 @@ checks it, so a stricter validator (including a length limit once one is confirm
 import json
 
 import emojitext
+import fieldwriters as _fw      # the Fusion-driven marker sits in front of the lineage text
 
 # UNCONFIRMED. Adobe's documentation gives no length limit for field descriptions, and one is on the sandbox test plan. Leave None (no length check)
 # until it is confirmed, then set it here (or pass max_len to validate_description).
@@ -163,7 +164,7 @@ def validate_description(text, max_len=None):
     if any(ord(c) > 126 for c in text):
         problems.append({"rule": "NON_ASCII", "severity": "warn",
                          "message": "The description contains non-ASCII characters (often from an original name); data exported to CSV without the right encoding corrupts them."})
-    if parse_lineage(text) is None:
+    if parse_lineage(_fw.strip_marker(text)) is None:
         problems.append({"rule": "NOT_LINEAGE", "severity": "warn", "message": "The description is not in the lineage syntax (Source: ... Origins: Table.Field; ...)."})
     limit = max_len if max_len is not None else DESCRIPTION_MAX_LEN
     if limit is not None and len(text) > limit:

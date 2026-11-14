@@ -4898,25 +4898,8 @@ def _load_extract_doc(base, tid, tname):
     return doc
 
 
-def _field_writer_inputs(conn, base_id):
-    """What the field-writer matrix is built from, for one base: its live fields (tables out of scope left out), the LATEST saved version of each
-    automation and form, and their field references. Schema and recorded-spec metadata only; an automation's 'set to' detail is not read."""
-    out_ids = {r["table_id"] for r in conn.execute("SELECT table_id FROM table_scope WHERE base_id=? AND decision='out'", (base_id,))}
-    fields = [dict(r) for r in conn.execute("SELECT f.field_id, f.field_name, f.table_id, f.table_name, f.base_id, f.data_type, %s AS stale FROM airtable_fields f WHERE f.base_id=?" % STALE_SQL, (base_id,))]
-    fields = [f for f in fields if not f.pop("stale") and f["table_id"] not in out_ids]
-    autos = [dict(r) for r in conn.execute("SELECT s.spec_id, s.automation_id, s.automation_name, s.target_scenario_name FROM automation_specs s WHERE s.base_id=? "
-                                           "AND s.version_no = (SELECT MAX(version_no) FROM automation_specs WHERE automation_id = s.automation_id)", (base_id,))]
-    ids = [a["spec_id"] for a in autos]
-    refs = [dict(r) for r in conn.execute("SELECT spec_id, field_id, role FROM automation_field_refs WHERE spec_id IN (%s)" % ",".join("?" * len(ids)), ids)] if ids else []
-    forms = [dict(r) for r in conn.execute("SELECT s.spec_id, s.form_id, s.form_name FROM form_specs s WHERE s.base_id=? "
-                                           "AND s.version_no = (SELECT MAX(version_no) FROM form_specs WHERE form_id = s.form_id)", (base_id,))]
-    fids = [f["spec_id"] for f in forms]
-    items = [dict(r) for r in conn.execute("SELECT spec_id, airtable_field_id, item_type FROM form_items WHERE spec_id IN (%s)" % ",".join("?" * len(fids)), fids)] if fids else []
-    return fields, autos, refs, forms, items
-
-
 def field_writer_matrix(conn, base_id, with_decisions=True):
-    entries = fieldwriters.build_matrix(*_field_writer_inputs(conn, base_id))
+    entries = fieldwriters.build_matrix(*fieldwriters.load_inputs(conn, base_id))
     return fieldwriters.apply_decisions(entries, fieldwriters.read_decisions(conn, base_id)) if with_decisions else entries
 
 
