@@ -49,7 +49,15 @@ p5, p2, p6 = (res["fields"][x]["presence"] for x in ("fld5", "fld2", "fld6"))
 check("empty but unprofiled field cannot be abandoned", p5["populated"] == 0 and not p5["can_abandon"] and p5["abandon_blocked_because"] == "not profiled yet", p5)
 check("empty profiled field can be abandoned", p2["can_abandon"])
 check("checkbox cannot be abandoned", not p6["can_abandon"])
-check("migration 007 absent is noted, not an error", any("Migration 007" in n for n in db["notes"]))
+check("with migration 007 applied there is no migration note", not any("Migration 007" in n for n in db["notes"]), db["notes"])
+import shutil
+no007 = os.path.join(tmp, "no007.db"); shutil.copy(dbp, no007)
+k = sqlite3.connect(no007)
+for tn in ("name_events", "table_names", "field_names"):
+    k.execute("drop table " + tn)
+k.commit(); k.close()
+nb = fio.load_db(no007, "appT")
+check("migration 007 absent is noted, not an error", any("Migration 007" in n for n in nb["notes"]) and nb["approved_tables"] == {} and nb["abandoned"] == [], nb["notes"])
 check("capped cardinality shows with a plus", res["fields"]["fld4"]["presence"]["cardinality_display"] == "1,000+")
 check("link field and lookup swap through the schema", res["fields"]["fld4"]["targets"]["planning_name"]["proposed"] == "PO Number from POs"
       and res["fields"]["fld3"]["targets"]["planning_name"]["proposed"] == "POs")
@@ -124,6 +132,21 @@ check("command line writes every file", sorted(os.listdir(out)) == sorted(report
 check("command line report files open in Excel as UTF-8 (BOM)", open(os.path.join(out, "names_report.csv"), "rb").read().startswith(b"\xef\xbb\xbf"))
 check("command line left the database untouched", hashlib.sha256(open(dbp, "rb").read()).hexdigest() == h0)
 fio.main(["--db", dbp, "--base", "appT", "--out", out, "--skip-table", "tblA", "--no-char-cleanup", "--draft"])
+# approvals and abandon decisions stored by migration 007 are read, and they open the gate
+appr = os.path.join(tmp, "approved.db"); shutil.copy(dbp, appr)
+k = sqlite3.connect(appr)
+k.execute("insert into table_names(airtable_table_id, new_table_name, status, approved_by) values ('tblA','POs','approved','JV'), ('tblB','Invoices','approved','JV')")
+k.execute("insert into table_names(airtable_table_id, new_table_name, status) values ('tblZ','Pending Name','needs_human')")
+k.execute("insert into field_names(airtable_field_id, abandoned, abandoned_by, abandoned_reason) values ('fld2', 1, 'JV', 'empty duplicate')")
+k.commit(); k.close()
+ad = fio.load_db(appr, "appT")
+check("approved table names and abandoned fields are read from the 007 tables (only 'approved' counts)", ad["approved_tables"] == {"tblA": "POs", "tblB": "Invoices"} and ad["abandoned"] == ["fld2"], ad)
+ao = os.path.join(tmp, "approved_out")
+fio.main(["--db", appr, "--base", "appT", "--out", ao])
+rep = {r["field_id"]: r for r in csv.DictReader(open(os.path.join(ao, "names_report.csv"), encoding="utf-8-sig", newline=""))}
+check("with every table approved the gate opens without --draft and the swap is auto-fixable", rep["fld4"]["planning_name_verdict"] == "AUTO_FIXABLE"
+      and rep["fld4"]["planning_name_proposed_repair"] == "PO Number from POs" and rep["fld2"]["abandoned"] == "yes", rep["fld4"])
+check("the abandoned member shrinks the duplicate group, which resolves it", rep["fld1"]["planning_name_verdict"] == "PASS")
 skipped = [r["field_id"] for r in csv.DictReader(open(os.path.join(out, "names_report.csv"), encoding="utf-8-sig", newline=""))]
 check("skipping a table removes its fields from the report", skipped == ["fld3", "fld4", "fld5", "fld6"], skipped)
 sys.exit(0 if ok else 1)

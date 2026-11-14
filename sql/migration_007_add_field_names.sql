@@ -1,9 +1,7 @@
 -- Migration 007: field and table name review (the name validator). Adds three tables: field_names, table_names, name_events.
 -- Additive only: no existing table or column is changed. Safe to run more than once.
--- PROPOSED, NOT YET APPLIED. Apply it yourself against the live database after review.
--- Until it is applied, the validator (fieldnames.py) works on its own; only the review grid's saved decisions need these tables.
--- It is deliberately NOT yet in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py: the app refuses to
--- connect to a database that lacks an expected table, so those change together, after you confirm this is applied.
+-- Applied to the live database on 2026-11-13 (backed up first) and folded into sql/DatabaseSchemaLibrary.sql, the DDL embedded in
+-- server.py and sql/apply_migrations.py. Safe to run again: nothing happens when the tables already exist.
 
 -- One row per Airtable field (keyed by the stable Airtable field ID): the names a person chose or imported, the approval state of each
 -- target, the description and Workfront type, and the abandon decision. Names are validated per target (see fieldnames.py).

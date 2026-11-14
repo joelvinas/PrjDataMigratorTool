@@ -75,8 +75,8 @@ airtable-migration-control/
 │   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
 │   ├── migration_005_add_form_specs.sql   Stage 2: form_specs, form_items, form_logic, form_links
 │   ├── migration_006_add_automation_specs.sql   Stage 3: automation_specs, automation_items, automation_logic, automation_field_refs, automation_links
-│   ├── migration_007_add_field_names.sql   PROPOSED, not yet applied: field_names, table_names, name_events (see Field name validator)
-│   └── apply_migrations.py             applies all six to an existing database (safe to repeat)
+│   ├── migration_007_add_field_names.sql   Field name validator: field_names, table_names, name_events
+│   └── apply_migrations.py             applies all seven to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
@@ -348,7 +348,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 Steps 1 and 2 are on Setup (`/setup`); steps 3 to 6 are on Stage 1 (`/stage1`), where the Base ID picker is repeated at the top. The base you pick on either page is kept as you move between them.
 
-1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 18 tables, all with 0 rows, and foreign keys on.
+1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 21 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -453,7 +453,7 @@ Airtable's API does not return automations at all, so, like forms, they are reco
 
 ## Field name validator
 
-Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, import and reports are built and tested (command line); the review page (`/names`), the saved approvals and the abandon action are **not built yet** because they need migration 007 (below).
+Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, import and reports are built and tested (command line); the review page (`/names`), the saved approvals and the abandon action are **not built yet** (the tables they need, from migration 007, are in place; see below).
 
 **Three targets, each validated separately:** the Workfront Planning field name, the Workfront Core custom field name, and the Workfront Core custom field label. Names are ASCII-safe (an allowlist of letters, digits, spaces and hyphens, because data exported to CSV without the right encoding corrupts anything else), may not start with a digit, and must be unique within a table. Labels keep the original text except the characters Adobe documents as unsupported in labels (`[ ] ( ) : { }` and control characters) and emoji. The full list of rules, with an example for each, is in [docs/FIELD_NAMING_RULES.md](docs/FIELD_NAMING_RULES.md); it is generated from the same rule list the validator runs, so the two cannot disagree.
 
@@ -480,7 +480,7 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 - Table approval: the command line reads approved table names from migration 007's `table_names`. Until every in-scope table is approved it writes the table report and stops with exit code 2. `--draft` previews the field results anyway and marks the summary DRAFT.
 - Other options: `--table-prefix drop|end|plain` (what to do with a number prefix such as `1.2.3 Orders`; the default moves it to the end), `--digit-style move_to_end|prefix_word` with `--digit-word`, `--no-table-swap`, `--no-char-cleanup`, `--no-leading-digits`, `--label-convert-quarter`, and `--skip-table ID` (repeatable).
 
-**Proposed schema change (migration 007, not yet applied).** [sql/migration_007_add_field_names.sql](sql/migration_007_add_field_names.sql) adds three tables and changes nothing that exists: `field_names` (one row per Airtable field ID: chosen names, approval state per target, description, target type, abandon decision and audit fields), `table_names` (the approved new table names) and `name_events` (an append-only record of every approval, rejection and abandon, and of the settings in force, with who, when and why). It is deliberately not yet in `DatabaseSchemaLibrary.sql`, the DDL embedded in `server.py` or `apply_migrations.py`: the app refuses a database that lacks an expected table, so those change together once the migration has been applied. No record values are stored.
+**Schema (migration 007).** [sql/migration_007_add_field_names.sql](sql/migration_007_add_field_names.sql) adds three tables and changes nothing that exists: `field_names` (one row per Airtable field ID: chosen names, approval state per target, description, target type, abandon decision and audit fields), `table_names` (the approved new table names) and `name_events` (an append-only record of every approval, rejection and abandon, and of the settings in force, with who, when and why). It is part of `DatabaseSchemaLibrary.sql`, the DDL embedded in `server.py` and `apply_migrations.py`, so a new database has the tables and an older one gets them from `python sql/apply_migrations.py`. No record values are stored.
 
 **Limits not confirmed by Adobe.** The Planning field name limit of 250 characters is documented. The documentation states no length limit for Core custom field names or labels, so 255 is a placeholder, and the list of reserved names is empty until an authoritative source is found. Adobe requires a Core custom field API name to be unique across the whole Workfront instance; the validator checks uniqueness within a table only, and the cross-table check is a separate step.
 
