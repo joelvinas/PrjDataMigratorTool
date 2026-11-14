@@ -54,10 +54,14 @@ airtable-migration-control/
 ├── stage1.html  stage1.js       Stage 1: Data (steps 3 to 6)
 ├── stage2.html  stage2.js       Stage 2: Forms (the form recorder, reports and field usage)
 ├── stage3.html  stage3.js       Stage 3: Automations (the automation recorder, reports and field usage)
+├── fieldnames.py                field and table name validator: the rules and the pipeline (pure functions, no I/O)
+├── fieldnames_io.py             validator command line: CSV import, read-only database loader, report files
 ├── editor-kit.js                shared by Stages 2 and 3: type-ahead picker and the Markdown text box with live preview
 ├── log.html  log.js             API call log (its own page, last in the side panel)
 ├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
 ├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
+├── docs/
+│   └── FIELD_NAMING_RULES.md    the naming rules in plain language (generated from the validator's rule list)
 ├── start.bat                    Windows launcher (finds Python, creates config.json, opens the browser)
 ├── config.example.json          copy to config.json and add your token
 ├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/ (databases live in db/)
@@ -71,12 +75,14 @@ airtable-migration-control/
 │   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
 │   ├── migration_005_add_form_specs.sql   Stage 2: form_specs, form_items, form_logic, form_links
 │   ├── migration_006_add_automation_specs.sql   Stage 3: automation_specs, automation_items, automation_logic, automation_field_refs, automation_links
+│   ├── migration_007_add_field_names.sql   PROPOSED, not yet applied: field_names, table_names, name_events (see Field name validator)
 │   └── apply_migrations.py             applies all six to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
     ├── sample_schema_field_options.json   one field of nearly every type, with settings
     ├── mock_airtable.py             fake Airtable so you can test with no real data
+    ├── regression/fieldnames_test.py, fieldnames_io_test.py   the validator's suites ("names"); no server needed
     ├── run_regression.py            runs every suite below against the mock, in throwaway copies of the project
     ├── regression/                  the suites: e2e2, report_test, views_test, extract_test, attach_test, attstats_test, ui_test
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
@@ -334,7 +340,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 ## Automated regression suites (no real data, about a minute)
 
-`python test/run_regression.py` starts the mock Airtable and the app in a throwaway copy of the project, runs every suite (about 450 checks: API and security behavior, the database schema, load order, reports, record saving, attachment download and statistics, and browser tests of the UI and of the form and automation recorders) and prints one line per suite. It never touches your `config.json` or databases. `ui_test` needs Playwright and is skipped without it. Run it after every change. A single suite: `python test/run_regression.py attach`.
+`python test/run_regression.py` starts the mock Airtable and the app in a throwaway copy of the project, runs every suite (about 450 checks before the name validator's two suites were added: API and security behavior, the database schema, load order, reports, record saving, attachment download and statistics, and browser tests of the UI and of the form and automation recorders) and prints one line per suite. It never touches your `config.json` or databases. `ui_test` needs Playwright and is skipped without it. Run it after every change. A single suite: `python test/run_regression.py attach`.
 
 ## Test plan (no real data, about 5 minutes)
 
@@ -444,6 +450,41 @@ Airtable's API does not return automations at all, so, like forms, they are reco
 **Reports and queries.** The report lists the trigger, then the steps in order, with branches labelled If / Else if / Else, conditions written out with their nesting, the fields each step touches, the fields-used table, every link with its address, the version history and a sign-off block. Choose **Workfront Planning (DEV or PROD)** to replace every Airtable field with its target field through `field_crosswalk` and `workfront_fields`; tables show the Workfront record type learned from their mapped fields, and the report says **"Not ready to rebuild"** and marks `UNMAPPED` fields until none is left. The **target Workfront Fusion scenario** name you record appears in the report. The usage panel answers "which automations use this field, and how?" (tested in a condition, written, read, used, watched by the trigger), with `.csv` export including the Workfront field IDs. **Links .csv** lists every link.
 
 **Not captured.** Anything Airtable shows only inside the automation editor that you do not record: run history, and the exact internal token names between steps (type them as text if you want them documented).
+
+## Field name validator
+
+Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, import and reports are built and tested (command line); the review page (`/names`), the saved approvals and the abandon action are **not built yet** because they need migration 007 (below).
+
+**Three targets, each validated separately:** the Workfront Planning field name, the Workfront Core custom field name, and the Workfront Core custom field label. Names are ASCII-safe (an allowlist of letters, digits, spaces and hyphens, because data exported to CSV without the right encoding corrupts anything else), may not start with a digit, and must be unique within a table. Labels keep the original text except the characters Adobe documents as unsupported in labels (`[ ] ( ) : { }` and control characters) and emoji. The full list of rules, with an example for each, is in [docs/FIELD_NAMING_RULES.md](docs/FIELD_NAMING_RULES.md); it is generated from the same rule list the validator runs, so the two cannot disagree.
+
+**Three verdicts.**
+
+- `PASS`: complies.
+- `AUTO_FIXABLE`: the only problems are the special characters `` ' " ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? `` (deleted, with nothing in their place), whitespace characters (a no-break space, tab, new line, carriage return, form feed or vertical tab, each becoming a plain space), repeated or edge spaces, or a renamed table's name inside a lookup, rollup or link field's name (replaced with the table's approved new name, found through the schema, never by guessing).
+- `NEEDS_HUMAN`: everything else: accents and emoji, underscores, `1Q` to `Q1`, a leading number, a duplicate name, a name that is too long, a mention of a renamed table with no schema path.
+
+A proposed repair is shown beside the original for both non-PASS verdicts, and nothing is applied without approval. Auto-fixable repairs may be approved as a batch, the rest one at a time. If letters outside A to Z have to be removed, the proposal says so, so the spelling can be checked.
+
+**Order.** Every in-scope table name must be approved before any field is reviewed (an unchanged name is approved in one click). Then, in a fixed order: table-name swap, character cleanup, leading digits, and last the duplicate check on the repaired names (case-insensitive, per table, covering any number of members). The middle three can be switched off to see their effect; the baseline checks cannot.
+
+**Data presence.** Each field in a duplicate group, and each row of the report, shows the Airtable type, the number of records with a value, the null count and the cardinality (a capped cardinality is shown as `1,000+`, never as a count). A field with no values can be considered for abandoning, which is a recorded human decision. Abandon is not offered for a field that has not been profiled since it was last seen in the schema (a re-ingest means profiling again), or for a checkbox, which is never empty.
+
+**Command line** (read-only: the database is opened read-only and no record value is read):
+
+```
+python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import renames.csv --out out/names
+```
+
+- `--import` takes a CSV with the headers `field_id, old_name, new_name, new_label, old_dataType, new_dataType`, matched to the database by Airtable field ID. `new_name` is validated as both the Planning name and the Core name; `new_label` as the label. Unmatched, repeated or blank IDs, fields missing from the spreadsheet, a stale `old_name`, and a data type that disagrees with the database are listed in `names_import_problems.csv`. A file that is not UTF-8 is read as Windows-1252 and the summary says so.
+- It writes `names_report.csv` (every field: verdict, rules, proposed repair and reasons for each target, plus data presence), `names_diff.csv` (where your names differ from what the rules alone produce), `names_duplicates.csv`, `names_tables.csv`, `names_import_problems.csv`, `names_summary.txt` (counts per verdict and per rule, and how many names each step changed) and `FIELD_NAMING_RULES.md`. The CSVs open in Excel as UTF-8, and a cell that Excel would treat as a formula is prefixed with an apostrophe.
+- Table approval: the command line reads approved table names from migration 007's `table_names`. Until every in-scope table is approved it writes the table report and stops with exit code 2. `--draft` previews the field results anyway and marks the summary DRAFT.
+- Other options: `--table-prefix drop|end|plain` (what to do with a number prefix such as `1.2.3 Orders`; the default moves it to the end), `--digit-style move_to_end|prefix_word` with `--digit-word`, `--no-table-swap`, `--no-char-cleanup`, `--no-leading-digits`, `--label-convert-quarter`, and `--skip-table ID` (repeatable).
+
+**Proposed schema change (migration 007, not yet applied).** [sql/migration_007_add_field_names.sql](sql/migration_007_add_field_names.sql) adds three tables and changes nothing that exists: `field_names` (one row per Airtable field ID: chosen names, approval state per target, description, target type, abandon decision and audit fields), `table_names` (the approved new table names) and `name_events` (an append-only record of every approval, rejection and abandon, and of the settings in force, with who, when and why). It is deliberately not yet in `DatabaseSchemaLibrary.sql`, the DDL embedded in `server.py` or `apply_migrations.py`: the app refuses a database that lacks an expected table, so those change together once the migration has been applied. No record values are stored.
+
+**Limits not confirmed by Adobe.** The Planning field name limit of 250 characters is documented. The documentation states no length limit for Core custom field names or labels, so 255 is a placeholder, and the list of reserved names is empty until an authoritative source is found. Adobe requires a Core custom field API name to be unique across the whole Workfront instance; the validator checks uniqueness within a table only, and the cross-table check is a separate step.
+
+**Tests.** `python test/run_regression.py names` runs the validator's two suites (the pure rules, then the import, database loader, reports and command line) with fabricated names only.
 
 ## Troubleshooting
 
