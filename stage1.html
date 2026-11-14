@@ -170,6 +170,16 @@
     <button id="btnExtractRefresh">Refresh</button>
   </div>
   <div id="exMessage" class="msg"></div>
+
+  <h3>Select values: in the data, not in the schema</h3>
+  <p class="hint">Reads the saved record files and compares the values each single or multiple select field really holds with the options the schema declares, before anything is pushed. It uses the base chosen in step 5 (Results). Tables out of scope are skipped; a table without a saved file is listed as not checked. The page shows counts, record IDs and declared option names only: the text of a value that is not a declared option is never shown. A <strong>near match</strong> differs from a declared option only by case or spacing.</p>
+  <div class="row"><button id="btnSelectValues">Check select values</button></div>
+  <div id="svSummary" class="msg"></div>
+  <div class="scroll"><table id="svTable" class="grid compact" hidden>
+    <thead><tr><th>Table</th><th>Field</th><th class="num">Declared options</th><th class="num">Values in data</th><th class="num">Not declared</th><th class="num">Records affected</th><th class="num">Near matches</th><th>Declared but never used</th><th>Example records (not declared)</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <div id="svSkipped"></div>
 </section>
 </main>
 </div>

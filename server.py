@@ -36,6 +36,7 @@ import traceback
 import urllib.error
 import urllib.request
 import fieldcompare as names_compare
+import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
 from contextlib import contextmanager
@@ -4609,6 +4610,75 @@ def api_names_fields_unabandon(body):
 COMPARE_MAX_BYTES = 300 * 1024 * 1024        # a saved record file is loaded whole, so refuse an absurdly large one
 
 
+def _load_extract_doc(base, tid, tname):
+    """The saved record file of one table, read whole into memory (the caller reduces it to counts and discards it). Plain-language errors."""
+    path = _extract_path(base, tid)
+    if not os.path.isfile(path):
+        raise AppError("There is no saved record file for the table \"%s\". Run profiling for that table with \"Also save every record to JSON files\" ticked "
+                       "(Stage 1, step 5), then try again." % tname, 404)
+    if os.path.getsize(path) > COMPARE_MAX_BYTES:
+        raise AppError("The saved record file for \"%s\" is too large to read here." % tname)
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        raise AppError("The saved record file for \"%s\" could not be read. Save it again by profiling the table." % tname)
+    if not (isinstance(doc, dict) and doc.get("format") == "airtable-table-extract/1" and doc.get("table_id") == tid and isinstance(doc.get("records"), list)):
+        raise AppError("The saved record file for \"%s\" is not in the expected format. Save it again by profiling the table." % tname)
+    return doc
+
+
+def api_select_values(body):
+    """The select-value inventory: for every single or multiple select field of the base (or one table), the values that sit in the saved records
+    compared with the options the schema declares. Counts, record IDs and declared option names only; an undeclared value's text is never returned.
+    A table with no saved record file is listed as not checked, never guessed."""
+    base = _names_base(body)
+    only = str(body.get("table_id") or "") or None
+    with db() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT f.table_id, f.table_name, f.field_id, f.field_name, f.data_type, f.choices_json, %s AS stale FROM airtable_fields f WHERE f.base_id=? "
+            "ORDER BY lower(f.table_name), f.table_id, f.field_id" % STALE_SQL, (base,))]
+        scope = {r["table_id"]: r["decision"] for r in conn.execute("SELECT table_id, decision FROM table_scope WHERE base_id=?", (base,))}
+    rows = [r for r in rows if not r["stale"] and (only is None or r["table_id"] == only)]
+    if only and not rows:
+        raise AppError("That table is not in this base.", 404)
+    tables = {}
+    for r in rows:
+        t = tables.setdefault(r["table_id"], {"table_id": r["table_id"], "table_name": r["table_name"], "fields": []})
+        t["fields"].append(r)
+    out, skipped = [], []
+    for t in tables.values():
+        if scope.get(t["table_id"]) == "out" and only is None:
+            continue                                            # out-of-scope tables are not checked (scope is a human decision)
+        sel = [f for f in t["fields"] if f["data_type"] in selectvalues.SELECT_TYPES]
+        if not sel:
+            continue
+        choices = {}
+        for f in sel:
+            try:
+                choices[f["field_id"]] = json.loads(f["choices_json"]) if f["choices_json"] else []
+            except ValueError:
+                choices[f["field_id"]] = []
+        try:
+            doc = _load_extract_doc(base, t["table_id"], t["table_name"])
+        except AppError as e:
+            skipped.append({"table_id": t["table_id"], "table_name": t["table_name"], "reason": str(e)})
+            continue
+        in_file = {f.get("field_id") for f in doc.get("fields") or [] if isinstance(f, dict)}
+        fields = [{"field_id": f["field_id"], "field_name": f["field_name"], "data_type": f["data_type"]} for f in sel if not in_file or f["field_id"] in in_file]
+        notes = ["\"%s\" is not in the saved file (added after it was captured), so it is not checked." % f["field_name"] for f in sel
+                 if in_file and f["field_id"] not in in_file]
+        res = selectvalues.table_report([r for r in doc["records"] if isinstance(r, dict)], fields, choices)
+        out.append({"table_id": t["table_id"], "table_name": t["table_name"], "captured_at": doc.get("captured_at"), "record_count": len(doc["records"]),
+                    "scope": scope.get(t["table_id"]) or "undecided", "notes": notes, "fields": res})
+    totals = {"fields": sum(len(t["fields"]) for t in out), "fields_with_unmatched": sum(1 for t in out for f in t["fields"] if f["unmatched_values"]),
+              "unmatched_values": sum(f["unmatched_values"] for t in out for f in t["fields"]),
+              "unmatched_records": sum(f["unmatched_records"] for t in out for f in t["fields"]),
+              "near_matches": sum(f["near_matches"] for t in out for f in t["fields"]),
+              "tables_not_checked": len(skipped)}
+    return {"base_id": base, "tables": out, "not_checked": skipped, "totals": totals}
+
+
 def api_names_compare(body):
     """Compare the values of 2 to 8 fields of one table (duplicate-group members) from the saved record file. Returns counts and record IDs only:
     the file is read into memory, compared and discarded; no value reaches the response, the database or a log."""
@@ -4629,19 +4699,7 @@ def api_names_compare(body):
         raise AppError("Only fields of the same table can be compared.")
     tid = tables.pop()
     tname = rows[ids[0]]["table_name"]
-    path = _extract_path(base, tid)
-    if not os.path.isfile(path):
-        raise AppError("There is no saved record file for the table \"%s\". Run profiling for that table with \"Also save every record to JSON files\" ticked "
-                       "(Stage 1, step 5), then compare again." % tname, 404)
-    if os.path.getsize(path) > COMPARE_MAX_BYTES:
-        raise AppError("The saved record file for \"%s\" is too large to compare here." % tname)
-    try:
-        with open(path, encoding="utf-8") as f:
-            doc = json.load(f)
-    except (OSError, ValueError):
-        raise AppError("The saved record file for \"%s\" could not be read. Save it again by profiling the table." % tname)
-    if not (isinstance(doc, dict) and doc.get("format") == "airtable-table-extract/1" and doc.get("table_id") == tid and isinstance(doc.get("records"), list)):
-        raise AppError("The saved record file for \"%s\" is not in the expected format. Save it again by profiling the table." % tname)
+    doc = _load_extract_doc(base, tid, tname)
     in_file = {f.get("field_id") for f in doc.get("fields") or [] if isinstance(f, dict)}
     fields = [{"field_id": i, "field_name": rows[i]["field_name"], "data_type": rows[i]["data_type"]} for i in ids]
     res = names_compare.compare_group([r for r in doc["records"] if isinstance(r, dict)], fields)
@@ -4763,7 +4821,7 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
                "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
                "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
-               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare,
+               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare, "/api/select-values": api_select_values,
                "/api/names/groups/create": api_names_groups_create, "/api/names/groups/dissolve": api_names_groups_dissolve}
 
 

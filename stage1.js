@@ -388,6 +388,26 @@ async function loadAttachmentStats() {
   $("lnkAttCsv").href = "/api/export/attachment_stats.csv" + q;
 }
 
+async function checkSelectValues() {
+  const base = $("resBase").value;
+  const t = $("svTable"), body = t.querySelector("tbody"), sk = $("svSkipped");
+  clear(body); clear(sk); t.hidden = true;
+  if (!base) { setMsg("svSummary", "Choose a base in step 5 (Results) first.", "err"); return; }
+  const d = await api("POST", "/api/select-values", { base_id: base });
+  d.tables.forEach((tb) => tb.fields.forEach((f) => {
+    const ex = f.unmatched.map((u) => u.label + ": " + u.records + " record(s) " + u.examples.join(", ") + (u.near_match_option ? " (near match: " + u.near_match_option + ")" : "")).join("; ");
+    body.appendChild(el("tr", {}, el("td", { text: tb.table_name }), el("td", { text: f.field_name }), el("td", { class: "num", text: fmt(f.declared_options) }), el("td", { class: "num", text: fmt(f.observed_values) }),
+      el("td", { class: "num" }, f.unmatched_values ? el("span", { class: "tag cap", text: fmt(f.unmatched_values) }) : "0"), el("td", { class: "num", text: fmt(f.unmatched_records) }), el("td", { class: "num", text: fmt(f.near_matches) }),
+      el("td", { text: f.unused_options.join(", ") }), el("td", { text: ex })));
+  }));
+  t.hidden = d.totals.fields === 0;
+  const T = d.totals;
+  setMsg("svSummary", T.fields + " select field(s) checked: " + T.fields_with_unmatched + " hold values that are not declared options (" + fmt(T.unmatched_values) + " value(s) in " + fmt(T.unmatched_records) + " record(s); " + fmt(T.near_matches) + " near match(es))." +
+    (T.tables_not_checked ? " " + T.tables_not_checked + " table(s) not checked (no usable saved file)." : ""), T.fields_with_unmatched ? "err" : "");
+  d.not_checked.forEach((n) => sk.appendChild(el("p", { class: "hint", text: "Not checked: " + n.table_name + ". " + n.reason })));
+  d.tables.forEach((tb) => tb.notes.forEach((n) => sk.appendChild(el("p", { class: "hint", text: tb.table_name + ": " + n }))));
+}
+
 async function loadResults() {
   const q = "?base_id=" + encodeURIComponent($("resBase").value) + "&table_id=" + encodeURIComponent($("resTable").value);
   const data = await api("GET", "/api/profile/results" + q);
@@ -452,6 +472,7 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   $("saveRecords").addEventListener("change", syncSave);
   $("downloadFiles").addEventListener("change", syncSave);
   $("btnResults").addEventListener("click", guard(loadResults));
+  $("btnSelectValues").addEventListener("click", guard(checkSelectValues));
   initBaseCombo();
   $("resBase").addEventListener("change", syncReportLinks);
   $("csvBase").addEventListener("change", syncReportLinks);
