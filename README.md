@@ -91,6 +91,7 @@ airtable-migration-control/
     ├── mock_airtable.py             fake Airtable so you can test with no real data
     ├── regression/fieldnames_test.py, fieldnames_io_test.py, fieldnames_store_test.py   the validator's suites ("names"); no server needed
     ├── regression/names_api_test.py   the Field names endpoints and page ("namesapi"), against the mock server
+    ├── regression/names_ui_test.py    the Field names page in a real browser ("namesui"); needs Playwright
     ├── run_regression.py            runs every suite below against the mock, in throwaway copies of the project
     ├── regression/                  the suites: e2e2, report_test, views_test, extract_test, attach_test, attstats_test, ui_test
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
@@ -514,7 +515,7 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 
 **Limits not confirmed by Adobe.** The Planning field name limit of 250 characters is documented. The documentation states no length limit for Core custom field names or labels, so 255 is a placeholder, and the list of reserved names is empty until an authoritative source is found. Adobe requires a Core custom field API name to be unique across the whole Workfront instance; the validator checks uniqueness within a table only, and the cross-table check is a separate step.
 
-**Tests.** `python test/run_regression.py names` runs the validator's four suites (the pure rules; the import, database loader, reports and command line; the saved decisions; and the descriptions) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. There is no browser test of the page yet (the browser suites need Playwright); it was checked by rendering it in a real browser engine.
+**Tests.** `python test/run_regression.py names` runs the validator's four suites (the pure rules; the import, database loader, reports and command line; the saved decisions; and the descriptions) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. `namesui` drives the real page in Chromium through the whole workflow (the table-approval gate, initials, previewing and saving settings, the emoji option, filters, approving, duplicate groups and value comparison, withdrawing, importing, descriptions, scope, the report preview and downloads, and that a hostile field name never runs) and, like the other browser suites, is skipped when Playwright is not installed.
 
 ## Troubleshooting
 
