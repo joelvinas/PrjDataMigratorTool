@@ -63,6 +63,12 @@ def run_suite(scripts, mock_files):
 
 
 def main():
+    busy = [port for port in (8765, 9100) if wait_port(port, 0.5)]
+    if busy:
+        # Something is already listening (usually your own running app). The suites would then drive THAT server, with your real token and
+        # database, instead of a throwaway copy against the mock. Refuse rather than risk it.
+        print("REFUSED: port(s) %s already in use. Stop the running app (and any mock) first; the suites must run against their own copy." % ", ".join(map(str, busy)))
+        sys.exit(2)
     want = set(sys.argv[1:])
     total_bad = 0
     for key, scripts, mf in SUITES:
