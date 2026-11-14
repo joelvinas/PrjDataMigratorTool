@@ -1,0 +1,123 @@
+"""HTTP tests for the field name review endpoints (/api/names/*) and the /names page. Fabricated schema only."""
+import base64, io, json, sqlite3, sys, urllib.request, zipfile
+B = "http://127.0.0.1:8765"; ok = True; BASE = "appNamesApi0001"
+def check(n, c, x=""):
+    global ok; ok &= bool(c); print(("PASS " if c else "FAIL ") + n, "" if c else x)
+def raw(method, p, body=None, headers=None):
+    h = {"Content-Type": "application/json"} if method == "POST" else {}
+    h.update(headers or {})
+    req = urllib.request.Request(B + p, method=method, data=None if body is None else json.dumps(body).encode(), headers=h)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+def get(p): s, d, h = raw("GET", p); return s, json.loads(d)
+def post(p, b, headers=None): s, d, h = raw("POST", p, b, headers); return s, json.loads(d)
+def A(**k): return dict({"base_id": BASE, "actor": "JV"}, **k)
+
+def fld(i, n, t="singleLineText", o=None):
+    d = {"id": "fld" + i, "name": n, "type": t}
+    if o: d["options"] = o
+    return d
+schema = {"tables": [
+    {"id": "tblNa0000000001", "name": "Orders", "primaryFieldId": "fldN01", "views": [], "fields": [
+        fld("N01", "Order Name"), fld("N02", "Amount", "number"), fld("N03", "amount", "number"), fld("N04", "Notes!"),
+        fld("N05", "Café"), fld("N06", "PO#s", "multipleRecordLinks", {"linkedTableId": "tblNb0000000001", "isReversed": False}),
+        fld("N07", "PO Number (from PO#s)", "multipleLookupValues", {"recordLinkFieldId": "fldN06", "fieldIdInLinkedTable": "fldM01", "isValid": True}),
+        fld("N08", "Done", "checkbox", {"icon": "check", "color": "greenBright"})]},
+    {"id": "tblNb0000000001", "name": "PO#s", "primaryFieldId": "fldM01", "views": [], "fields": [fld("M01", "PO Number"), fld("M02", "Total", "number")]},
+    {"id": "tblNc0000000001", "name": "1.2.3 Archive", "primaryFieldId": "fldK01", "views": [], "fields": [fld("K01", "Title")]}]}
+post("/api/db/create", {"path": "names_api.db"}); post("/api/db/connect", {"path": "names_api.db"})
+_, r = post("/api/schema/ingest", {"base_id": BASE, "source": "json", "schema_json": json.dumps(schema)})
+check("fabricated schema ingested", r.get("tables") == 3 and r.get("fields") == 11, r)
+
+s, d, h = raw("GET", "/names"); check("the page is served", s == 200 and b"Field review" in d and h["Content-Type"].startswith("text/html"))
+s, d, h = raw("GET", "/names.js"); check("the page script is served", s == 200 and b"decide(" in d and "javascript" in h["Content-Type"])
+s, st_ = get("/api/status"); check("server version matches the pages", st_["version"] == "1.14", st_.get("version"))
+
+# ---- review, the gate and scope
+s, rv = get("/api/names/review?base_id=" + BASE)
+check("review: gate closed, no fields yet, all tables undecided and pending", s == 200 and rv["gate"]["ready"] is False and rv["fields"] == [] and len(rv["gate"]["pending"]) == 3
+      and rv["scope_counts"] == {"in": 0, "out": 0, "undecided": 3} and rv["scope_available"] is False, rv["gate"])
+check("settings default when none are saved", rv["settings_saved"] is False and rv["settings"]["table_prefix"] == "end")
+check("a bad base ID is refused", get("/api/names/review?base_id=nope")[0] == 400 and get("/api/names/review")[0] == 400)
+check("an unknown base has no fields", get("/api/names/review?base_id=appNothingHere1")[0] == 404)
+s, e = post("/api/names/fields/approve", A(mode="pass")); check("fields cannot be approved while the gate is closed (409)", s == 409 and "Approve every" in e["error"], e)
+s, e = post("/api/names/tables/approve", {"base_id": BASE, "mode": "unchanged"}); check("a decision without initials is refused", s == 400 and "initials" in e["error"], e)
+s, e = post("/api/names/tables/approve", A(actor="x" * 41, mode="unchanged")); check("overlong initials are refused", s == 400)
+
+# ---- table decisions
+s, r = post("/api/names/tables/approve", A(mode="unchanged")); check("approve unchanged tables", s == 200 and r["approved"] == 1 and r["review"]["gate"]["pending"] != [], r.get("error"))
+s, r = post("/api/names/tables/approve", A(mode="auto")); check("approve auto-fixable tables (PO#s becomes POs)", s == 200 and r["approved"] == 1)
+s, e = post("/api/names/tables/approve", A(items=[{"table_id": "tblNc0000000001"}])); check("a human-tier table needs a typed name", s == 400 and "type the name" in e["error"], e)
+s, e = post("/api/names/tables/approve", A(items=[{"table_id": "tblNc0000000001", "name": "Archive (old)"}])); check("a typed table name is validated", s == 400 and "Special" in e["error"], e)
+s, r = post("/api/names/tables/approve", A(items=[{"table_id": "tblNc0000000001", "name": "Archive 1-2-3"}]), )
+check("typed name approved: the gate opens and the review now has fields", s == 200 and r["review"]["gate"]["ready"] and len(r["review"]["fields"]) == 11, r.get("error"))
+rv = r["review"]; fl = {f["field_id"]: f for f in rv["fields"]}
+check("the swap resolves to the approved table name and is auto-fixable", fl["fldN07"]["targets"]["planning_name"]["verdict"] == "AUTO_FIXABLE" and fl["fldN07"]["targets"]["planning_name"]["suggested"] == "PO Number from POs")
+check("duplicate group is reported with both members", [len(c["members"]) for c in rv["clusters"] if c["target"] == "planning_name"] == [2])
+check("every field is unreviewed at first and nothing is approved", rv["counts"]["planning_name"]["approved"] == 0)
+
+# ---- preview does not save; saving needs initials
+s, p = post("/api/names/preview", {"base_id": BASE, "settings": {"char_cleanup": False}})
+check("preview shows the effect of a toggle without saving it", s == 200 and p["settings"]["char_cleanup"] is False and get("/api/names/review?base_id=" + BASE)[1]["settings"]["char_cleanup"] is True)
+check("a preview with invalid settings is refused", post("/api/names/preview", {"base_id": BASE, "settings": {"table_prefix": "bad"}})[0] == 400)
+check("saving settings needs initials", post("/api/names/settings", {"base_id": BASE, "settings": {}})[0] == 400)
+s, r = post("/api/names/settings", A(settings={"label_keep_quarter": False}, reason="test")); check("settings are saved and returned", s == 200 and r["settings"]["label_keep_quarter"] is False and r["settings_saved"])
+post("/api/names/settings", A(settings={}))
+
+# ---- field decisions
+s, r = post("/api/names/fields/approve", A(mode="pass_and_auto", targets=["planning_name"]))
+check("bulk approval takes clean and auto-fixable names", s == 200 and r["approved"] >= 6 and r["review"]["counts"]["planning_name"]["approved"] == r["approved"], r.get("error"))
+fl = {f["field_id"]: f for f in r["review"]["fields"]}
+check("a duplicate member is not bulk-approved; an auto-fix is stored repaired", fl["fldN02"]["targets"]["planning_name"]["status"] == "unreviewed" and fl["fldN04"]["targets"]["planning_name"]["approved_name"] == "Notes")
+s, e = post("/api/names/fields/approve", A(items=[{"field_id": "fldN02", "target": "planning_name", "name": "Amount"}])); check("a name that still collides is refused with the reason", s == 400 and "Duplicate" in e["error"], e)
+s, e = post("/api/names/fields/approve", A(items=[{"field_id": "fldN02", "target": "planning_name", "name": "Amount_x"}])); check("a typed name with a banned character is refused", s == 400, e)
+s, r = post("/api/names/fields/approve", A(items=[{"field_id": "fldN03", "target": "planning_name", "name": "Amount Archive"}], reason="rename to resolve the duplicate"))
+check("renaming one member resolves the group", s == 200 and not [c for c in r["review"]["clusters"] if c["target"] == "planning_name"], r.get("error"))
+s, r = post("/api/names/fields/approve", A(items=[{"field_id": "fldN05", "target": "planning_name"}])); check("accepting a proposal approves the repaired name", s == 200 and {f["field_id"]: f for f in r["review"]["fields"]}["fldN05"]["targets"]["planning_name"]["approved_name"] == "Cafe")
+s, r = post("/api/names/fields/status", A(items=[{"field_id": "fldN05", "target": "planning_name"}], status="unreviewed", reason="client to confirm")); check("an approval can be withdrawn with a reason", s == 200 and r["updated"] == 1)
+check("withdrawing needs a reason", post("/api/names/fields/status", A(items=[{"field_id": "fldN05", "target": "planning_name"}], status="unreviewed"))[0] == 400)
+s, r = post("/api/names/fields/status", A(items=[{"field_id": "fldN01", "target": "core_label"}], status="needs_human", reason="ask")); check("a name can be flagged", s == 200)
+
+# ---- abandon is enforced on the server
+s, e = post("/api/names/fields/abandon", A(field_id="fldN03", reason="empty")); check("an unprofiled field cannot be abandoned", s == 400 and "not profiled" in e["error"], e)
+s, e = post("/api/names/fields/abandon", A(field_id="fldN08", reason="empty")); check("a checkbox cannot be abandoned", s == 400, e)
+check("abandon needs a reason and a real field", post("/api/names/fields/abandon", A(field_id="fldN03", reason=""))[0] == 400 and post("/api/names/fields/abandon", A(field_id="fldNope", reason="x"))[0] == 404)
+check("restoring a field that is not abandoned is refused", post("/api/names/fields/unabandon", A(field_id="fldN03", reason="x"))[0] == 404)
+# mark the table as profiled with an empty field, directly in the database, then abandon through the API
+c = sqlite3.connect("names_api.db")
+c.execute("update airtable_fields set row_count=5, null_count=5 where field_id='fldN03'")
+c.execute("insert into api_call_log(timestamp, source_system, purpose, http_method, endpoint, table_id, success) values ('2999-01-01 00:00:00.000000','Airtable','profile_page','GET','/x','tblNa0000000001',1)")
+c.commit(); c.close()
+s, r = post("/api/names/fields/abandon", A(field_id="fldN03", reason="empty duplicate of Amount")); check("a profiled empty field can be abandoned and the page data shows who and why", s == 200
+      and {f["field_id"]: f for f in r["review"]["fields"]}["fldN03"]["abandon"]["reason"] == "empty duplicate of Amount" and {f["field_id"]: f for f in r["review"]["fields"]}["fldN03"]["abandon"]["by"] == "JV", r.get("error"))
+s, r = post("/api/names/fields/unabandon", A(field_id="fldN03", reason="still used")); check("a field can be restored", s == 200 and not {f["field_id"]: f for f in r["review"]["fields"]}["fldN03"]["abandoned"])
+
+# ---- import
+csv_text = "field_id,old_name,new_name,new_label,old_dataType,new_dataType\r\nfldK01,Title,Title Text,Title Text,Single line text,Text\r\nfldXXXX,Ghost,Ghost,Ghost,Text,Text\r\n"
+s, r = post("/api/names/import", A(csv_base64=base64.b64encode(csv_text.encode()).decode()))
+check("import stores names and reports unmatched IDs and missing fields", s == 200 and r["names_imported"] >= 2 and any(p["kind"] == "UNMATCHED_ID" for p in r["problems"]) and any(p["kind"] == "MISSING_FROM_IMPORT" for p in r["problems"]), r.get("error"))
+tk = {f["field_id"]: f for f in r["review"]["fields"]}["fldK01"]["targets"]
+check("imported names appear as the name being checked; an approved Planning name is kept", tk["core_name"]["candidate"] == "Title Text" and tk["planning_name"]["approved_name"] == "Title")
+check("import needs initials and a readable file", post("/api/names/import", {"base_id": BASE, "csv_base64": "eA=="})[0] == 400 and post("/api/names/import", A(csv_base64="!!"))[0] == 400)
+
+# ---- downloads
+s, d, h = raw("GET", "/api/names/report?base_id=" + BASE)
+z = zipfile.ZipFile(io.BytesIO(d)); check("zip holds every report", s == 200 and h["Content-Type"] == "application/zip" and len(z.namelist()) == 7 and "names_report.csv" in z.namelist(), z.namelist())
+s, d, h = raw("GET", "/api/names/report?base_id=" + BASE + "&file=names_report.csv")
+check("a csv download opens in Excel as UTF-8 and holds approved names", s == 200 and d.startswith(b"\xef\xbb\xbf") and b"Notes" in d and "attachment" in h["Content-Disposition"])
+check("an unknown report file is refused (never a path)", raw("GET", "/api/names/report?base_id=" + BASE + "&file=../server.py")[0] == 404)
+
+# ---- audit trail and safety
+c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row
+ev = [dict(x) for x in c.execute("select * from name_events order by event_id")]
+check("every decision is in the audit trail with who and when", len(ev) > 15 and all(x["actor"] == "JV" and x["created_at"] for x in ev) and {x["event_type"] for x in ev} >= {"approve", "abandon", "unabandon", "reject", "needs_human", "import", "settings"})
+check("the audit trail is append-only: event IDs are strictly increasing with no gaps from edits", [x["event_id"] for x in ev] == sorted({x["event_id"] for x in ev}))
+check("approved names live in field_names with status and who abandoned what", c.execute("select count(*) from field_names where planning_name_status='approved'").fetchone()[0] >= 6)
+blob = json.dumps(ev) + json.dumps(rv)
+check("no token anywhere in the responses or the audit trail", "patMOCK" not in blob and "Bearer" not in blob)
+check("a non-JSON write is refused", raw("POST", "/api/names/tables/approve", None, {"Content-Type": "text/plain"})[0] == 415)
+check("a cross-site write is refused", post("/api/names/tables/approve", A(mode="unchanged"), {"Origin": "http://evil.example"})[0] == 403)
+sys.exit(0 if ok else 1)

@@ -35,6 +35,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import fieldnames_store as names_store
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import formatdate
@@ -66,7 +67,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.13"
+APP_VERSION = "1.14"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -4336,6 +4337,106 @@ def api_auto_report_status(q):
     return {"unmapped": out, "version_no": row["version_no"]}
 
 
+# ---------- field and table name review (the name validator; rules in fieldnames.py, saved decisions in fieldnames_store.py) ----------
+NAMES_FILES = ("names_report.csv", "names_diff.csv", "names_duplicates.csv", "names_tables.csv", "names_import_problems.csv",
+               "names_summary.txt", "FIELD_NAMING_RULES.md")
+
+
+def _names(fn_, *a, **k):
+    """Run a store function and turn its StoreError into the app's AppError (so the page shows the plain-language reason)."""
+    try:
+        return fn_(*a, **k)
+    except names_store.StoreError as e:
+        raise AppError(e.message, e.status, e.extra)
+
+
+def _names_base(src):
+    raw = src.get("base_id") if isinstance(src, dict) else None
+    raw = raw[0] if isinstance(raw, list) else raw
+    return check_base_id(raw)
+
+
+def api_names_review(q):
+    with db() as conn:
+        return _names(names_store.review, conn, _names_base(q))
+
+
+def api_names_preview(body):
+    """The review with settings other than the saved ones (nothing is saved): used to see what a toggle or preset does before committing to it."""
+    with db() as conn:
+        st = _names(names_store.settings_from_dict, body.get("settings") or {})
+        return _names(names_store.review, conn, _names_base(body), st)
+
+
+def api_names_settings(body):
+    with db() as conn:
+        _names(names_store.save_settings, conn, _names_base(body), body.get("settings") or {}, body.get("actor"), body.get("reason") or "")
+        return _names(names_store.review, conn, _names_base(body))
+
+
+def api_names_tables_approve(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.approve_tables, conn, base, body.get("actor"), body.get("items"), body.get("mode"), body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_tables_revoke(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.revoke_tables, conn, base, body.get("actor"), body.get("table_ids") or [], body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_approve(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.approve_fields, conn, base, body.get("actor"), body.get("items"), body.get("mode"), body.get("targets"), body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_status(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.set_field_status, conn, base, body.get("actor"), body.get("items") or [], body.get("status"), body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_abandon(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.abandon, conn, base, body.get("actor"), str(body.get("field_id") or ""), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_unabandon(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.unabandon, conn, base, body.get("actor"), str(body.get("field_id") or ""), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_import(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.import_names, conn, base, body.get("actor"), csv_base64=body.get("csv_base64"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_report(q):
+    """One CSV (or the summary or rules document) from the saved names, or all of them as a zip."""
+    with db() as conn:
+        files = _names(names_store.report_files, conn, _names_base(q))
+    which = (q.get("file") or ["all"])[0]
+    if which == "all":
+        return (names_store.report_zip(files), "application/zip", {"Content-Disposition": 'attachment; filename="field_name_review_%s.zip"' % _stamp()})
+    if which not in NAMES_FILES:
+        raise AppError("Unknown report file.", 404)
+    ctype = "text/csv; charset=utf-8" if which.endswith(".csv") else "text/plain; charset=utf-8"
+    data = files[which].encode("utf-8-sig") if which.endswith(".csv") else files[which].encode("utf-8")
+    return (data, ctype, {"Content-Disposition": 'attachment; filename="%s"' % which})
+
+
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
@@ -4343,11 +4444,11 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
-          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML),
           "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
-          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
@@ -4365,12 +4466,18 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/list": api_automations_list, "/api/automations/spec": api_automations_spec,
               "/api/automations/usage": api_automations_usage, "/api/automations/report.html": api_auto_report_html,
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
-              "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links}
+              "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
+              "/api/names/review": api_names_review, "/api/names/report": api_names_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
-               "/api/automations/save": api_automations_save}
+               "/api/automations/save": api_automations_save,
+               "/api/names/preview": api_names_preview, "/api/names/settings": api_names_settings,
+               "/api/names/tables/approve": api_names_tables_approve, "/api/names/tables/revoke": api_names_tables_revoke,
+               "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
+               "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
+               "/api/names/import": api_names_import}
 
 
 class Handler(BaseHTTPRequestHandler):

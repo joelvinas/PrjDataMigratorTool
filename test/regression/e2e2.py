@@ -155,6 +155,7 @@ c=sqlite3.connect("t.db"); card=c.execute("select field_name,cardinality,cardina
 check("1,000 distinct == cap is still exact (not capped); rerun cleared the flag", card==[("Bucket",4,0),("Unique Key",1000,0)], card); c.close()
 # SQL files
 import importlib.util
+sys.path.insert(0,".")   # server.py imports its sibling modules (fieldnames_store)
 spec=importlib.util.spec_from_file_location("server","server.py"); srv=importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)
 check("sql/DatabaseSchemaLibrary.sql == embedded DDL", open("sql/DatabaseSchemaLibrary.sql",encoding="utf-8").read()==srv.DDL)
 orig=open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)),"original_ddl.sql"),encoding="utf-8").read()

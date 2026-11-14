@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field names - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="names">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="baseStrip">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="actor">Your initials</label>
+    <input id="actor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+  </div>
+  <p class="hint">Every decision on this page records who made it, when, and why. Nothing renames a field or table on its own: the tool proposes, a person approves. Enter your initials (or a short name) before approving anything.</p>
+  <div id="pageMessage" class="msg"></div>
+</section>
+
+<!-- A: settings -->
+<section class="card" id="settingsCard">
+  <h2><span class="num">A</span> Rules and presets</h2>
+  <p class="hint">The rules run in a fixed order: table names first, then the table-name swap, character cleanup, leading digits, and last the duplicate check. Switch a step off to see what it does; the count beside it is how many names it changes. The checks that keep names safe (special characters, emoji, leading digit, spaces, length, duplicates) can never be switched off.</p>
+  <div class="row"><label><input type="checkbox" id="tSwap"> 2. Table-name swap</label> <span id="cSwap" class="hint"></span></div>
+  <div class="row"><label><input type="checkbox" id="tClean"> 3. Character cleanup (special characters, spaces, 1Q to Q1)</label> <span id="cClean" class="hint"></span></div>
+  <div class="row"><label><input type="checkbox" id="tLead"> 4. Leading digits</label> <span id="cLead" class="hint"></span></div>
+  <div class="row">
+    <label for="pPrefix">Table number prefix</label>
+    <select id="pPrefix"><option value="end">Move it to the end (1.2.3 Orders becomes Orders 1-2-3)</option><option value="drop">Drop it (Orders)</option><option value="plain">Keep it as plain digits (1-2-3 Orders)</option></select>
+  </div>
+  <div class="row">
+    <label for="pDigit">Name that starts with a digit</label>
+    <select id="pDigit"><option value="move_to_end">Move the number to the end (500K Fund becomes Fund 500K)</option><option value="prefix_word">Put a word in front</option></select>
+    <input id="pWord" type="text" class="short" placeholder="word" maxlength="40" autocomplete="off">
+  </div>
+  <div class="row"><label><input type="checkbox" id="pLabelQ"> Labels keep the client's own quarter style (1Q) instead of Q1</label></div>
+  <div class="row"><button id="btnSaveSettings" type="button">Save these settings</button><span id="settingsState" class="hint"></span></div>
+  <div id="previewNote" class="note warn" hidden>These settings are a preview and are not saved. Save them before approving anything, so every decision is made under settings that can be reproduced.</div>
+</section>
+
+<!-- B: import -->
+<section class="card" id="importCard">
+  <h2><span class="num">B</span> Import your renamed names</h2>
+  <p class="hint">A CSV with the headers <code>field_id, old_name, new_name, new_label, old_dataType, new_dataType</code>. Rows are matched by Airtable field ID. <b>new_name</b> is checked as both the Planning name and the Core name, <b>new_label</b> as the Core label. A name you have already approved is never overwritten.</p>
+  <div class="row"><input id="importFile" type="file" accept=".csv,text/csv"><button id="btnImport" type="button">Import</button></div>
+  <div id="importResult"></div>
+</section>
+
+<!-- C: table names (the gate) -->
+<section class="card" id="tablesCard">
+  <h2><span class="num">C</span> Table names</h2>
+  <p class="hint">Approve every table name before any field is reviewed: field names that mention a table (lookups, rollups, links) follow the approved table name. A table with no scope decision is <b>undecided</b>, which is different from <b>out</b>; undecided tables are still checked, and out tables are skipped.</p>
+  <div id="gateNote" class="note"></div>
+  <div class="row">
+    <button id="btnApproveUnchanged" type="button">Approve all unchanged names</button>
+    <button id="btnApproveAutoTables" type="button">Approve all auto-fixable names</button>
+  </div>
+  <div id="tablesMessage" class="msg"></div>
+  <div style="overflow-x:auto"><table class="grid" id="tablesGrid"><thead><tr>
+    <th>Scope</th><th>Table</th><th class="num">Fields</th><th>Check</th><th>Proposed name</th><th>New name</th><th>Status</th><th>Decision</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<!-- D: field review -->
+<section class="card" id="fieldsCard">
+  <h2><span class="num">D</span> Field review</h2>
+  <div id="fieldsLocked" class="note info" hidden>Locked until every in-scope table name is approved (section C).</div>
+  <div id="fieldsBody" hidden>
+    <div id="summaryStrip" class="row"></div>
+    <div class="row" id="targetTabs" role="tablist"></div>
+    <div class="row">
+      <label for="fVerdict">Check</label>
+      <select id="fVerdict"><option value="">All</option><option value="PASS">Passes</option><option value="AUTO_FIXABLE">Auto-fixable</option><option value="NEEDS_HUMAN">Needs a person</option></select>
+      <label for="fStatus">Status</label>
+      <select id="fStatus"><option value="">All</option><option value="unreviewed">Unreviewed</option><option value="approved">Approved</option><option value="needs_human">Flagged</option></select>
+      <label for="fTable">Table</label>
+      <select id="fTable"></select>
+      <input id="fSearch" type="text" class="wide" placeholder="Search field name or ID" autocomplete="off">
+      <label><input type="checkbox" id="fAbandoned"> Show abandoned</label>
+    </div>
+    <div class="row">
+      <button id="btnApprovePass" type="button">Approve all that pass (this name)</button>
+      <button id="btnApproveAuto" type="button">Approve all auto-fixable (this name)</button>
+      <button id="btnApproveAllTargets" type="button">Approve all that pass or are auto-fixable (all three names)</button>
+    </div>
+    <div id="fieldsMessage" class="msg"></div>
+    <div id="fieldsCount" class="hint"></div>
+    <div style="overflow-x:auto"><table class="grid" id="fieldsGrid"><thead><tr>
+      <th>Table</th><th>Field</th><th>Data</th><th>Your name</th><th>Proposed repair</th><th>Check</th><th>Status</th><th>Decision</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="row"><button id="btnPrev" type="button">Previous</button><span id="pageInfo" class="hint"></span><button id="btnNext" type="button">Next</button></div>
+  </div>
+</section>
+
+<!-- E: duplicate groups -->
+<section class="card" id="dupCard" hidden>
+  <h2><span class="num">E</span> Duplicate groups</h2>
+  <p class="hint">A duplicate is a group problem: every member is shown with its original and repaired name side by side. Rename a member, or abandon one that has no values; the check runs again on what remains.</p>
+  <div id="dupBody"></div>
+</section>
+
+<!-- F: downloads -->
+<section class="card" id="downloadCard">
+  <h2><span class="num">F</span> Reports</h2>
+  <p class="hint">Built from the saved names. Open the CSVs in Excel to review with the client.</p>
+  <div class="row" id="downloads"></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/names.js"></script>
+</body>
+</html>
