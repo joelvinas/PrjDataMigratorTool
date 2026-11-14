@@ -64,8 +64,8 @@ check("a field of a blocked table is blocked and says the table is not ready", I
 # ---- select options
 opts = [i for i in plan["items"] if i["kind"] == "option" and i["parent"] == "P-F-fA3"]
 check("select options come in Airtable order with their position", [(o["name"], o["position"]) for o in opts] == [("Open", 0), ("Café Closed", 1), ("Done", 2)])
-check("an option follows its field's status", all(o["status"] == "ready" for o in opts) and {i["status"] for i in plan["items"] if i["parent"] == "P-F-fA4"} <= {"hold"})
-check("an option name with non-ASCII characters is flagged, not changed", any("non-ASCII" in r for r in I["P-O-fA3-selB"]["reasons"]) and I["P-O-fA3-selB"]["name"] == "Café Closed")
+check("an option follows its field's status, except a name that breaks the label rules goes on hold", [o["status"] for o in opts] == ["ready", "hold", "ready"] and {i["status"] for i in plan["items"] if i["parent"] == "P-F-fA4"} <= {"hold"})
+check("an option name that breaks the label rules is held with a proposal, and never changed", any("label rules" in r and "Cafe Closed" in r for r in I["P-O-fA3-selB"]["reasons"]) and I["P-O-fA3-selB"]["name"] == "Café Closed" and I["P-O-fA3-selB"]["status"] == "hold")
 check("options exist for Core as well as Planning when the table has both", [o["name"] for o in plan["items"] if o["kind"] == "option" and o["parent"] == "C-F-fA3"] == ["Open", "Café Closed", "Done"])
 
 # ---- the fields the migration adds for the Core-to-Planning link
@@ -142,14 +142,14 @@ check("the same plan in the other environment is independent", lr.run_plan(plan[
 P2, C2 = Fake("planning", fail={"P-F-fA3"}), Fake("core")
 st2 = lr.MemoryState()
 r3 = lr.run_plan(plan["items"], st2, {"planning": P2, "core": C2}, sandbox, dry_run=False)
-check("one failure does not stop the run", r3["counts"]["failed"] == 1 and r3["counts"]["parent_missing"] == 3 and r3["counts"]["created"] == len(ready) - 1 - 3, r3["counts"])
+check("one failure does not stop the run", r3["counts"]["failed"] == 1 and r3["counts"]["parent_missing"] == 2 and r3["counts"]["created"] == len(ready) - 1 - 2, r3["counts"])
 failed = [r for r in r3["results"] if r["outcome"] == "failed"][0]
 check("a failed item has a scrubbed message: no credential survives", "SECRETVALUE" not in failed["detail"] and "Bearer abc" not in failed["detail"] and "[removed]" in failed["detail"] and st2.status[("P-F-fA3", "sandbox")].startswith("failed"), failed["detail"])
-check("the failed item's children are skipped because their parent has no ID", {r["temp_id"]: r["outcome"] for r in r3["results"] if r["temp_id"].startswith("P-O-fA3")} == {"P-O-fA3-selA": "parent_missing", "P-O-fA3-selB": "parent_missing", "P-O-fA3-selC": "parent_missing"})
+check("the failed item's children are skipped because their parent has no ID", {r["temp_id"]: r["outcome"] for r in r3["results"] if r["temp_id"].startswith("P-O-fA3")} == {"P-O-fA3-selA": "parent_missing", "P-O-fA3-selB": "not_ready", "P-O-fA3-selC": "parent_missing"})
 P3 = Fake("planning")
 r4 = lr.run_plan(plan["items"], st2, {"planning": P3, "core": C2}, sandbox, dry_run=False)
-check("after the problem is fixed, a restart creates only the failed item and what depended on it", sorted(t for t, _ in P3.calls) == sorted(["P-F-fA3", "P-O-fA3-selA", "P-O-fA3-selB", "P-O-fA3-selC"])
-      and r4["counts"]["created"] == 4)
+check("after the problem is fixed, a restart creates only the failed item and what depended on it", sorted(t for t, _ in P3.calls) == sorted(["P-F-fA3", "P-O-fA3-selA", "P-O-fA3-selC"])
+      and r4["counts"]["created"] == 3)
 check("a restart after the fix does not touch what already existed", all(t.startswith("P-F-fA3") or t.startswith("P-O-fA3") for t, _ in P3.calls))
 
 # ---- production safety at the runner too
@@ -167,4 +167,13 @@ try:
 except RuntimeError:
     cannot = True
 check("the dry-run transport cannot create", cannot)
+
+# ---- option names follow the label rules (decision of 14 November 2026)
+import fieldnames as fn
+S0 = fn.Settings()
+check("a clean option name is left as it was", lp.option_check("Open", "ready", S0) == ("ready", []))
+check("Adobe's unsupported characters put an option on hold with the proposed repair", lp.option_check("In (Review)", "ready", S0)[0] == "hold" and "'In Review'" in lp.option_check("In (Review)", "ready", S0)[1][0])
+check("a blocked option stays blocked", lp.option_check("A:B", "blocked", S0)[0] == "blocked")
+check("the emoji choice is honoured in the proposal", "'Done'" in lp.option_check("Done 🎉", "ready", S0)[1][0] and "Party" in lp.option_check("Done 🎉", "ready", lp.label_settings({"emoji_mode": "word"}))[1][0].title())
+check("invalid saved settings fall back to the defaults", lp.label_settings({"emoji_mode": "nonsense"}).emoji_mode == "remove")
 sys.exit(0 if ok else 1)

@@ -63,10 +63,34 @@ def _rank(item):
     return KIND_RANK[item["kind"]]
 
 
+def label_settings(d):
+    """The naming settings in force for the base (so the emoji choice is honoured); the defaults when they are missing or invalid."""
+    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets", "description_include_airtable",
+             "emoji_mode", "description_emoji_mode"}
+    try:
+        return fn.Settings(**{k: v for k, v in (d or {}).items() if k in known})
+    except (ValueError, TypeError):
+        return fn.Settings()
+
+
+def option_check(name, status, settings):
+    """A select option's name follows the Core LABEL rules (owner decision, 14 November 2026): it keeps the original text except Adobe's unsupported
+    characters, emoji and non-ASCII characters. A name that breaks them is put on hold with the proposed repair, because nothing renames on its
+    own and an approved option name is not stored yet. Returns (status, reasons)."""
+    name = name or ""
+    bad = fn.violations(name, "core_label", settings)
+    if not bad:
+        return status, []
+    fixed = fn.clean_label_chars(name, settings.opt("core_label", "extra_blocked"), settings.opt("core_label", "emoji_mode"))
+    why = "the option name breaks the label rules (%s); proposed: %s; a person must approve the change (option name decisions are not stored yet)" % (", ".join(bad), repr(fixed))
+    return ("hold" if status in ("ready", "hold") else status), [why]
+
+
 def build_plan(rv, choices=None, include_link_fields=True):
     """rv: the review payload from fieldnames_store.review(). choices: {field_id: [{id, name}, ...]} select options in Airtable order.
     Returns {items, summary}. Items are ordered so every parent comes before its children."""
     choices = choices or {}
+    lset = label_settings(rv.get("settings"))
     items, out_of_scope = [], 0
     by_table = {}
     for f in rv["fields"]:
@@ -126,10 +150,8 @@ def build_plan(rv, choices=None, include_link_fields=True):
                                    description=(f.get("description") or {}).get("text"), group=("C-T-" + tid if system == "core" else None)))
                 if typ in SELECT_TYPES:
                     for pos, ch in enumerate(choices.get(f["field_id"]) or []):
-                        orx = []
-                        if any(ord(c) > 126 for c in ch.get("name") or ""):
-                            orx.append("the option name has non-ASCII characters, which can corrupt in a CSV exported without the right encoding")
-                        items.append(_item("%s-O-%s-%s" % (fid[0], f["field_id"], ch.get("id")), system, "option", ch.get("name"), status, list(rs) + orx, parent=fid, table_id=tid,
+                        ostatus, orx = option_check(ch.get("name"), status, lset)
+                        items.append(_item("%s-O-%s-%s" % (fid[0], f["field_id"], ch.get("id")), system, "option", ch.get("name"), ostatus, list(rs) + orx, parent=fid, table_id=tid,
                                            field_id=f["field_id"], position=pos))
         if both and include_link_fields:
             for system, slug, nm, dtype, opts, desc in CORE_LINK_FIELDS:
