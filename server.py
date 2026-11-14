@@ -36,6 +36,7 @@ import traceback
 import urllib.error
 import urllib.request
 import fieldcompare as names_compare
+import fieldwriters
 import linkdirections as ld
 import recordmap
 import selectvalues
@@ -4868,6 +4869,59 @@ def _load_extract_doc(base, tid, tname):
     return doc
 
 
+def _field_writer_inputs(conn, base_id):
+    """What the field-writer matrix is built from, for one base: its live fields (tables out of scope left out), the LATEST saved version of each
+    automation and form, and their field references. Schema and recorded-spec metadata only; an automation's 'set to' detail is not read."""
+    out_ids = {r["table_id"] for r in conn.execute("SELECT table_id FROM table_scope WHERE base_id=? AND decision='out'", (base_id,))}
+    fields = [dict(r) for r in conn.execute("SELECT f.field_id, f.field_name, f.table_id, f.table_name, f.base_id, f.data_type, %s AS stale FROM airtable_fields f WHERE f.base_id=?" % STALE_SQL, (base_id,))]
+    fields = [f for f in fields if not f.pop("stale") and f["table_id"] not in out_ids]
+    autos = [dict(r) for r in conn.execute("SELECT s.spec_id, s.automation_id, s.automation_name, s.target_scenario_name FROM automation_specs s WHERE s.base_id=? "
+                                           "AND s.version_no = (SELECT MAX(version_no) FROM automation_specs WHERE automation_id = s.automation_id)", (base_id,))]
+    ids = [a["spec_id"] for a in autos]
+    refs = [dict(r) for r in conn.execute("SELECT spec_id, field_id, role FROM automation_field_refs WHERE spec_id IN (%s)" % ",".join("?" * len(ids)), ids)] if ids else []
+    forms = [dict(r) for r in conn.execute("SELECT s.spec_id, s.form_id, s.form_name FROM form_specs s WHERE s.base_id=? "
+                                           "AND s.version_no = (SELECT MAX(version_no) FROM form_specs WHERE form_id = s.form_id)", (base_id,))]
+    fids = [f["spec_id"] for f in forms]
+    items = [dict(r) for r in conn.execute("SELECT spec_id, airtable_field_id, item_type FROM form_items WHERE spec_id IN (%s)" % ",".join("?" * len(fids)), fids)] if fids else []
+    return fields, autos, refs, forms, items
+
+
+def field_writer_matrix(conn, base_id):
+    entries = fieldwriters.build_matrix(*_field_writer_inputs(conn, base_id))
+    return fieldwriters.apply_decisions(entries, _writer_decisions(conn, base_id))
+
+
+def _writer_decisions(conn, base_id):
+    """{field_id: decision} once the decisions table exists (migration 019); until then nobody has decided anything."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_writer_decisions'").fetchone():
+        return {}
+    return {r["airtable_field_id"]: {"decision": r["decision"], "decided_by": r["decided_by"], "decided_at": r["decided_at"], "reason": r["reason"]}
+            for r in conn.execute("SELECT * FROM field_writer_decisions WHERE base_id=?", (base_id,))}
+
+
+def api_field_writers(q):
+    """The field-writer matrix: who fills each field (user, form, automation, formula) and which fields carry the Fusion-driven marker. Metadata only."""
+    base = _names_base(q)
+    with db() as conn:
+        entries = field_writer_matrix(conn, base)
+    cap = 5000
+    return {"base_id": base, "entries": entries[:cap], "truncated": len(entries) > cap, "summary": fieldwriters.summary(entries), "decisions": {k: list(v) for k, v in fieldwriters.DECISIONS.items()},
+            "decision_labels": fieldwriters.DECISION_LABEL, "marker_prefix": fieldwriters.MARKER_PREFIX}
+
+
+WRITER_COLUMNS = ["table_name", "table_id", "field_name", "field_id", "data_type", "category", "fusion_driven", "forms", "automations", "scenarios", "marker", "decision", "decided_by", "notes"]
+
+
+def api_export_field_writers(q):
+    base = _names_base(q)
+    with db() as conn:
+        entries = field_writer_matrix(conn, base)
+    rows = [[e["table_name"], e["table_id"], e["field_name"], e["field_id"], e["data_type"], e["category"], "yes" if e["fusion"] else "no", "; ".join(e["writers"]["form"]),
+             "; ".join(a["automation_name"] for a in e["writers"]["automation"]), "; ".join(e["scenarios"]), e["marker"] or "",
+             (e["decision"] or {}).get("decision", ""), (e["decision"] or {}).get("decided_by", ""), "; ".join(e["anomalies"])] for e in entries]
+    return (_csv_bytes(WRITER_COLUMNS, rows), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="field_writers_%s.csv"' % _stamp()})
+
+
 def _record_map_call(fn_, *a):
     try:
         return fn_(*a)
@@ -5083,7 +5137,7 @@ STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,

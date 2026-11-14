@@ -569,16 +569,56 @@ async function runUsage() {
   setMsg("usageSummary", r.total ? r.total + " usage row(s): " + fields.size + " field(s) across " + autos.size + " automation(s)." + (r.truncated ? " Showing the first 2,000; the .csv has all of them." : "") : "No recorded automation matches. Record and save one above.", r.total ? "" : "warn");
 }
 
+/* ---------- field-writer matrix ---------- */
+const W = { data: null };
+const WRITER_CATEGORY = { formula_only: "Formula only", automation_only: "Automation only", mixed: "Automation and form", user_plain: "Plain data", system: "Filled by Airtable" };
+
+function writerVisible(e) {
+  const cat = $("wrCat").value, q = $("wrQ").value.trim().toLowerCase();
+  if (cat === "needs" ? !e.needs_decision : (cat && e.category !== cat)) return false;
+  if ($("wrFusion").checked && !e.fusion) return false;
+  return !q || [e.table_name, e.table_id, e.field_name, e.field_id].some((x) => String(x).toLowerCase().includes(q));
+}
+
+function renderWriters() {
+  const d = W.data, tb = $("writersTable").querySelector("tbody");
+  clear(tb);
+  if (!d) { $("writersScroll").hidden = true; return; }
+  const rows = d.entries.filter(writerVisible);
+  for (const e of rows) {
+    const decision = e.decision ? (d.decision_labels[e.decision.decision] || e.decision.decision) + " (" + e.decision.decided_by + ")" : (e.needs_decision ? "Not decided" : "");
+    tb.appendChild(el("tr", { class: e.needs_decision ? "undecided" : "" }, el("td", { text: e.table_name }), el("td", { text: e.table_id }), el("td", { text: e.field_name }), el("td", { text: e.field_id }), el("td", { text: e.data_type }),
+      el("td", { text: e.writers.form.join(", ") }), el("td", { text: e.writers.automation.map((a) => a.automation_name).join(", ") }),
+      el("td", { text: e.scenarios.join(", ") || (e.fusion ? "(not named yet)" : "") }), el("td", { text: WRITER_CATEGORY[e.category] || e.category }),
+      el("td", { class: "settings", text: e.marker || "" }), el("td", { text: decision }), el("td", { text: e.anomalies.join("; ") })));
+  }
+  $("writersScroll").hidden = rows.length === 0;
+  applySort("writersTable");
+  const s = d.summary, c = s.categories;
+  setMsg("writersSummary", s.fields + " field(s): " + s.fusion_fields + " written by a Fusion scenario (marker needed), " + s.needs_decision + " still need a decision, " + c.formula_only + " formula-only, " + c.automation_only + " automation-only, " + c.mixed + " automation and form, " + c.user_plain + " plain data, " + c.system + " filled by Airtable." +
+    (s.unnamed_scenarios ? " " + s.unnamed_scenarios + " Fusion-written field(s) have no scenario name yet (set it in the automation above)." : "") + (s.anomalies ? " " + s.anomalies + " with a note to check." : "") +
+    (d.truncated ? " Showing the first 5,000; the .csv has all of them." : "") + " Showing " + rows.length + ".", s.needs_decision || s.anomalies ? "warn" : "ok");
+}
+
+async function loadWriters() {
+  const base = currentBase();
+  $("lnkWritersCsv").href = "/api/export/field_writers.csv?base_id=" + encodeURIComponent(base);
+  if (!base) { W.data = null; renderWriters(); setMsg("writersSummary", "Choose a base above first.", "warn"); return; }
+  W.data = await api("GET", "/api/field-writers?base_id=" + encodeURIComponent(base));
+  renderWriters();
+}
+
 /* ---------- page wiring ---------- */
 function onReadyChange() {
   const on = state.ready;
-  for (const id of ["btnSave", "btnUsage", "btnNew"]) $(id).disabled = !on;
+  for (const id of ["btnSave", "btnUsage", "btnNew", "btnWriters"]) $(id).disabled = !on;
   if (!on) $("btnOpen").disabled = true;
 }
 async function afterConnect() {
   await loadKnownBases();
   await loadSaved();
   await runUsage();
+  await loadWriters().catch(() => {});
 }
 const guarded = (fn) => async () => { try { await fn(); } catch (e) { showGlobalError(e.message); } };
 
@@ -597,6 +637,10 @@ startPage("stage3", { onReadyChange, afterConnect }, () => {
   $("repTarget").addEventListener("change", syncReportControls);
   $("btnRepPreview").addEventListener("click", previewRep);
   $("btnUsage").addEventListener("click", guarded(runUsage));
+  sortableTable("writersTable");
+  $("btnWriters").addEventListener("click", guarded(loadWriters));
+  for (const id of ["wrCat", "wrFusion"]) $(id).addEventListener("change", renderWriters);
+  $("wrQ").addEventListener("input", renderWriters);
   $("useQ").addEventListener("keydown", (ev) => { if (ev.key === "Enter") guarded(runUsage)(); });
   window.addEventListener("beforeunload", (ev) => { if (S.dirty) { ev.preventDefault(); ev.returnValue = ""; } });
 });

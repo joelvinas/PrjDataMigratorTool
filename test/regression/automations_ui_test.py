@@ -181,6 +181,17 @@ with sync_playwright() as p:
           and pg.locator("#tree .branchbox").count() == 2, (pg.locator("#tree > details.fitem").count(), pg.locator("#tree .branchbox").count()))
     check("script text is shown exactly as saved (no markup injected)", "<b>x</b>" in pg.locator("textarea.code").last.input_value())
     check("no unsaved-changes prompt after a clean open", not dialogs, dialogs)
+    # ---- field-writer matrix ----
+    pg.click("#btnWriters"); pg.wait_for_timeout(1000)
+    wt = pg.inner_text("#writersTable")
+    check("the matrix lists fields, names the Fusion scenario for a field an automation sets, and shows its marker", pg.is_visible("#writersTable") and "Fusion: Order follow-up" in wt and "Fusion-driven: written by scenario" in wt, wt[:300])
+    allrows = pg.locator("#writersTable tbody tr").count()
+    pg.check("#wrFusion"); pg.wait_for_timeout(200)
+    fusionrows = pg.locator("#writersTable tbody tr").count()
+    check("the Fusion-only filter shows fewer rows and every one is Fusion-written", 0 < fusionrows < allrows and all("Fusion-driven" in t for t in pg.eval_on_selector_all("#writersTable tbody tr", "rs=>rs.map(r=>r.cells[9].textContent)")), (allrows, fusionrows))
+    pg.uncheck("#wrFusion"); pg.click("#writersTable thead th:nth-child(3)"); fld = pg.eval_on_selector_all("#writersTable tbody tr", "rs=>rs.map(r=>r.cells[2].textContent.trim())")
+    check("the matrix grid sorts on field name", fld == sorted(fld, key=str.lower) and len(fld) > 2, fld[:5])
+    check("the summary says how many fields are Fusion-written", "written by a Fusion scenario" in pg.inner_text("#writersSummary"), pg.inner_text("#writersSummary"))
     real = [e for e in errs if "status of 400" not in e]
     check("no console errors (apart from the deliberate rejected save)", not real and len(errs) <= 1, errs)
     pg.screenshot(path="autos_ui.png", full_page=True)

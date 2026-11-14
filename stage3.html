@@ -135,6 +135,28 @@
     </table>
   </div>
 </section>
+
+<!-- E: field-writer matrix -->
+<section class="card" id="writersCard">
+  <h2><span class="num">E</span> Who fills each field?</h2>
+  <p class="hint">For each field of the base chosen above: who fills its values day to day. It is built from the latest saved version of each automation and form recorded here, and from the field's own type. A person typing into a field cannot be read from those records, so it is only ever shown as possible. A field carries the <strong>Fusion-driven</strong> marker if, and only if, a recorded automation <em>sets</em> it (a field only read or tested in a condition does not); Fusion is the only automation engine in the target. The outcome says what still needs a decision: a formula, lookup or rollup is recomputed in the target or parked; a field only an automation fills becomes Fusion-owned, goes stale, or is also edited by people. The page shows field and automation names only, no record values.</p>
+  <div class="row">
+    <label for="wrCat">Outcome</label>
+    <select id="wrCat"><option value="">All</option><option value="needs">Needs a decision</option><option value="formula_only">Formula only</option><option value="automation_only">Automation only</option><option value="mixed">Automation and form</option><option value="user_plain">Plain data</option><option value="system">Filled by Airtable</option></select>
+    <label><input id="wrFusion" type="checkbox"> Only fields a Fusion scenario writes</label>
+    <input id="wrQ" type="text" placeholder="Search table, field or ID" autocomplete="off">
+    <button id="btnWriters" type="button">Build the matrix</button>
+    <a id="lnkWritersCsv" class="btnlink" href="#">Download .csv</a>
+  </div>
+  <div id="writersSummary" class="msg"></div>
+  <div id="writersMessage" class="msg"></div>
+  <div class="scroll" id="writersScroll" hidden>
+    <table class="grid compact" id="writersTable">
+      <thead><tr><th data-sort="text">Table</th><th data-sort="text">Table ID</th><th data-sort="text">Field</th><th data-sort="text">Field ID</th><th data-sort="text">Type</th><th data-sort="text">Form</th><th data-sort="text">Set by automation</th><th data-sort="text">Fusion scenario</th><th data-sort="text">Outcome</th><th>Marker</th><th>Decision</th><th>Notes</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
 </main>
 </div>
 </div>
