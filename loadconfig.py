@@ -1,11 +1,12 @@
 """Workfront credentials for the loader, read from config.json. Standard library only.
 
-config.json may hold a "workfront" section, one block per environment and system:
+config.json may hold a "workfront" section. Core has environments (sandbox, production); Workfront Planning has none, only Workspaces, so its block is
+not per environment:
 
     "workfront": {
-      "sandbox":    {"core":     {"base_url": "https://yourcompany.sb01.workfront.com", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"},
-                     "planning": {"base_url": "https://...",                          "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE"}},
-      "production": {"core": {...}, "planning": {...}}
+      "core": {"sandbox":    {"base_url": "https://yourcompany.sb01.workfront.com", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"},
+               "production": {"base_url": "https://...",                          "api_key": "..."}},
+      "planning": {"base_url": "https://...", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE"}
     }
 
 A system takes a bearer_token or an api_key (use whichever Workfront gave you). The values are secrets: they are never written to the database,
@@ -15,7 +16,7 @@ the page. Nothing in the loader uses these yet: creating items in Workfront is n
 import json, os
 
 SYSTEMS = ("core", "planning")
-ENVIRONMENTS = ("sandbox", "production")
+ENVIRONMENTS = ("sandbox", "production")      # Core only; Planning uses Workspaces
 SECRET_KEYS = ("bearer_token", "api_key")
 PLACEHOLDERS = ("PASTE", "REPLACE", "XXXX", "YOURCOMPANY")
 
@@ -31,10 +32,10 @@ def _real(value):
 
 class SystemCredentials(object):
     """The address and one secret for one system in one environment. The secret is kept out of repr(), str() and as_status()."""
-    __slots__ = ("environment", "system", "base_url", "_secret", "kind")
+    __slots__ = ("environment", "system", "base_url", "_secret", "kind", "workspace_id")
 
-    def __init__(self, environment, system, base_url, secret, kind):
-        self.environment, self.system, self.base_url, self._secret, self.kind = environment, system, base_url, secret, kind
+    def __init__(self, environment, system, base_url, secret, kind, workspace_id=None):
+        self.environment, self.system, self.base_url, self._secret, self.kind, self.workspace_id = environment, system, base_url, secret, kind, workspace_id
 
     def secret(self):
         return self._secret
@@ -44,7 +45,7 @@ class SystemCredentials(object):
         return ("Authorization", "Bearer " + self._secret) if self.kind == "bearer_token" else ("apiKey", self._secret)
 
     def __repr__(self):
-        return "<%s %s credentials: %s, secret hidden>" % (self.environment, self.system, self.base_url)
+        return "<%s %s credentials: %s%s, secret hidden>" % (self.environment or "workspace", self.system, self.base_url, " workspace " + self.workspace_id if self.workspace_id else "")
 
     __str__ = __repr__
 
@@ -63,25 +64,31 @@ def read_config(path):
     return data
 
 
-def credentials(data, environment, system):
-    """SystemCredentials for one environment and system, or None when that block is missing, incomplete or still holds a placeholder."""
-    if environment not in ENVIRONMENTS or system not in SYSTEMS:
-        raise ConfigError("Unknown environment or system.")
-    block = ((data.get("workfront") or {}).get(environment) or {}).get(system)
+def credentials(data, system, environment=None):
+    """SystemCredentials, or None when the block is missing, incomplete or still holds a placeholder. Core needs an environment (sandbox or
+    production); Planning has none (it uses a Workspace), so its block is read as it is and carries the workspace_id."""
+    if system not in SYSTEMS or (system == "core" and environment not in ENVIRONMENTS):
+        raise ConfigError("Unknown system or environment.")
+    wf = data.get("workfront") or {}
+    block = ((wf.get("core") or {}).get(environment) if system == "core" else wf.get("planning"))
     if not isinstance(block, dict):
         return None
     url = str(block.get("base_url") or "").strip().rstrip("/")
     if not url.lower().startswith("https://") or any(p in url.upper() for p in PLACEHOLDERS):
         return None
+    ws = str(block.get("workspace_id") or "").strip() if system == "planning" else ""
+    ws = None if (not ws or any(p in ws.upper() for p in PLACEHOLDERS)) else ws
     for kind in SECRET_KEYS:
         if _real(block.get(kind)):
-            return SystemCredentials(environment, system, url, str(block[kind]).strip(), kind)
+            return SystemCredentials(environment, system, url, str(block[kind]).strip(), kind, ws)
     return None
 
 
 def status(data):
-    """What is configured, as yes/no only: {environment: {system: True/False}}. Safe to print or log."""
-    return {env: {s: credentials(data, env, s) is not None for s in SYSTEMS} for env in ENVIRONMENTS}
+    """What is configured, as yes/no only. Safe to print or log: {"core": {"sandbox": bool, "production": bool}, "planning": bool,
+    "planning_workspace": bool}."""
+    p = credentials(data, "planning")
+    return {"core": {e: credentials(data, "core", e) is not None for e in ENVIRONMENTS}, "planning": p is not None, "planning_workspace": bool(p and p.workspace_id)}
 
 
 def secret_values(data):
@@ -89,11 +96,9 @@ def secret_values(data):
     out = set()
     if _real(data.get("token") or data.get("airtable_pat")):
         out.add(str(data.get("token") or data.get("airtable_pat")).strip())
-    for env in ENVIRONMENTS:
-        for s in SYSTEMS:
-            c = credentials(data, env, s)
-            if c:
-                out.add(c.secret())
+    for c in [credentials(data, "core", e) for e in ENVIRONMENTS] + [credentials(data, "planning")]:
+        if c:
+            out.add(c.secret())
     return out
 
 

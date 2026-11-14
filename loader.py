@@ -89,7 +89,8 @@ def main(argv=None):
             st = lc.status(lc.read_config(a.config))
         except lc.ConfigError as e:
             sys.exit(str(e))
-        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  %-10s %-9s %s" % (e, s, "configured" if st[e][s] else "not configured") for e in lc.ENVIRONMENTS for s in lc.SYSTEMS]
+        yn = lambda b: "configured" if b else "not configured"
+        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  Core %-12s %s" % (e, yn(st["core"][e])) for e in lc.ENVIRONMENTS] +                 ["  Planning              %s" % yn(st["planning"]), "  Planning workspace ID %s" % yn(st["planning_workspace"])]
         print("\n".join(lines))
         return st
     if a.cmd == "run":
