@@ -107,10 +107,11 @@
     <select id="scope">
       <option value="all">Everything</option>
       <option value="base">One base</option>
-      <option value="table">One table</option>
+      <option value="tables">Selected tables</option>
     </select>
     <select id="scopeBase" hidden></select>
-    <select id="scopeTable" hidden></select>
+    <select id="scopeTable" multiple size="8" hidden title="Hold Ctrl or Shift to choose several tables"></select>
+    <span id="scopeTableHint" class="hint" hidden>Hold Ctrl or Shift to choose several tables.</span>
     <label for="cap">Distinct-value cap per field</label>
     <input id="cap" type="number" min="100" value="1000" class="short">
   </div>
@@ -159,7 +160,7 @@
   <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files are downloaded only when "Also download the attachment files" was ticked in step 5, into an <code>attachments</code> folder beside the table files.</p>
   <div id="exFilesSummary" class="msg"></div>
   <div class="scroll"><table id="exFilesTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th class="num">Attachment files</th><th>Captured (UTC)</th><th>Check</th><th>SHA-256</th></tr></thead>
+    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th class="num">Attachment files</th><th>Captured (UTC)</th><th>Age</th><th>Check</th><th>SHA-256</th></tr></thead>
     <tbody></tbody>
   </table></div>
   <p class="hint">The page shows counts, sizes and checksums only. "Matches profile" compares the file's record count with the table's latest profile.</p>

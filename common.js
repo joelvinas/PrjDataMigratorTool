@@ -227,3 +227,20 @@ async function loadKnownBases() {
 
 /* Pages with nothing of their own to run (the placeholders) are marked data-plain and start here. */
 if (document.body && document.body.hasAttribute("data-plain")) startPage(document.body.dataset.page, {});
+
+/* How old is data that was pulled? Over 4 hours is stale (yellow); over 8 hours is obsolete (red). A time the browser cannot read gives no tag. */
+const AGE_STALE_HOURS = 4, AGE_OBSOLETE_HOURS = 8;
+function ageInfo(iso, now) {
+  const t = Date.parse(iso || "");
+  if (isNaN(t)) return null;
+  const hours = Math.max(0, ((now === undefined ? Date.now() : now) - t) / 3600000);
+  const mins = Math.floor(hours * 60);
+  const text = mins < 60 ? mins + " min ago" : hours < 48 ? Math.floor(hours) + " h " + (mins % 60) + " min ago" : Math.floor(hours / 24) + " days ago";
+  if (hours > AGE_OBSOLETE_HOURS) return { level: "obsolete", text: "obsolete: pulled " + text };
+  if (hours > AGE_STALE_HOURS) return { level: "stale", text: "stale: pulled " + text };
+  return { level: "fresh", text: "pulled " + text };
+}
+function ageTag(iso) {
+  const a = ageInfo(iso);
+  return a ? el("span", { class: "tag age-" + a.level, text: a.text, title: "Data older than " + AGE_STALE_HOURS + " hours is stale; older than " + AGE_OBSOLETE_HOURS + " hours is obsolete. Pull it again before relying on it." }) : "";
+}

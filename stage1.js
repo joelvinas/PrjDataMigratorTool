@@ -65,7 +65,7 @@ async function loadSchema() {
 function fillScopeSelectors() {
   const sb = $("scopeBase"), st = $("scopeTable"), rb = $("resBase"), rt = $("resTable"), cb = $("csvBase");
   const eb = $("exBase");
-  const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [st.value, rt.value];
+  const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [Array.from(st.selectedOptions).map((o) => o.value), rt.value];
   for (const n of [sb, rb, cb, eb]) { clear(n); if (n !== sb) n.appendChild(el("option", { value: "", text: "All bases" })); }
   for (const n of [st, rt]) { clear(n); if (n === rt) n.appendChild(el("option", { value: "", text: "All tables" })); }
   refreshBaseChoices();
@@ -77,13 +77,14 @@ function fillScopeSelectors() {
       for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: baseLabel(b.base_id) + " / " + t.table_name }));
     }
   }
-  sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; st.value = keepT[0]; rt.value = keepT[1];
+  sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; Array.from(st.options).forEach((o) => { o.selected = keepT[0].includes(o.value); }); rt.value = keepT[1];
   updateScopeVisibility();
 }
 function updateScopeVisibility() {
   const s = $("scope").value;
   $("scopeBase").hidden = s !== "base";
-  $("scopeTable").hidden = s !== "table";
+  $("scopeTable").hidden = s !== "tables";
+  $("scopeTableHint").hidden = s !== "tables";
 }
 
 /* ---------- step 4: dependency graph ---------- */
@@ -290,7 +291,9 @@ async function startProfile() {
   setMsg("profMessage", "Starting...", "");
   try {
     const scope = $("scope").value;
-    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked, download_attachments: $("saveRecords").checked && $("downloadFiles").checked });
+    const tableIds = Array.from($("scopeTable").selectedOptions).map((o) => o.value);
+    if (scope === "tables" && !tableIds.length) throw new Error("Choose at least one table (hold Ctrl or Shift to choose several).");
+    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_ids: tableIds, cap: $("cap").value, save_records: $("saveRecords").checked, download_attachments: $("saveRecords").checked && $("downloadFiles").checked });
     setMsg("profMessage", "", "");
     await loadProfileStatus(false);
   } catch (e) { setMsg("profMessage", e.message, "err"); }
@@ -368,7 +371,7 @@ async function loadExtractFiles() {
     const bad = f.check.startsWith("differs");
     body.appendChild(el("tr", {}, el("td", { text: f.base_id + " / " + f.table_name }), el("td", { class: "num", text: fmt(f.record_count) }), el("td", { class: "num", text: fmt(f.fields) }),
       el("td", { class: "num", text: fmtBytes(f.bytes) }),
-      el("td", { class: "num", text: f.attachments ? fmt(f.attachments.files) + " (" + fmtBytes(f.attachments.bytes) + ")" + (f.attachments.failed ? ", " + f.attachments.failed + " failed" : "") : "" }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
+      el("td", { class: "num", text: f.attachments ? fmt(f.attachments.files) + " (" + fmtBytes(f.attachments.bytes) + ")" + (f.attachments.failed ? ", " + f.attachments.failed + " failed" : "") : "" }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }), el("td", {}, ageTag(f.captured_at)),
       el("td", {}, el("span", { class: "tag " + (bad ? "cap" : f.check === "matches profile" ? "done" : ""), text: f.check })), el("td", {}, el("code", { text: f.sha256.slice(0, 12) }))));
   });
   t.hidden = d.files.length === 0;
@@ -396,7 +399,7 @@ async function checkSelectValues() {
   const d = await api("POST", "/api/select-values", { base_id: base });
   d.tables.forEach((tb) => tb.fields.forEach((f) => {
     const ex = f.unmatched.map((u) => u.label + ": " + u.records + " record(s) " + u.examples.join(", ") + (u.near_match_option ? " (near match: " + u.near_match_option + ")" : "")).join("; ");
-    body.appendChild(el("tr", {}, el("td", { text: tb.table_name }), el("td", { text: f.field_name }), el("td", { class: "num", text: fmt(f.declared_options) }), el("td", { class: "num", text: fmt(f.records_total) }), el("td", { class: "num", text: fmt(f.records_total - f.records_with_value) }), el("td", { class: "num", text: fmt(f.observed_values) }),
+    body.appendChild(el("tr", {}, el("td", {}, tb.table_name, ageTag(tb.captured_at)), el("td", { text: f.field_name }), el("td", { class: "num", text: fmt(f.declared_options) }), el("td", { class: "num", text: fmt(f.records_total) }), el("td", { class: "num", text: fmt(f.records_total - f.records_with_value) }), el("td", { class: "num", text: fmt(f.observed_values) }),
       el("td", { class: "num" }, f.unmatched_values ? el("span", { class: "tag cap", text: fmt(f.unmatched_values) }) : "0"), el("td", { class: "num", text: fmt(f.unmatched_records) }), el("td", { class: "num", text: fmt(f.near_matches) }),
       el("td", { text: f.unused_options.join(", ") }), el("td", { text: ex })));
   }));

@@ -1776,6 +1776,16 @@ def api_profile_start(body):
         tables = [t for t in tables if t["base_id"] == body.get("base_id")]
     elif scope == "table":
         tables = [t for t in tables if t["table_id"] == body.get("table_id")]
+    elif scope == "tables":
+        ids = body.get("table_ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(x, str) for x in ids):
+            raise AppError("Choose at least one table to profile.")
+        known = {t["table_id"] for t in tables}
+        missing = sorted(set(ids) - known)
+        if missing:
+            raise AppError("%d of the chosen tables are not in the database. Ingest the schema again (step 3) or refresh the list." % len(missing))
+        want = set(ids)
+        tables = [t for t in tables if t["table_id"] in want]
     elif scope != "all":
         raise AppError("Unknown profiling scope.")
     if not tables:

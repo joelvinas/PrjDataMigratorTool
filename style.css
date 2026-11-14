@@ -63,6 +63,7 @@ td.bad { color: var(--err); font-weight: 600; } td.good { color: var(--ok); }
 .tag { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 9px; margin-left: 6px; background: #e9ecf3; color: #3b4559; font-weight: 500; }
 .tag.stale { background: var(--warnbg); color: #6b3d00; } .tag.cap { background: var(--warnbg); color: #6b3d00; }
 .tag.fail { background: var(--errbg); color: var(--err); } .tag.done { background: var(--okbg); color: var(--ok); }
+.tag.age-fresh { background: var(--okbg); color: var(--ok); } .tag.age-stale { background: #fff3a8; color: #5c4a00; font-weight: 600; } .tag.age-obsolete { background: var(--err); color: #fff; font-weight: 600; }
 .tag.run { background: #eaf1fd; color: #1b3f80; }
 .graphbox { overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: #fcfcfd; max-height: 560px; }
 .graphbox svg text { font: 12px system-ui, sans-serif; fill: #1d2330; }
