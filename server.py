@@ -36,6 +36,7 @@ import traceback
 import urllib.error
 import urllib.request
 import fieldcompare as names_compare
+import linkdirections as ld
 import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
@@ -1570,15 +1571,17 @@ def _tarjan(nodes, adj):
     return sccs
 
 
-def compute_graph(conn, mode="literal"):
+def compute_graph(conn, mode="literal", detail=None):
     """Pure computation from airtable_fields. Writes nothing.
     mode 'literal': every link field is an edge (child -> parent), as specified.
+    mode 'confirmed': each link pair (or one-way link) follows the direction a person confirmed (see linkdirections.py). A pair still
+        undecided keeps its literal edges, so the order is provisional until every pair is decided. Automatic pairs are non-binding edges.
     mode 'collapse': two-way link pairs (a link field and its inverse) are resolved with Airtable's
         prefersSingleRecordLink hint. If exactly one side is a single-record link, that side's table is the
         child and only that field is an ordering edge. If both or neither side is (many-to-many, or the hint
         was not reported), the direction is unknown, so both fields stay as edges and the two tables form a
         cycle that loads together, with the links set in a second pass."""
-    if mode not in ("literal", "collapse"):
+    if mode not in ("literal", "collapse", "confirmed"):
         raise AppError("Unknown dependency mode.")
     rows = [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"]]
     # Scope is a human decision: a table marked OUT is not part of the migration, so it takes no part in the order. A table with no decision is
@@ -1619,6 +1622,9 @@ def compute_graph(conn, mode="literal"):
                               "parent_table": tables[child["linked_table_id"]] if child else None}
     pairs = sorted(pair_list.values(), key=lambda p: (p["table_a"].lower(), p["table_b"].lower(), p["field_a"].lower()))
 
+    stored = ld.read_stored(conn)
+    units = [u for u in ld.build_units(rows, stored) if all(f["linked_table_id"] in tables for f in u["fields"])]
+    decided_fields = {f["field_id"] for u in units if u["decision"] for f in u["fields"]} if mode == "confirmed" else set()
     self_links, unresolved, edges, out_links = [], [], {}, []
     for a in links:
         if a["linked_table_id"] == a["table_id"]:
@@ -1634,10 +1640,45 @@ def compute_graph(conn, mode="literal"):
             continue
         if mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
             continue   # reverse side of a pair whose direction is set by the other field
+        if a["field_id"] in decided_fields:
+            continue   # a person decided this pair: its edge is added from the decision below
         edges.setdefault((a["table_id"], a["linked_table_id"]), []).append(a["field_name"])
 
     def skey(tid):
         return (tables[tid].lower(), tid)
+
+    auto_status, direction_edges = {}, {}      # field_id -> 'derived' | 'chosen' | 'loop' ; field_id -> the edge it set
+    auto_added, auto_loops = [], []
+    if mode == "confirmed":
+        automatic = []
+        for u in sorted(units, key=lambda u: u["key"]):
+            d = u["decision"]
+            if not d:
+                continue
+            fld = next(f for f in u["fields"] if f["field_id"] == d["field_id"])
+            if isinstance(d["ordering"], tuple):
+                child, parent = d["ordering"]
+                edges.setdefault((child, parent), []).append(fld["field_name"])
+                direction_edges[fld["field_id"]] = (child, parent)
+            elif d["ordering"] == "automatic":
+                automatic.append((u["key"], d["table_id"], d["other_table_id"]))
+        settled, added, loops = ld.settle_automatic(set(edges), automatic, skey)
+        unit_of = {u["key"]: u for u in units}
+        for key, (child, parent) in sorted(added.items()):
+            u = unit_of[key]
+            names = sorted(f["field_name"] for f in u["fields"] if f["table_id"] in (child, parent))
+            edges.setdefault((child, parent), []).extend(names)
+            auto_added.append({"table": tables[parent] + " loads before " + tables[child], "fields": [f["table_name"] + "." + f["field_name"] for f in u["fields"]]})
+        for key in loops:
+            auto_loops.append({"fields": [f["table_name"] + "." + f["field_name"] for f in unit_of[key]["fields"]]})
+        for key, u in unit_of.items():
+            st = "derived" if key in settled else "chosen" if key in added else "loop" if key in loops else None
+            for f in u["fields"]:
+                if st:
+                    auto_status[f["field_id"]] = st
+        derived_keys = set(settled)
+    else:
+        derived_keys = set()
 
     nodes = sorted(tables, key=skey)
     adj = {n: [] for n in nodes}
@@ -1696,6 +1737,8 @@ def compute_graph(conn, mode="literal"):
                  for (c, p), f in sorted(edges.items(), key=lambda kv: (skey(kv[0][0]), skey(kv[0][1])))]
     # How every link field is treated, for the report: does it order the load, or wait for a second pass?
     link_fields = []
+    unit_state = {f["field_id"]: u["decision"] is not None for u in units for f in u["fields"]}
+    undecided = sum(1 for u in units if u["decision"] is None)
     for a in sorted(links, key=lambda r: (r["table_name"].lower(), r["field_name"].lower(), r["field_id"])):
         tgt = a["linked_table_id"]
         if tgt == a["table_id"]:
@@ -1707,6 +1750,16 @@ def compute_graph(conn, mode="literal"):
         elif tgt not in tables:
             cls, second, why = ("Unresolved", True,
                                 "The linked table is not in the database. Ingest its base, then recompute.")
+        elif a["field_id"] in decided_fields and a["field_id"] not in direction_edges:
+            st = auto_status.get(a["field_id"])
+            if st == "derived":
+                cls, second, why = ("Automatic: already ordered", False, "The pair is set to automatic, and the other confirmed directions already settle which table loads first. Adds no ordering.")
+            elif st == "chosen":
+                cls, second, why = ("Automatic: order chosen, review", False, "The pair is set to automatic and nothing else settles it, so the tool picked an order (the table that sorts first loads first). A person should confirm it.")
+            elif st == "loop":
+                cls, second, why = ("Automatic: loop, needs a person", True, "Automatic pairs form a loop that no decided direction breaks. A person must pick a direction on one of them.")
+            else:
+                cls, second, why = ("Inverse of a decided pair", False, "Reverse side of a two-way link whose direction a person confirmed on the other field. Adds no ordering.")
         elif mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
             cls, second, why = ("Inverse of an ordered pair", False,
                                 "Reverse side of a two-way link whose direction is set by the other field. "
@@ -1718,13 +1771,18 @@ def compute_graph(conn, mode="literal"):
         else:
             cls, second, why = ("Orders the load", False,
                                 "The linked (parent) table must be loaded before this table.")
-        link_fields.append({"base_id": a["base_id"], "table_id": a["table_id"], "table_name": a["table_name"],
+        link_fields.append({"direction_decided": unit_state.get(a["field_id"]), "base_id": a["base_id"], "table_id": a["table_id"], "table_name": a["table_name"],
                             "field_id": a["field_id"], "field_name": a["field_name"], "linked_table_id": tgt,
                             "linked_table_name": tables.get(tgt, tgt), "treatment": cls, "second_pass": second,
                             "explanation": why})
+    if detail is not None:
+        detail.update({"derived_keys": derived_keys, "units": units})
     return {"mode": mode, "matrix": matrix, "edges": edge_list, "cycles": cycles, "self_links": self_links,
             "unresolved_links": unresolved, "out_of_scope_links": sorted(out_links, key=lambda o: (o["table_name"].lower(), o["field_name"].lower(), o["field_id"])),
-            "out_of_scope_tables": len(out_ids), "inverse_pairs": pairs, "link_fields": link_fields}
+            "out_of_scope_tables": len(out_ids), "inverse_pairs": pairs, "link_fields": link_fields,
+            "directions": {"pairs": len(units), "undecided": undecided, "decided": len(units) - undecided, "available": ld.has_direction_columns(conn),
+                           "automatic_chosen": auto_added, "automatic_loops": auto_loops},
+            "provisional": undecided > 0}
 
 
 def _cycle_message(cyc, mode):
@@ -1738,7 +1796,10 @@ def api_depgraph_recompute(body):
     mode = (body or {}).get("mode", "literal")
     try:
         with db() as conn:
-            g = compute_graph(conn, mode)
+            detail = {}
+            g = compute_graph(conn, mode, detail)
+            if mode == "confirmed":
+                ld.mark_derived(conn, detail["derived_keys"], detail["units"])
             with conn:
                 conn.execute("DELETE FROM dependency_matrix")
                 conn.executemany(
@@ -1785,6 +1846,59 @@ def api_depgraph_view(q):
     g["matrix_in_sync"] = fresh == saved
     del g["matrix"]
     return g
+
+
+def _link_direction_rows(conn):
+    """Non-stale schema rows of the tables that are not out of scope: what the link direction screen and the load order are built from."""
+    out_ids = {r["table_id"] for r in conn.execute("SELECT table_id FROM table_scope WHERE decision='out'")}
+    return [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"] and r["table_id"] not in out_ids]
+
+
+def _direction_payload(conn):
+    if not ld.has_direction_columns(conn):
+        return {"available": False, "pairs": [], "counts": {}, "schema_build_blocked": False,
+                "message": "Link directions need migrations 015 to 017 on this database."}
+    rows = _link_direction_rows(conn)
+    tables = {r["table_id"] for r in rows}
+    units = [u for u in ld.build_units(rows, ld.read_stored(conn)) if all(f["linked_table_id"] in tables for f in u["fields"])]
+    for u in units:
+        u["status"] = "undecided" if not u["decision"] else ("automatic" if u["decision"]["ordering"] == "automatic" else "confirmed")
+        u["decision"] = None if not u["decision"] else {k: u["decision"][k] for k in ("field_id", "relationship_type", "tiebreaker")}
+    undecided = sum(1 for u in units if u["status"] == "undecided")
+    counts = {"pairs": len(units), "undecided": undecided, "confirmed": sum(1 for u in units if u["status"] == "confirmed"),
+              "automatic": sum(1 for u in units if u["status"] == "automatic"),
+              "two_way": sum(1 for u in units if len(u["fields"]) == 2), "one_way": sum(1 for u in units if len(u["fields"]) == 1)}
+    return {"available": True, "pairs": units, "counts": counts, "schema_build_blocked": undecided > 0, "type_labels": ld.TYPE_LABEL}
+
+
+def _direction_call(fn_, *a):
+    try:
+        return fn_(*a)
+    except ld.DirectionError as e:
+        raise AppError(e.message, e.status)
+
+
+def api_link_directions(q):
+    with db() as conn:
+        return _direction_payload(conn)
+
+
+def api_link_directions_sync(body):
+    """Write the tool's PROPOSALS (one row per link field, with its pair and suggested direction). Decides nothing."""
+    with db() as conn:
+        r = _direction_call(ld.sync, conn, _link_direction_rows(conn))
+        return dict(_direction_payload(conn), synced=r)
+
+
+def api_link_directions_decide(body):
+    """A person's choice on one link field (its partner is set to match). relationship_type 'clear' returns the pair to undecided."""
+    with db() as conn:
+        _direction_call(ld.sync, conn, _link_direction_rows(conn))
+        done = [_direction_call(ld.decide, conn, body.get("actor"), str(it.get("field_id") or ""), it.get("relationship_type"), it.get("tiebreaker"), body.get("reason") or "")
+                for it in (body.get("items") or [])]
+        if not done:
+            raise AppError("Nothing to save.")
+        return dict(_direction_payload(conn), saved=len(done))
 
 
 # --------------------------------------------------------------------------
@@ -2826,6 +2940,16 @@ def build_report(mode):
         if mode == "literal":
             h.append("<p class=\"meta\">In Literal mode each pair counts as a two-table cycle. Regenerate with "
                      "\"Resolve two-way link pairs\" to order them using the single-link hint.</p>")
+    dr = g.get("directions") or {}
+    if dr.get("available") and dr.get("undecided"):
+        h.append("<div class=\"box warn\"><strong>This load order is provisional:</strong> %d of %d link relationship(s) have no confirmed direction, so their links are "
+                 "still counted both ways. Confirm each in Stage 1, step 4 (Link directions); the schema build stays blocked until then.</div>" % (dr["undecided"], dr["pairs"]))
+    if dr.get("automatic_chosen"):
+        h.append("<div class=\"box warn\"><strong>Automatic pairs the tool had to order:</strong> nothing else settles these, so the table that sorts first was "
+                 "loaded first. A person should confirm each.<ul>%s</ul></div>" % "".join("<li>%s</li>" % esc(x["table"]) for x in dr["automatic_chosen"]))
+    if dr.get("automatic_loops"):
+        h.append("<div class=\"box warn\"><strong>Automatic pairs that form a loop:</strong> a person must choose a direction on one of them.<ul>%s</ul></div>" % "".join(
+            "<li>%s</li>" % esc(" / ".join(x["fields"])) for x in dr["automatic_loops"]))
     if g.get("out_of_scope_links"):
         h.append("<div class=\"box warn\"><strong>Links to out-of-scope tables:</strong> these fields link to tables marked out of scope, so the link has "
                  "nowhere to point. A person decides: bring the table in, or drop the field.<ul>%s</ul></div>" % "".join(
@@ -4890,7 +5014,7 @@ STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
@@ -4908,7 +5032,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,

@@ -92,6 +92,7 @@ function note(kind, title, items) {
 }
 
 const MODE_HELP = {
+  confirmed: "Confirmed link directions: each link pair follows the direction a person confirmed above. A pair that is still undecided keeps its literal edges, so the order is provisional until every pair is decided. Automatic pairs never bind the order: they are settled by the other decisions, or flagged when the tool had to choose.",
   literal: "Literal: every link field counts as a dependency, exactly as Airtable defines it. Airtable creates a link on both tables for each relationship, so linked tables usually depend on each other and end up in cycles that load together, with a second pass to fill in the links. Pick this to see the worst case or to check the other mode against it.",
   collapse: "Resolve two-way link pairs: for each pair of linked fields that point at each other, if exactly one side is set to allow a single linked record, that table is the child and only its field is a dependency; the other side is just the reverse view. Many-to-many pairs, and pairs with no hint, stay as cycles. Pick this for the load plan: it gives the fewest cycles that are still correct.",
 };
@@ -116,7 +117,7 @@ function graphSvgText() {
 }
 function graphFileName(ext) {
   const d = new Date(), p = (n) => String(n).padStart(2, "0");
-  return "DependencyGraph_" + ($("depMode").value === "literal" ? "Literal" : "Resolve") + "_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + "." + ext;
+  return "DependencyGraph_" + ({ literal: "Literal", collapse: "Resolve", confirmed: "Confirmed" }[$("depMode").value] || "Order") + "_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + "." + ext;
 }
 function saveBlob(blob, name) {
   const a = document.createElement("a");
@@ -155,6 +156,85 @@ async function recompute() {
   } catch (e) { setMsg("depMessage", e.message, "err"); }
 }
 
+/* ---------- link directions ---------- */
+const LINK_TYPES = [["one_to_many", "One to many: this table loads first"], ["many_to_one", "Many to one: the other table loads first"], ["one_to_one", "One to one"], ["many_to_many", "Many to many"]];
+const LINK_TIES = [["automatic", "Automatic (the load order decides)"], ["this_first", "This table first"], ["other_first", "The other table first"]];
+const linkLabel = (v) => (LINK_TYPES.find((t) => t[0] === v) || [0, v || ""])[1].split(":")[0];
+
+async function loadLinkDirections(sync) {
+  let r;
+  try { r = sync ? await api("POST", "/api/links/directions/sync", {}) : await api("GET", "/api/links/directions"); }
+  catch (e) { setMsg("linkMessage", e.message, "err"); return; }
+  renderLinkDirections(r);
+}
+
+function linkStatus(f) {
+  if (f.confirmed && f.auto_set) return "Auto-set from its pair" + (f.decided_by ? " (" + f.decided_by + ")" : "");
+  if (f.confirmed) return "Confirmed by " + (f.decided_by || "?") + (f.decided_at ? " on " + f.decided_at.slice(0, 10) : "");
+  return "Undecided";
+}
+
+function renderLinkDirections(r) {
+  const sum = $("linkSummary"), tbl = $("linkTable"), body = tbl.querySelector("tbody");
+  clear(sum); clear(body);
+  tbl._data = r;
+  if (!r.available) { sum.appendChild(note("info", r.message || "Link directions are not available on this database.")); tbl.hidden = true; return; }
+  const c = r.counts;
+  if (!c.pairs) { sum.appendChild(note("info", "No link pairs between in-scope tables yet. Ingest the schema, then click \"Detect link pairs\".")); tbl.hidden = true; return; }
+  sum.appendChild(note(c.undecided ? "warn" : "ok", c.pairs + " link relationship(s) (" + c.two_way + " two-way, " + c.one_way + " one-way): " + c.undecided + " undecided, " + c.confirmed + " confirmed, " + c.automatic + " automatic." +
+    (c.undecided ? " The load order is provisional and the schema build is blocked until every one is decided." : " Every direction is decided; recompute the load order to use them.")));
+  for (const u of r.pairs) {
+    for (const f of u.fields) {
+      const typeSel = el("select", { "aria-label": "Direction for " + f.field_name }, el("option", { value: "", text: "Choose..." }), LINK_TYPES.map((t) => el("option", { value: t[0], text: t[1] })));
+      const tieSel = el("select", { "aria-label": "Tiebreaker for " + f.field_name }, LINK_TIES.map((t) => el("option", { value: t[0], text: t[1] })));
+      typeSel.value = f.relationship_type || "";
+      tieSel.value = f.tiebreaker || "automatic";
+      const needTie = () => { tieSel.disabled = !(typeSel.value === "one_to_one" || typeSel.value === "many_to_many"); };
+      typeSel.addEventListener("change", needTie);
+      needTie();
+      const save = el("button", { type: "button", text: f.confirmed ? "Change" : "Confirm" });
+      save.addEventListener("click", () => {
+        if (!typeSel.value) { setMsg("linkMessage", "Choose a direction for " + f.table_name + "." + f.field_name + " first.", "err"); return; }
+        saveLink([{ field_id: f.field_id, relationship_type: typeSel.value, tiebreaker: tieSel.disabled ? null : tieSel.value }], "set from the page", "Saved.");
+      });
+      const kids = [save];
+      if (f.confirmed) {
+        const clr = el("button", { type: "button", text: "Clear" });
+        clr.addEventListener("click", () => saveLink([{ field_id: f.field_id, relationship_type: "clear" }], "cleared from the page", "Cleared."));
+        kids.push(clr);
+      }
+      body.appendChild(el("tr", { class: f.confirmed ? "" : "undecided" }, el("td", { text: f.table_name + "." + f.field_name }), el("td", { text: f.linked_table_name }),
+        el("td", { text: f.partner_field_name ? f.linked_table_name + "." + f.partner_field_name : "(one-way: no paired field)" }),
+        el("td", { text: linkLabel(f.suggested_type) }), el("td", {}, typeSel), el("td", {}, tieSel), el("td", { text: linkStatus(f) }), el("td", {}, kids)));
+    }
+  }
+  tbl.hidden = false;
+}
+
+async function saveLink(items, reason, done) {
+  const actor = $("linkActor").value.trim();
+  if (!actor) { setMsg("linkMessage", "Enter your initials before making a decision.", "err"); return; }
+  try {
+    const r = await api("POST", "/api/links/directions/decide", { actor, items, reason });
+    renderLinkDirections(r);
+    setMsg("linkMessage", done + " Recompute the load order to apply it.", "ok");
+    await loadDepgraph();
+  } catch (e) { setMsg("linkMessage", e.message, "err"); }
+}
+
+async function acceptSuggestions() {
+  const r0 = $("linkTable")._data;
+  if (!r0 || !r0.pairs) return;
+  const items = [];
+  for (const u of r0.pairs) {
+    if (u.status !== "undecided") continue;
+    const pick = u.fields.find((x) => x.suggested_type === "many_to_one") || u.fields.find((x) => x.suggested_type === "one_to_many");
+    if (pick) items.push({ field_id: pick.field_id, relationship_type: pick.suggested_type });
+  }
+  if (!items.length) { setMsg("linkMessage", "Nothing to confirm: every remaining pair is one to one or many to many and needs your tiebreaker.", "warn"); return; }
+  await saveLink(items, "suggestion accepted from the page", items.length + " suggestion(s) confirmed.");
+}
+
 async function loadDepgraph() {
   const g = await api("GET", "/api/depgraph?mode=" + encodeURIComponent($("depMode").value));
   const notes = $("depNotes");
@@ -173,6 +253,10 @@ async function loadDepgraph() {
     if (g.mode === "literal") notes.appendChild(note("warn", g.inverse_pairs.length + " two-way link pair(s) found (a link field and its inverse). Literal mode counts each pair as a 2-table cycle. If these are just Airtable's automatic inverse fields, switch to \"Resolve two-way link pairs\".", lines));
     else notes.appendChild(note("info", g.inverse_pairs.length + " two-way link pair(s). Where exactly one side is a single-record link, that side's table is ordered as the child. The rest add no ordering; populate their links in a second pass, after both tables' records exist.", lines));
   }
+  const dr = g.directions || {};
+  if (dr.available && dr.undecided) notes.appendChild(note("warn", "This load order is provisional: " + dr.undecided + " of " + dr.pairs + " link pair(s) have no confirmed direction (see Link directions above). The schema build stays blocked until each is decided."));
+  if ((dr.automatic_chosen || []).length) notes.appendChild(note("warn", "Automatic pairs where nothing else settles the order: the tool picked one (the table that sorts first loads first). Confirm or change each.", dr.automatic_chosen.map((a) => a.table + " (" + a.fields.join(" / ") + ")")));
+  if ((dr.automatic_loops || []).length) notes.appendChild(note("err", "Automatic pairs that form a loop no decided direction breaks: a person must choose a direction on one of them", dr.automatic_loops.map((a) => a.fields.join(" / "))));
   if (g.self_links.length) notes.appendChild(note("info", "Self-links (ignored for ordering)", g.self_links.map((s) => s.table_name + "." + s.field_name)));
   if (g.out_of_scope_tables) notes.appendChild(note("info", g.out_of_scope_tables + " table(s) marked out of scope take no part in this order (scope is decided on the Field names page)."));
   if ((g.out_of_scope_links || []).length) notes.appendChild(note("warn", "Links to tables that are out of scope: a person decides whether to bring the table in or drop the field", g.out_of_scope_links.map((o) => o.table_name + "." + o.field_name + " → " + o.linked_table_name)));
@@ -438,7 +522,7 @@ function onReadyChange() {
 }
 
 async function afterConnect() {
-  await Promise.all([loadSchema(), loadDepgraph(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
+  await Promise.all([loadSchema(), loadLinkDirections(false), loadDepgraph(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
 }
 
 startPage("stage1", { onReadyChange, afterConnect }, () => {
@@ -453,6 +537,8 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
   $("btnRecompute").addEventListener("click", recompute);
+  $("btnLinkRefresh").addEventListener("click", guard(() => loadLinkDirections(true)));
+  $("btnLinkAccept").addEventListener("click", guard(acceptSuggestions));
   $("depMode").addEventListener("change", () => { syncReportLinks(); loadDepgraph().catch((e) => showGlobalError(e.message)); });
   $("btnReportPreview").addEventListener("click", previewReport);
   for (const id of ["lnkMhtml", "lnkHtml"]) $(id).addEventListener("click", () => setMsg("reportMessage", "Report downloaded.", "ok"));

@@ -171,3 +171,5 @@ textarea.code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5p
 tr.muted td { color: var(--muted); background: #fafbfc; }
 tr.reason td { background: #f3f7fe; }
 table.grid td input[type=text] { width: 100%; min-width: 170px; }
+
+#linkTable tr.undecided td { background: rgba(255, 243, 168, 0.35); }

@@ -58,9 +58,25 @@
 <section class="card" id="step4">
   <h2><span class="num">4</span> Review load order</h2>
   <p class="hint">A table that links to another table is the child; the linked table is its parent (self-links ignored).</p>
+  <h3>Link directions</h3>
+  <p class="hint">Airtable creates a link on both tables of a relationship. The tool finds each pair and suggests which table is the parent from the single-or-multiple setting; a person confirms every one. Choosing on one field sets its partner (shown as auto-set), and either end can be changed. One to one and many to many also need a tiebreaker: which table loads first, or automatic (the load order settles it where it can, and the tool flags any pair it had to choose for you). The load order stays <b>provisional</b>, and the schema build stays blocked, until every pair is decided.</p>
+  <div class="row">
+    <label for="linkActor">Your initials</label>
+    <input id="linkActor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+    <button id="btnLinkRefresh" type="button">Detect link pairs</button>
+    <button id="btnLinkAccept" type="button" title="Confirm the suggested direction for every undecided pair that is not one to one or many to many">Confirm all suggestions that need no tiebreaker</button>
+  </div>
+  <div id="linkSummary"></div>
+  <div id="linkMessage" class="msg"></div>
+  <div style="overflow-x:auto"><table id="linkTable" class="grid" hidden>
+    <thead><tr><th>Link field</th><th>Links to</th><th>Paired with</th><th>Suggested</th><th>Direction</th><th>Tiebreaker</th><th>Status</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <h3>Load order</h3>
   <div class="row">
     <label for="depMode">Link handling</label>
     <select id="depMode">
+      <option value="confirmed" selected>Confirmed link directions (from the list above)</option>
       <option value="literal">Literal: every link field is a dependency</option>
       <option value="collapse">Resolve two-way link pairs (use Airtable's single-link hint)</option>
     </select>

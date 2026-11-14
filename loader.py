@@ -17,6 +17,7 @@ import argparse, csv, io, os, pathlib, sqlite3, sys
 
 import fieldnames_io as fio
 import fieldnames_store as store
+import linkdirections as ld
 import loadconfig as lc
 import loadplan as lp
 import loadrun as lr
@@ -99,11 +100,12 @@ def main(argv=None):
     conn = _open(a.db)
     try:
         inputs = store.loader_inputs(conn, a.base)
+        inputs["link_state"] = ld.field_states(conn)
     except store.StoreError as e:
         sys.exit(e.message)
     finally:
         conn.close()
-    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields)
+    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"))
     _write(a.out, "load_plan.csv", plan_csv(plan))
     text = summary_text(plan, a.base)
     if a.cmd == "plan":

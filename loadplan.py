@@ -36,6 +36,8 @@ HOLD_REASON = {
     "attachment": "attachments move as Core documents on the new objects, which is not decided or built yet",
 }
 
+LINK_UNDECIDED = "the direction of this link is not confirmed (Stage 1, step 4, link directions): the schema cannot be built until a person decides"
+
 # Fields the migration itself adds so a Core object and its Planning record can find each other (from the Migration Design). The names are
 # checked against the same naming rules as every other name.
 CORE_LINK_FIELDS = [
@@ -86,8 +88,9 @@ def option_check(name, status, settings):
     return ("hold" if status in ("ready", "hold") else status), [why]
 
 
-def build_plan(rv, choices=None, include_link_fields=True):
+def build_plan(rv, choices=None, include_link_fields=True, link_state=None):
     """rv: the review payload from fieldnames_store.review(). choices: {field_id: [{id, name}, ...]} select options in Airtable order.
+    link_state: {link field_id: True when a person confirmed its direction}; a link field whose direction is not confirmed is BLOCKED (None = not checked).
     Returns {items, summary}. Items are ordered so every parent comes before its children."""
     choices = choices or {}
     lset = label_settings(rv.get("settings"))
@@ -135,6 +138,9 @@ def build_plan(rv, choices=None, include_link_fields=True):
                 if hold:
                     status = "hold"
                     rs.append(HOLD_REASON[hold])
+                    if hold == "link" and link_state is not None and link_state.get(f["field_id"]) is False:
+                        status = "blocked"
+                        rs.append(LINK_UNDECIDED)
                 else:
                     status = "ready"
                     if not nm:

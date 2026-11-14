@@ -47,8 +47,9 @@ check("record types use the approved table names and are ready", rows["P-T-tA"][
 check("only the Planning plus Core table has a Core form, on hold", "C-T-tA" in rows and "C-T-tB" not in rows and rows["C-T-tA"]["status"] == "hold")
 check("a plain field is ready in Planning, and in Core for the Core table only", rows["P-F-fA1"]["status"] == "ready" and rows["C-F-fA1"]["status"] == "ready" and not any(k.startswith("C-F-fB") for k in rows)
       and rows["P-F-fB1"]["data_type"] == "Text")
-check("the formula and the link are on hold with their reasons", rows["P-F-fA3"]["status"] == "hold" and "derived" in rows["P-F-fA3"]["reasons"]
-      and rows["P-F-fA4"]["status"] == "hold" and "second pass" in rows["P-F-fA4"]["reasons"])
+check("the formula is on hold with its reason", rows["P-F-fA3"]["status"] == "hold" and "derived" in rows["P-F-fA3"]["reasons"])
+check("the link is blocked while its direction is not confirmed (Stage 1, step 4), and still names the second pass", rows["P-F-fA4"]["status"] == "blocked"
+      and "second pass" in rows["P-F-fA4"]["reasons"] and "not confirmed" in rows["P-F-fA4"]["reasons"])
 check("select options come from the schema in Airtable order, with positions", [(rows[k]["name"], rows[k]["position"]) for k in ("P-O-fA2-selA", "P-O-fA2-selB", "P-O-fA2-selC")] == [("Open", "0"), ("Café Closed", "1"), ("Done", "2")])
 check("the migration's own Core-link fields are in the plan for the Core table", rows["S-P-tA-core-object-id"]["source"] == "migration" and rows["S-C-tA-sync-status"]["status"] == "ready")
 check("the plan is ordered parents first in the file", list(rows).index("P-T-tA") < list(rows).index("P-F-fA1") < list(rows).index("P-O-fA2-selA"))

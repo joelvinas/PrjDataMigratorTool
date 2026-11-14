@@ -58,6 +58,12 @@ check("a Core field is blocked when the Core name and label are not both approve
 check("a field with no target data type is blocked", I["P-F-fA9"]["status"] == "blocked" and any("target data type" in r for r in I["P-F-fA9"]["reasons"]))
 check("a derived field is on hold with the reason", I["P-F-fA4"]["status"] == "hold" and "derived field" in I["P-F-fA4"]["reasons"][0])
 check("a link and an attachment are on hold with their own reasons", I["P-F-fA5"]["status"] == "hold" and "second pass" in I["P-F-fA5"]["reasons"][0] and I["P-F-fA6"]["status"] == "hold" and "Core documents" in I["P-F-fA6"]["reasons"][0])
+plan_d = lp.build_plan(RV, CHOICES, link_state={"fA5": False})
+plan_ok = lp.build_plan(RV, CHOICES, link_state={"fA5": True})
+Id = {i["temp_id"]: i for i in plan_d["items"]}; Io = {i["temp_id"]: i for i in plan_ok["items"]}
+check("a link whose direction is not confirmed is blocked, and says where to decide", Id["P-F-fA5"]["status"] == "blocked" and any("direction of this link is not confirmed" in r for r in Id["P-F-fA5"]["reasons"]), Id["P-F-fA5"])
+check("a link whose direction is confirmed stays on hold for the second pass", Io["P-F-fA5"]["status"] == "hold" and not any("not confirmed" in r for r in Io["P-F-fA5"]["reasons"]))
+check("with no link state given the plan behaves as before", I["P-F-fA5"]["status"] == "hold")
 check("abandoned and consolidated fields are not in the plan", not any(i["field_id"] in ("fA7", "fA8") for i in plan["items"]))
 check("a field of a blocked table is blocked and says the table is not ready", I["P-F-fC1"]["status"] == "blocked" and any("table is not ready" in r for r in I["P-F-fC1"]["reasons"]))
 

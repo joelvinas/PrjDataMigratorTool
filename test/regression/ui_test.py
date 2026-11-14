@@ -42,6 +42,16 @@ with sync_playwright() as p:
     check("db-only base listed by ID", "appSampleBase002" in labels("#resBase"), labels("#resBase"))
     pg.fill("#baseId",""); pg.click("#baseToggle"); pg.wait_for_timeout(300)
     menu=pg.inner_text("#baseMenu"); check("combo offers config base and db-only base", "Sample Shop" in menu and "appSampleBase002" in menu, menu)
+    # link directions
+    pg.click("#btnLinkRefresh"); pg.wait_for_timeout(1500)
+    ls=pg.inner_text("#linkSummary")
+    check("link directions list the detected pairs and say the order is provisional", "undecided" in ls and "provisional" in ls and pg.is_visible("#linkTable") and len(pg.query_selector_all("#linkTable tbody tr"))>=2, ls)
+    check("the default link handling follows the confirmed directions", pg.input_value("#depMode")=="confirmed" and pg.inner_text("#depModeHelp").startswith("Confirmed"))
+    pg.fill("#linkActor",""); pg.select_option("#linkTable tbody tr:first-child td:nth-child(5) select","many_to_one"); pg.click("#linkTable tbody tr:first-child td:last-child button"); pg.wait_for_timeout(300)
+    check("a decision without initials is refused with a plain message", "initials" in pg.inner_text("#linkMessage"), pg.inner_text("#linkMessage"))
+    pg.fill("#linkActor","JV"); pg.click("#linkTable tbody tr:first-child td:last-child button"); pg.wait_for_timeout(1200)
+    check("a confirmed decision shows who decided and its partner as auto-set", "Confirmed by JV" in pg.inner_text("#linkTable") and "Auto-set" in pg.inner_text("#linkTable"), pg.inner_text("#linkTable")[:300])
+    check("the load order notes say it is provisional while pairs remain undecided", "provisional" in pg.inner_text("#depNotes") or "no confirmed direction" in pg.inner_text("#depNotes") or "Every direction is decided" in pg.inner_text("#linkSummary"), pg.inner_text("#depNotes")[:300])
     # mode help
     pg.select_option("#depMode","literal"); t1=pg.inner_text("#depModeHelp")
     pg.select_option("#depMode","collapse"); t2=pg.inner_text("#depModeHelp")

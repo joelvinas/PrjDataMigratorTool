@@ -218,6 +218,20 @@ s_, e = post("/api/names/groups/dissolve", A(group_id=gl[0]["group_id"], reason=
 s_, e = post("/api/names/groups/dissolve", A(group_id=99999, reason="x")); check("dissolving an unknown group is a 404", s_ == 404)
 s_, r = post("/api/names/groups/dissolve", A(group_id=gl[0]["group_id"], reason="different data after all")); check("a group can be dissolved", s_ == 200 and r["review"]["groups"] == [] and {f["field_id"]: f for f in r["review"]["fields"]}["fldN05"]["consolidated"] is None, r.get("error"))
 
+# ---- link directions
+s, ld0 = get("/api/links/directions")
+check("link directions: the schema's one-way link is listed and undecided, and blocks the schema build", s == 200 and ld0["available"] and ld0["counts"]["undecided"] == 1 and ld0["schema_build_blocked"], ld0)
+s, ld1 = post("/api/links/directions/sync", {})
+f0 = ld1["pairs"][0]["fields"][0]
+check("detecting writes only a proposal: the suggestion, nothing confirmed", s == 200 and f0["suggested_type"] in ("many_to_one", "many_to_many") and not f0["confirmed"], f0)
+check("a decision without who is refused", post("/api/links/directions/decide", {"items": [{"field_id": f0["field_id"], "relationship_type": "many_to_one"}]})[0] == 400)
+s, ld2 = post("/api/links/directions/decide", {"actor": "JV", "reason": "fabricated test", "items": [{"field_id": f0["field_id"], "relationship_type": "many_to_one"}]})
+check("a confirmed decision is stored with who and unblocks the schema build", s == 200 and ld2["counts"]["undecided"] == 0 and not ld2["schema_build_blocked"] and ld2["pairs"][0]["fields"][0]["decided_by"] == "JV", ld2)
+s, g1 = get("/api/depgraph?mode=confirmed")
+check("the confirmed load order reports the decision count and is no longer provisional", s == 200 and g1["directions"]["decided"] == 1 and not g1["provisional"], g1.get("directions"))
+s, g2 = post("/api/depgraph/recompute", {"mode": "confirmed"})
+check("recompute accepts the confirmed mode", s == 200 and g2["mode"] == "confirmed" and g2["tables"] >= 1)
+
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row
 ev = [dict(x) for x in c.execute("select * from name_events order by event_id")]
