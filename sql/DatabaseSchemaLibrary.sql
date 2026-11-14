@@ -293,3 +293,232 @@ CREATE TABLE api_call_log (
 
 CREATE INDEX idx_api_call_log_time ON api_call_log(timestamp);
 CREATE INDEX idx_api_call_log_status ON api_call_log(success, http_status);
+
+-- 9. Field and table name review (migration 007: the field name validator's saved decisions)
+-- One row per Airtable field (keyed by the stable Airtable field ID): the names a person chose or imported, the approval state of each
+-- target, the description and Workfront type, and the abandon decision. Names are validated per target (see fieldnames.py).
+CREATE TABLE field_names (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,
+    planning_name TEXT,               -- Workfront Planning field name (NULL until imported or approved)
+    core_name TEXT,                   -- Workfront Core custom field name
+    core_label TEXT,                  -- Workfront Core custom field label
+    planning_name_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(planning_name_status IN ('unreviewed', 'approved', 'needs_human')),
+    core_name_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(core_name_status IN ('unreviewed', 'approved', 'needs_human')),
+    core_label_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(core_label_status IN ('unreviewed', 'approved', 'needs_human')),
+    description TEXT,                 -- generated from the lineage syntax, then hand-edited
+    target_type TEXT,                 -- target Workfront data type
+    core_target_type TEXT,            -- the Workfront Core data type (migration 012); target_type is the Planning data type
+    planning_name_verdict TEXT,       -- cache of the last validation: PASS, AUTO_FIXABLE or NEEDS_HUMAN (always recomputable)
+    core_name_verdict TEXT,
+    core_label_verdict TEXT,
+    verdict_rules TEXT,               -- JSON: rule IDs per target from the last validation
+    validated_at TIMESTAMP,
+    abandoned INTEGER NOT NULL DEFAULT 0,   -- 1 = a person abandoned this field (never automatic)
+    abandoned_by TEXT,
+    abandoned_at TIMESTAMP,
+    abandoned_reason TEXT,
+    import_batch TEXT,                -- which spreadsheet import last set the names
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_names_abandoned ON field_names(abandoned);
+
+-- One row per Airtable table: the new table name a person approved. The suggestion itself is always recomputed, never stored.
+-- The table-name swap in field names reads this (approved name first, else the suggestion).
+CREATE TABLE table_names (
+    airtable_table_id TEXT NOT NULL PRIMARY KEY,
+    new_table_name TEXT,
+    status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(status IN ('unreviewed', 'approved', 'needs_human')),
+    approved_by TEXT,
+    approved_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_table_id) REFERENCES airtable_tables(table_id)
+);
+
+-- Append-only audit trail of every human decision and of the settings in force (toggles and presets), so any run can be reproduced.
+-- Rows are never updated or deleted. Current settings for a base = its newest 'settings' event. No record values are ever stored here.
+CREATE TABLE name_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL CHECK(subject_type IN ('field', 'table', 'settings')),
+    subject_id TEXT NOT NULL,         -- Airtable field ID, Airtable table ID, or the base ID for settings
+    event_type TEXT NOT NULL CHECK(event_type IN ('import', 'approve', 'reject', 'needs_human', 'abandon', 'unabandon', 'settings')),
+    target TEXT,                      -- planning_name, core_name, core_label (NULL when it applies to the whole field or table)
+    old_value TEXT,
+    new_value TEXT,                   -- for 'settings': the JSON of the toggles and presets
+    actor TEXT NOT NULL,              -- who decided (free text: the app has no logins)
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_name_events_subject ON name_events(subject_type, subject_id);
+
+-- 10. Table scope and target decisions (migration 008: human decisions kept apart from the ingested table definitions)
+-- Which tables are relevant is a human decision, not part of the ingested table definition, so it lives here and a schema re-ingest can
+-- never overwrite it. A table with NO row is UNDECIDED, which is different from 'out'. The name validator and everything downstream run on
+-- every table that is not explicitly 'out'.
+CREATE TABLE table_scope (
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('in', 'out')),
+    decided_by TEXT NOT NULL,         -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    PRIMARY KEY (base_id, table_id),
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_scope_decision ON table_scope(base_id, decision);
+
+-- For each in-scope table: does it land in Workfront Planning only, or in Planning plus a Workfront Core presence (attachments, a front-facing
+-- data entry form, or a defined major workflow)? A table with no row has no target decision yet.
+CREATE TABLE table_targets (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    target TEXT NOT NULL CHECK(target IN ('planning_only', 'planning_and_core')),
+    decided_by TEXT NOT NULL,
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_targets_base ON table_targets(base_id);
+
+-- 11. Field consolidation groups (migration 009: several fields of one table become one Workfront field)
+-- A consolidation group is several Airtable fields of ONE table that will become ONE Workfront field. A person chooses the survivor (the
+-- field whose name and settings carry forward), records why, and says what the loader should do later when two members are both filled
+-- and differ. Merged members drop out of the name review and the duplicate checks, and the survivor's description lists every origin.
+-- A group can be dissolved at any time (the rows are deleted; the decision history stays in name_events, which is append-only).
+CREATE TABLE field_groups (
+    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    survivor_field_id TEXT NOT NULL,
+    conflict_rule TEXT NOT NULL DEFAULT 'review' CHECK(conflict_rule IN ('review', 'survivor_wins', 'first_filled')),
+                                      -- for the loader, when two members are both filled and differ:
+                                      -- 'review' = a person resolves each such record, 'survivor_wins' = keep the survivor's value,
+                                      -- 'first_filled' = use the first non-empty value in member order
+    reason TEXT NOT NULL,             -- why these fields are being consolidated
+    decided_by TEXT NOT NULL,         -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id),
+    FOREIGN KEY (survivor_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_groups_table ON field_groups(base_id, table_id);
+
+-- The members of each group, including the survivor. A field can be in at most one group (field_id is the primary key).
+CREATE TABLE field_group_members (
+    group_id INTEGER NOT NULL,
+    field_id TEXT NOT NULL PRIMARY KEY,
+    member_order INTEGER NOT NULL,    -- 0 = the survivor; the others in the order their origins are listed and 'first_filled' is applied
+    FOREIGN KEY (group_id) REFERENCES field_groups(group_id),
+    FOREIGN KEY (field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_group_members_group ON field_group_members(group_id);
+
+-- 12. The load ID map (migration 010: Workfront IDs against the loader's temporary IDs, per stage)
+-- Every item the loader creates in Workfront (a Planning record type or field, a Core custom field, a select option) has a TEMPORARY ID that
+-- depends only on the Airtable IDs (see loadplan.py), such as P-F-fldXXXX. The moment a create call returns, its Workfront ID is written here
+-- against the temporary ID, and a restart skips every row that already has one, so nothing is ever created twice. One row per temporary ID
+-- per stage: Core has four environments; Workfront Planning has NO environments, only Workspaces (owner, 14 November 2026): everything goes into
+-- one Workspace treated as isolated for Dev, which is then either wiped and recreated as a UAT Workspace or promoted to UAT. So 'environment' is the
+-- stage label ('sandbox1', 'sandbox2', 'preview' and 'production' for Core, 'dev' and 'uat' for Planning) and workspace_id names the Planning Workspace the IDs belong to.
+-- Promoting Dev to UAT relabels that Workspace's rows (a person's recorded decision); a wipe and recreate makes new rows. Each stage has its own IDs. Option rows (kind 'option') are rows
+-- like any other, with their position in Airtable's order, so every select field's options are recorded by ID in order.
+-- Every create call's result is ALSO logged against its temporary ID in runbook_logs (failing_component = the temporary ID), the existing log.
+-- Nothing here holds a credential or a record value.
+CREATE TABLE load_id_map (
+    temp_id TEXT NOT NULL,            -- for example P-T-tblXXXX, P-F-fldXXXX, C-F-fldXXXX, P-O-fldXXXX-selXXXX
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_id TEXT,                -- the Planning Workspace these IDs belong to (NULL for Core)
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    kind TEXT NOT NULL CHECK(kind IN ('record_type', 'form', 'field', 'option')),
+    base_id TEXT NOT NULL,
+    table_id TEXT,                    -- the Airtable table the item belongs to
+    airtable_field_id TEXT,           -- the Airtable field (NULL for a record type or form, and for fields the migration adds itself)
+    parent_temp_id TEXT,              -- the record type (for a Planning field) or the field (for an option)
+    position INTEGER,                 -- an option's position in Airtable's order
+    name TEXT NOT NULL,               -- the name sent to Workfront
+    workfront_id TEXT,                -- NULL until the create call returns; once set, the item is never created again
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'created', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,                  -- a short message with any credential removed
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (temp_id, environment)
+);
+CREATE INDEX idx_load_id_map_base ON load_id_map(base_id, environment);
+CREATE INDEX idx_load_id_map_field ON load_id_map(airtable_field_id);
+
+-- 13. The Core object type of each table (migration 011)
+-- A table that has a Workfront Core presence (table_targets.target = 'planning_and_core') becomes ONE kind of Core object: a project, a request
+-- or a task. That is a human decision, recorded with who, when and why. A table with no row has no Core object type yet, and the loader keeps
+-- its Core form on hold until it does.
+CREATE TABLE table_core_objects (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    core_object_type TEXT NOT NULL CHECK(core_object_type IN ('project', 'request', 'task')),
+    decided_by TEXT NOT NULL,         -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_core_objects_base ON table_core_objects(base_id);
+
+-- 14. Relationships between tables, defined by the Airtable schema and stored (migration 013)
+-- Relationships are DEFINED BY THE AIRTABLE SCHEMA (airtable_fields.linked_table_id and inverse_link_field_id) and are STORED here so the
+-- loader and the reports read one decided answer. The tool proposes: one row per link field, with its paired field when the schema reports
+-- one. Exactly one side of a two-way pair is the real Planning relationship (is_primary = 1); the other side is the reverse view. A person
+-- approves (approved_by, approved_at); nothing is decided silently, and a row that is not approved keeps the loader's second pass on hold.
+-- No record values are stored here.
+CREATE TABLE field_relationships (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,   -- the link field (multipleRecordLinks)
+    base_id TEXT NOT NULL,
+    from_table_id TEXT NOT NULL,                   -- the table the link field is on
+    to_table_id TEXT NOT NULL,                     -- the table it links to (airtable_fields.linked_table_id)
+    inverse_field_id TEXT,                         -- the paired field on the other table, when the schema reports one (NULL = one-way)
+    cardinality TEXT CHECK(cardinality IN ('one', 'many')),   -- how many records this side may link (from prefers_single_record_link)
+    is_primary INTEGER NOT NULL DEFAULT 1 CHECK(is_primary IN (0, 1)),   -- 1 = this side creates the relationship; 0 = the reverse view
+    source TEXT NOT NULL DEFAULT 'schema' CHECK(source IN ('schema', 'manual')),
+    approved_by TEXT,                              -- NULL until a person approves
+    approved_at TIMESTAMP,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id),
+    FOREIGN KEY (from_table_id) REFERENCES airtable_tables(table_id),
+    FOREIGN KEY (to_table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_field_relationships_base ON field_relationships(base_id);
+CREATE INDEX idx_field_relationships_inverse ON field_relationships(inverse_field_id);
+
+-- 15. Approved select option names and the option IDs read back from Workfront (migration 014)
+-- Option names follow the Core label rules. The tool proposes a repair for a name that breaks them; a person approves it here, with who, when
+-- and why. The Airtable option is identified by its stable choice ID (airtable_fields.choices_json), never by its name. An option whose name
+-- breaks the rules and has no approved row stays on hold in the load plan. No record values are stored.
+CREATE TABLE option_names (
+    airtable_field_id TEXT NOT NULL,
+    choice_id TEXT NOT NULL,          -- the Airtable select option's ID
+    approved_name TEXT NOT NULL,      -- the name to create in Workfront
+    approved_by TEXT NOT NULL,        -- initials or a short name (the app has no logins)
+    approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    PRIMARY KEY (airtable_field_id, choice_id),
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+
+-- The option IDs PULLED BACK from Workfront, so what exists there can be compared with what was approved. Core: the option object (POPT, a
+-- parameter option, per Workfront's API as reported by the community; not confirmed in Adobe's pages) of a custom field. Planning: the select
+-- option ID of a Planning field, in a Workspace. IDs differ per stage, so a row is per Core environment or per Planning Workspace.
+-- load_id_map (migration 010) records what the loader CREATED; this records what was READ BACK, with the name Workfront reports.
+CREATE TABLE option_workfront_ids (
+    airtable_field_id TEXT NOT NULL,
+    choice_id TEXT NOT NULL,
+    system TEXT NOT NULL CHECK(system IN ('core', 'planning')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_id TEXT NOT NULL DEFAULT '',   -- the Planning Workspace (empty for Core)
+    workfront_option_id TEXT NOT NULL,       -- the Core POPT ID, or the Planning option ID
+    workfront_name TEXT,                     -- the name Workfront reports for it
+    position INTEGER,                        -- its position in Workfront's order
+    pulled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (airtable_field_id, choice_id, system, environment, workspace_id),
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_option_workfront_ids_wf ON option_workfront_ids(system, workfront_option_id);

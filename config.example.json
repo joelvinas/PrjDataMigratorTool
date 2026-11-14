@@ -8,5 +8,11 @@
     }
   ],
   "db_path": "db/migration.db",
-  "requests_per_second": 4.5
+  "requests_per_second": 4.5,
+  "workfront": {
+    "core": {
+      "sandbox1": {"base_url": "https://YOURCOMPANY.sb01.workfront.com", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"}
+    },
+    "planning": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE"}
+  }
 }

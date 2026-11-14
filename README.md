@@ -1,6 +1,6 @@
 # Airtable → Workfront Planning Migration Control Plane
 
-Current state: **Stage 1 (Data), Stage 2 (Forms) and Stage 3 (Automations) are built and working** (version 1.13; Stages 2 and 3 are manual recorders), inside a **multi-page site** with a left navigation panel: Setup, Stage 1: Data, placeholder pages for Stage 2 (Forms) and Stage 3 (Automations), a slot for Stage 4 (Map and load), and the API call log pinned at the bottom. Stages 2 to 4 are **not built**; see "Roadmap and structure" below.
+Current state: **Stage 1 (Data), Stage 2 (Forms) and Stage 3 (Automations) are built and working** (version 1.14; Stages 2 and 3 are manual recorders), plus the **Field names** page (the naming rules and review), inside a **multi-page site** with a left navigation panel: Setup, Stage 1: Data, placeholder pages for Stage 2 (Forms) and Stage 3 (Automations), a slot for Stage 4 (Map and load), and the API call log pinned at the bottom. Stages 2 to 4 are **not built**; see "Roadmap and structure" below.
 
 A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to Adobe Workfront Planning.
 
@@ -54,10 +54,26 @@ airtable-migration-control/
 ├── stage1.html  stage1.js       Stage 1: Data (steps 3 to 6)
 ├── stage2.html  stage2.js       Stage 2: Forms (the form recorder, reports and field usage)
 ├── stage3.html  stage3.js       Stage 3: Automations (the automation recorder, reports and field usage)
+├── names.html  names.js         Field names: review table and field names against the naming rules and approve them
+├── fieldnames.py                field and table name validator: the rules and the pipeline (pure functions, no I/O)
+├── fieldnames_io.py             validator command line: CSV import, read-only database loader, report files
+├── emojitext.py                 emoji handling shared by names, labels and descriptions: remove, or replace with the Unicode name
+├── loadplan.py                  the load plan: everything the migration would create in Workfront, with temporary IDs and a status (pure)
+├── loadrun.py                   runs a plan: sandbox by default, idempotent, dry run, one failure never stops it (pure; real transports not built)
+├── loadconfig.py                reads the Workfront credentials from config.json; never shows or stores a secret
+├── loader.py                    the loader command line: plan and dry-run (read-only; nothing is sent to Workfront)
+├── fieldgroups.py               consolidation rules: validate a group, merged members, survivors (pure)
+├── fieldcompare.py              compares the values of fields in one table from a saved record file: counts and record IDs only (pure)
+├── fielddesc.py                 field descriptions in the lineage syntax: generate, parse back, validate (pure functions)
+├── fieldnames_report.py         the HTML report (pure: builds one self-contained document from the review)
+├── fieldnames_store.py          the review page's saved decisions: approvals, abandon, import, settings, exports (tables from migration 007)
 ├── editor-kit.js                shared by Stages 2 and 3: type-ahead picker and the Markdown text box with live preview
 ├── log.html  log.js             API call log (its own page, last in the side panel)
 ├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
 ├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
+├── docs/
+│   ├── FIELD_NAMING_RULES.md    the naming rules in plain language (generated from the validator's rule list)
+│   └── LOADER_PLAN.md           the loader plan: what is built, what Adobe's documentation confirms, what is not verified, decisions needed
 ├── start.bat                    Windows launcher (finds Python, creates config.json, opens the browser)
 ├── config.example.json          copy to config.json and add your token
 ├── .gitignore                   excludes config.json, *.db, *.sqlite, data_extract/ (databases live in db/)
@@ -71,12 +87,24 @@ airtable-migration-control/
 │   ├── migration_004_add_attachment_stats.sql   the airtable_attachment_stats table
 │   ├── migration_005_add_form_specs.sql   Stage 2: form_specs, form_items, form_logic, form_links
 │   ├── migration_006_add_automation_specs.sql   Stage 3: automation_specs, automation_items, automation_logic, automation_field_refs, automation_links
-│   └── apply_migrations.py             applies all six to an existing database (safe to repeat)
+│   ├── migration_007_add_field_names.sql   Field name validator: field_names, table_names, name_events
+│   ├── migration_008_add_table_scope_and_targets.sql   Field names page: table_scope, table_targets (human decisions about scope and target)
+│   ├── migration_009_add_field_groups.sql   Field names page: field_groups, field_group_members (field consolidation)
+│   ├── migration_010_add_load_id_map.sql   applied 2026-11-14: load_id_map (Workfront IDs against temporary IDs, per environment)
+│   ├── migration_011_add_table_core_objects.sql    applied 2026-11-14: table_core_objects
+│   ├── migration_012_add_core_target_type.sql      applied 2026-11-14: field_names.core_target_type (one new column)
+│   ├── migration_013_add_field_relationships.sql   applied 2026-11-14: field_relationships
+│   ├── migration_014_add_option_names.sql          applied 2026-11-14: option_names, option_workfront_ids
+│   └── apply_migrations.py             applies all nine to an existing database (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
     ├── sample_schema_field_options.json   one field of nearly every type, with settings
     ├── mock_airtable.py             fake Airtable so you can test with no real data
+    ├── regression/fieldnames_test.py, fieldnames_io_test.py, fieldnames_store_test.py   the validator's suites ("names"); no server needed
+    ├── regression/names_api_test.py   the Field names endpoints and page ("namesapi"), against the mock server
+    ├── regression/fieldgroups_test.py   consolidation rules and merged descriptions ("names"); no server needed
+    ├── regression/names_ui_test.py    the Field names page in a real browser ("namesui"); needs Playwright
     ├── run_regression.py            runs every suite below against the mock, in throwaway copies of the project
     ├── regression/                  the suites: e2e2, report_test, views_test, extract_test, attach_test, attstats_test, ui_test
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
@@ -107,7 +135,7 @@ airtable-migration-control/
 3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
 4. Stop with Ctrl+C.
 
-Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/log` (API call log). The left panel links them; Stage 4 appears as a greyed "planned" entry. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
+Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/names` (Field names), `/log` (API call log). The left panel links them; Stage 4 appears as a greyed "planned" entry. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
 
 Without `config.json`, or with an empty token, the page shows a setup message and still works for everything that does not call Airtable (for example, pasted schema JSON).
 
@@ -334,7 +362,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 ## Automated regression suites (no real data, about a minute)
 
-`python test/run_regression.py` starts the mock Airtable and the app in a throwaway copy of the project, runs every suite (about 450 checks: API and security behavior, the database schema, load order, reports, record saving, attachment download and statistics, and browser tests of the UI and of the form and automation recorders) and prints one line per suite. It never touches your `config.json` or databases. `ui_test` needs Playwright and is skipped without it. Run it after every change. A single suite: `python test/run_regression.py attach`.
+`python test/run_regression.py` starts the mock Airtable and the app in a throwaway copy of the project, runs every suite (about 450 checks before the name validator's two suites were added: API and security behavior, the database schema, load order, reports, record saving, attachment download and statistics, and browser tests of the UI and of the form and automation recorders) and prints one line per suite. It never touches your `config.json` or databases. `ui_test` needs Playwright and is skipped without it. Run it after every change. A single suite: `python test/run_regression.py attach`.
 
 ## Test plan (no real data, about 5 minutes)
 
@@ -342,7 +370,7 @@ It rebuilds the schema from the key, loads it into a scratch database, and compa
 
 Steps 1 and 2 are on Setup (`/setup`); steps 3 to 6 are on Stage 1 (`/stage1`), where the Base ID picker is repeated at the top. The base you pick on either page is kept as you move between them.
 
-1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 18 tables, all with 0 rows, and foreign keys on.
+1. Start the app. On Setup, in step 1 enter `test.db`, click Connect, then "Create new database here". Expect 25 tables, all with 0 rows, and foreign keys on.
 2. Step 2: base ID `appSampleBase001`. Step 3: choose "Upload or paste schema JSON", load `test/sample_schema.json`, Ingest. Expect 10 tables, 26 fields, all new.
 3. Ingest the same file again. Expect 0 new, all refreshed, field count unchanged.
 4. Step 4, "Literal", Recompute. Expect:
@@ -445,6 +473,82 @@ Airtable's API does not return automations at all, so, like forms, they are reco
 
 **Not captured.** Anything Airtable shows only inside the automation editor that you do not record: run history, and the exact internal token names between steps (type them as text if you want them documented).
 
+## Field name validator
+
+Migration to Workfront needs every field and table name to follow a documented standard. The validator checks names that have already been renamed (or the Airtable originals) against that standard, **proposes** repairs, and flags what a person must decide. It never changes a name on its own. Status: the rules, the import, the reports, the command line and the review page (`/names`, with saved approvals and the abandon action) are built and tested. Not built yet: setting the conflict rule's effect when records are loaded (Stage 4).
+
+**Three targets, each validated separately:** the Workfront Planning field name, the Workfront Core custom field name, and the Workfront Core custom field label. Names are ASCII-safe (an allowlist of letters, digits, spaces and hyphens, because data exported to CSV without the right encoding corrupts anything else), may not start with a digit, and must be unique within a table. Labels keep the original text except the characters Adobe documents as unsupported in labels (`[ ] ( ) : { }` and control characters) and emoji. The full list of rules, with an example for each, is in [docs/FIELD_NAMING_RULES.md](docs/FIELD_NAMING_RULES.md); it is generated from the same rule list the validator runs, so the two cannot disagree.
+
+**Three verdicts.**
+
+- `PASS`: complies.
+- `AUTO_FIXABLE`: the only problems are the special characters `` ' " ` ~ ! @ # $ % ^ & * ( ) [ ] { } ; : < > , . / ? `` (deleted, with nothing in their place), whitespace characters (a no-break space, tab, new line, carriage return, form feed or vertical tab, each becoming a plain space), repeated or edge spaces, or a renamed table's name inside a lookup, rollup or link field's name (replaced with the table's approved new name, found through the schema, never by guessing).
+- `NEEDS_HUMAN`: everything else: accents and emoji, underscores, `1Q` to `Q1`, a leading number, a duplicate name, a name that is too long, a mention of a renamed table with no schema path.
+
+A proposed repair is shown beside the original for both non-PASS verdicts, and nothing is applied without approval. Auto-fixable repairs may be approved as a batch, the rest one at a time. If letters outside A to Z have to be removed, the proposal says so, so the spelling can be checked.
+
+**Order.** Every in-scope table name must be approved before any field is reviewed (an unchanged name is approved in one click). Then, in a fixed order: table-name swap, character cleanup, leading digits, and last the duplicate check on the repaired names (case-insensitive, per table, covering any number of members). The middle three can be switched off to see their effect; the baseline checks cannot.
+
+**Data presence.** Each field in a duplicate group, and each row of the report, shows the Airtable type, the number of records with a value, the null count and the cardinality (a capped cardinality is shown as `1,000+`, never as a count). A field with no values can be considered for abandoning, which is a recorded human decision. Abandon is not offered for a field that has not been profiled since it was last seen in the schema (a re-ingest means profiling again), or for a checkbox, which is never empty.
+
+**The Field names page** (`/names`, version 1.14). Pick the base, enter your initials (every decision records who, when and why), then work down the page:
+
+- **A. Rules and presets.** The Planning name, the Core name and the Core label are configured separately, one column each (by default they behave the same). Each has its own step toggles (table-name swap, character cleanup, leading digits), maximum length (Planning cannot exceed Adobe's documented 250), whether a name may start with a digit, the leading-digit preset and word, and extra punctuation to allow (names) or to remove (labels); labels also choose whether to keep the `1Q` style. Each name also chooses what to do with an emoji: remove it (the default) or replace it with its word. The table number prefix preset is shared. The count under each step is how many names it changes for that column. Changing a control previews the effect without saving; decisions can only be made under saved settings, so every run can be reproduced.
+- **B. Import.** Upload the renamed-names CSV (described below). Problems are listed on the page; a name you already approved is never overwritten.
+- **C. Table names.** Approve every in-scope table name first. A table with no scope decision is shown as **undecided**, which is different from **out** (skipped, no decision needed); undecided tables are still checked. Set a table's scope and target here too. Approve one at a time (typing a different name if you want one), or approve all unchanged or all auto-fixable names in one click. Field review stays locked until every in-scope table is approved.
+- **D. Field review.** One grid per name (Planning name, Core name, Core label) with the original, your imported name, the proposed repair, the check and reasons, the data presence and the status. Approve a name as proposed or type another; the server re-checks it, including its duplicate group, and refuses a name that would still collide. Flag a name for later, or withdraw an approval with a reason. Approve everything that passes or is auto-fixable in one click. An approved name that no longer passes (because a setting changed) is flagged.
+- **E. Duplicate groups and consolidation.** Each group is one block with every member's original and repaired name side by side and its data presence. Rename a member or abandon one that has no values; the check runs again on what remains. **Compare values** tells you whether the duplicates really hold the same data (see below), so you can decide between abandoning one, consolidating them, or keeping both under different names. **Consolidate fields** (below the groups, also reachable from a group's *Consolidate these* button) turns several fields of one table into one (see below).
+- **F. Descriptions.** Every field gets a description in the lineage syntax (see below). Edit one by hand and Save to keep your text, or Reset to return to the generated one; a description that is not in the syntax or has non-ASCII characters is flagged.
+- **G. Reports.** The HTML report (preview it in the page, or download it as `.html` or `.mhtml`), and the CSVs, the summary and the rules document, or all of them as a zip.
+
+**Consolidating fields.** Sometimes several Airtable fields should become **one** Workfront field (two names for the same data, or one concept spread over several fields). A consolidation group records the fields (2 to 8, all in one table), which one **survives**, why, and a **conflict rule** for the loader to use later when two members are both filled and differ: *a person resolves each record* (the default, so nothing is decided silently), *keep the survivor's value*, or *use the first non-empty value, survivor first*. The merged members leave the name review, the duplicate checks and the counts (the summary says how many are consolidated), the survivor is reviewed normally, and the survivor's description lists every origin (`Origins: Orders.Phone; Orders.Telephone; Orders.Tel No.`). A field can be in only one group, an abandoned field cannot join one, a field in a group cannot be abandoned, approved, flagged or described, and a group can be dissolved at any time (its history stays in `name_events`). The CSV report marks merged fields `CONSOLIDATED` with a `consolidated_into` column, and the HTML report has a Consolidated fields section. Compare the fields' values first if you are not sure they hold the same data. This uses **migration 009** (`field_groups`, `field_group_members`; [sql/migration_009_add_field_groups.sql](sql/migration_009_add_field_groups.sql)), which is part of the schema library, the embedded DDL and `apply_migrations.py`. An existing database gets the tables from `python sql/apply_migrations.py path/to/your.db` (back it up first); until then the panel says so and nothing can be saved. Endpoints: `POST /api/names/groups/create` and `/api/names/groups/dissolve`.
+
+**Comparing the values of duplicate fields.** A duplicate group whose members all have data cannot be resolved by abandoning one, so **Compare values** reads the saved record file (the JSON written by profiling with *Also save every record* ticked) and, for every pair of members, counts the records where both are empty, only one is filled, both are filled and the same, both are filled and the same apart from list order, case, spacing or number-versus-text, and both are filled and different. It then says in plain language what that means: *never filled together* (each record has a value in at most one, so they can be merged without losing anything), *identical*, *no conflicts* (they agree wherever both are filled), or *N records differ*, and gives up to five record IDs per bucket to look up in Airtable. Emptiness follows the profiler (missing, null, an empty string or an empty list; a checkbox is never empty), an attachment is compared by file name and size, and the file's capture time and record count are shown, with a warning when it is out of step with the last profile. **Only counts and record IDs are ever returned.** The file is read into memory, compared and discarded; no value reaches the response, the database, a log or the page (the tests plant distinctive values and search for them everywhere). It needs the saved file for the table and compares 2 to 8 fields of one table. The endpoint is `POST /api/names/compare`.
+
+**HTML report.** One self-contained document, in the same style as the load-order report, for the client and for auditors: about this report, a summary (verdicts and approval status per name, the fields breaking each rule, the names each step would change), the settings in force for each name, the table names with scope and approvals, one grid per name (original, your name, approved or proposed name, check, status and data presence), duplicate groups with every member side by side, where your names differ from what the rules alone give, the descriptions, abandoned fields, a summary of the decisions recorded (by kind and reviewer), the rules with examples, the method with suggested audit checks, and a blank sign-off block. It is built from the saved settings and decisions, every value is HTML-escaped, and it holds no record values. While any in-scope table name is unapproved it says field review has not started and stops after the table names. It is available in the page and at `/api/names/report.html` (add `download=1` to save it) and `/api/names/report.mhtml`; the command line writes the CSVs only, because it works from a spreadsheet you have not imported yet.
+
+**Descriptions (lineage syntax).** `fielddesc.py` generates, for every field, `Source: Airtable. Origins: Orders.Amount; Customers.Name.`: the original Airtable table and field names the data comes from, so a client can trace any new field back to where it was. A plain field lists itself; a lookup or rollup lists the field it reads in the linked table, then the link field it reads through; a count lists the link field; a formula lists the fields it references. A name containing a period, semicolon or double quote is wrapped in double quotes (inner quotes doubled) so every description can be read back exactly. The setting *Include Airtable's own field description* appends it as `Airtable description: ...` (off by default). An emoji in an origin name is removed, or replaced with its word (`Hot Beverage`), as the *Emoji in generated descriptions* setting says. Descriptions are generated from the schema each time; only a hand-edited one is saved (`field_names.description`, with who, when and why in `name_events`). `validate_description()` flags empty text, control characters, non-ASCII characters and text that is not in the syntax; it will apply a length check once one is confirmed (Adobe documents no limit, so none is applied yet). The CSV report has `description`, `description_source` (generated or saved) and `description_problems` columns, and the command line takes `--include-airtable-description`.
+
+**Abandon** is enforced by the server, not just the page: it needs a reason, and only a field that was profiled since it was last seen in the schema, has no values and is not a checkbox qualifies. Restoring an abandoned field is also recorded. Every approval, withdrawal, flag, import, abandon and settings change is a row in `name_events` (append-only, with who and when).
+
+**Table scope and target (migration 008).** Which tables are in scope is a human decision kept apart from the ingested table definition, so a re-ingest can never overwrite it. `table_scope` records in or out with who, when and why (no row means **undecided**, which is different from out), and `table_targets` records whether an in-scope table lands in Workfront Planning only or in Planning plus Core. Both are set from section C of the page; **Out** needs a reason, and every change is also written to `name_events`. Out-of-scope tables and their fields are skipped, and any in-scope field that links to, or names, an out-of-scope table is listed for a human decision, because a link to a dropped table has nowhere to point. An existing database gets the tables from `python sql/apply_migrations.py path/to/your.db` (back it up first); until then every table shows as undecided and the scope buttons are off.
+
+**Command line** (read-only: the database is opened read-only and no record value is read):
+
+```
+python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import renames.csv --out out/names
+```
+
+- `--import` takes a CSV with the headers `field_id, old_name, new_name, new_label, old_dataType, new_dataType`, matched to the database by Airtable field ID. `new_name` is validated as both the Planning name and the Core name; `new_label` as the label. Unmatched, repeated or blank IDs, fields missing from the spreadsheet, a stale `old_name`, and a data type that disagrees with the database are listed in `names_import_problems.csv`. A file that is not UTF-8 is read as Windows-1252 and the summary says so.
+- It writes `names_report.csv` (every field: verdict, rules, proposed repair and reasons for each target, plus data presence), `names_diff.csv` (where your names differ from what the rules alone produce), `names_duplicates.csv`, `names_tables.csv`, `names_import_problems.csv`, `names_summary.txt` (counts per verdict and per rule, and how many names each step changed) and `FIELD_NAMING_RULES.md`. The CSVs open in Excel as UTF-8, and a cell that Excel would treat as a formula is prefixed with an apostrophe.
+- Table approval: the command line reads approved table names from migration 007's `table_names`. Until every in-scope table is approved it writes the table report and stops with exit code 2. `--draft` previews the field results anyway and marks the summary DRAFT.
+- Emoji: `--emoji-mode remove|word` for names and labels (per name with `--target-option core_label.emoji_mode=word`) and `--description-emoji-mode remove|word` for descriptions. The word is the emoji's official Unicode name in title case, so the result is deterministic.
+- Per-name options: `--target-option planning_name.allow_leading_digit=true`, `core_name.max_len=200`, `planning_name.extra_allowed=&`, `core_label.extra_blocked=%` (repeatable; the names are `planning_name`, `core_name`, `core_label`). A value that is not allowed (Planning above 250, letters as extra punctuation) stops the run with the reason.
+- Other options: `--table-prefix drop|end|plain` (what to do with a number prefix such as `1.2.3 Orders`; the default moves it to the end), `--digit-style move_to_end|prefix_word` with `--digit-word`, `--no-table-swap`, `--no-char-cleanup`, `--no-leading-digits`, `--label-convert-quarter`, and `--skip-table ID` (repeatable).
+
+**Schema (migration 007).** [sql/migration_007_add_field_names.sql](sql/migration_007_add_field_names.sql) adds three tables and changes nothing that exists: `field_names` (one row per Airtable field ID: chosen names, approval state per target, description, target type, abandon decision and audit fields), `table_names` (the approved new table names) and `name_events` (an append-only record of every approval, rejection and abandon, and of the settings in force, with who, when and why). It is part of `DatabaseSchemaLibrary.sql`, the DDL embedded in `server.py` and `apply_migrations.py`, so a new database has the tables and an older one gets them from `python sql/apply_migrations.py`. No record values are stored.
+
+**Limits not confirmed by Adobe.** The Planning field name limit of 250 characters is documented. The documentation states no length limit for Core custom field names or labels, so 255 is a placeholder, and the list of reserved names is empty until an authoritative source is found. Adobe requires a Core custom field API name to be unique across the whole Workfront instance; the validator checks uniqueness within a table only, and the cross-table check is a separate step.
+
+**Tests.** `python test/run_regression.py names` runs the validator's suites (the pure rules; the import, database loader, reports and command line; the saved decisions; the descriptions; emoji handling; value comparison; and consolidation rules) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. `namesui` drives the real page in Chromium through the whole workflow (the table-approval gate, initials, previewing and saving settings, the emoji option, filters, approving, duplicate groups and value comparison, withdrawing, importing, descriptions, scope, the report preview and downloads, and that a hostile field name never runs) and, like the other browser suites, is skipped when Playwright is not installed.
+
+## The loader (Stage 4, begun)
+
+Stage 4 will create the target in Workfront. Only the first step is built: a **load plan** and a **dry run**, which send nothing anywhere. Full detail, including what Adobe's documentation confirms and what is not verified, is in [docs/LOADER_PLAN.md](docs/LOADER_PLAN.md).
+
+```
+python loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX
+python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env sandbox
+```
+
+- **`plan`** (read-only) writes `load_plan.csv` and a summary: every Planning record type, Core custom form, field and select option (in Airtable's order) the migration would create, plus the fields that link a Core object to its Planning record, each with a **temporary ID** that depends only on the Airtable IDs (so it is the same on every run) and a **status**: `ready`; `hold` (a design decision is open: a derived field, a relationship, an attachment, the Core object type); or `blocked` (a table or name is not approved, there is no target data type, or scope or target is undecided), with the reasons.
+- **`dry-run`** walks the plan the way a real run would and says what it would create. The environment defaults to **sandbox**; a production dry run is allowed because it changes nothing, but a real production run will need the exact phrase `CREATE IN PRODUCTION`.
+- **The runner's rules** are built and tested with a fake transport: a Workfront ID is written back against the temporary ID at once, so a restart creates nothing twice; one failed item never stops the run (its message has any credential removed, and what depends on it is skipped); dry run is the default.
+- **`run` is refused** with an explanation: creating anything is not implemented, because the request shapes for Workfront Planning and Workfront Core are not verified and no credentials are configured.
+- **Select option names** follow the label rules; a name that breaks them is put on hold with the proposed repair.
+- **Credentials:** the `workfront` section of `config.json` (see `config.example.json`) holds the Core credential per environment and the Planning bearer token and Workspace ID (Planning has Workspaces, not environments). `python loader.py config` says only whether each is configured. They are never stored, logged or shown in the browser. Nothing uses them yet.
+- **Schema added for the loader (applied and folded into the schema library, 2026-11-14):** migration 010 `load_id_map` (Workfront IDs against temporary IDs, per stage); 011 `table_core_objects` (project, request or task per table); 012 the column `field_names.core_target_type` (the Core data type, beside the Planning one); 013 `field_relationships` (links defined by the schema, which side is the real relationship, who approved); 014 `option_names` and `option_workfront_ids` (approved option names, and option IDs read back from Core and Planning). Nothing reads them yet except the migrations check. `sql/apply_migrations.py` applies 001 to 014 to an older database.
+
 ## Troubleshooting
 
 **`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
@@ -463,7 +567,8 @@ Airtable's API does not return automations at all, so, like forms, they are reco
 | Stage 1: Data | `/stage1` | Schema, load order, profiling, record and attachment capture (steps 3 to 6, plus the open runbook items) | Built |
 | Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
-| Stage 4 (anticipated): Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning | Slot in the side panel only; `workfront_fields` and `field_crosswalk` exist, empty |
+| Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14) |
+| Stage 4: Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.14): the load plan and dry run are built (`loader.py`); nothing is created in Workfront yet. See `docs/LOADER_PLAN.md` |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 
 Decisions made:

@@ -35,6 +35,9 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import fieldcompare as names_compare
+import fieldnames_report as names_report
+import fieldnames_store as names_store
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import formatdate
@@ -66,7 +69,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.13"
+APP_VERSION = "1.14"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -367,6 +370,235 @@ CREATE TABLE api_call_log (
 
 CREATE INDEX idx_api_call_log_time ON api_call_log(timestamp);
 CREATE INDEX idx_api_call_log_status ON api_call_log(success, http_status);
+
+-- 9. Field and table name review (migration 007: the field name validator's saved decisions)
+-- One row per Airtable field (keyed by the stable Airtable field ID): the names a person chose or imported, the approval state of each
+-- target, the description and Workfront type, and the abandon decision. Names are validated per target (see fieldnames.py).
+CREATE TABLE field_names (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,
+    planning_name TEXT,               -- Workfront Planning field name (NULL until imported or approved)
+    core_name TEXT,                   -- Workfront Core custom field name
+    core_label TEXT,                  -- Workfront Core custom field label
+    planning_name_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(planning_name_status IN ('unreviewed', 'approved', 'needs_human')),
+    core_name_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(core_name_status IN ('unreviewed', 'approved', 'needs_human')),
+    core_label_status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(core_label_status IN ('unreviewed', 'approved', 'needs_human')),
+    description TEXT,                 -- generated from the lineage syntax, then hand-edited
+    target_type TEXT,                 -- target Workfront data type
+    core_target_type TEXT,            -- the Workfront Core data type (migration 012); target_type is the Planning data type
+    planning_name_verdict TEXT,       -- cache of the last validation: PASS, AUTO_FIXABLE or NEEDS_HUMAN (always recomputable)
+    core_name_verdict TEXT,
+    core_label_verdict TEXT,
+    verdict_rules TEXT,               -- JSON: rule IDs per target from the last validation
+    validated_at TIMESTAMP,
+    abandoned INTEGER NOT NULL DEFAULT 0,   -- 1 = a person abandoned this field (never automatic)
+    abandoned_by TEXT,
+    abandoned_at TIMESTAMP,
+    abandoned_reason TEXT,
+    import_batch TEXT,                -- which spreadsheet import last set the names
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_names_abandoned ON field_names(abandoned);
+
+-- One row per Airtable table: the new table name a person approved. The suggestion itself is always recomputed, never stored.
+-- The table-name swap in field names reads this (approved name first, else the suggestion).
+CREATE TABLE table_names (
+    airtable_table_id TEXT NOT NULL PRIMARY KEY,
+    new_table_name TEXT,
+    status TEXT NOT NULL DEFAULT 'unreviewed' CHECK(status IN ('unreviewed', 'approved', 'needs_human')),
+    approved_by TEXT,
+    approved_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_table_id) REFERENCES airtable_tables(table_id)
+);
+
+-- Append-only audit trail of every human decision and of the settings in force (toggles and presets), so any run can be reproduced.
+-- Rows are never updated or deleted. Current settings for a base = its newest 'settings' event. No record values are ever stored here.
+CREATE TABLE name_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL CHECK(subject_type IN ('field', 'table', 'settings')),
+    subject_id TEXT NOT NULL,         -- Airtable field ID, Airtable table ID, or the base ID for settings
+    event_type TEXT NOT NULL CHECK(event_type IN ('import', 'approve', 'reject', 'needs_human', 'abandon', 'unabandon', 'settings')),
+    target TEXT,                      -- planning_name, core_name, core_label (NULL when it applies to the whole field or table)
+    old_value TEXT,
+    new_value TEXT,                   -- for 'settings': the JSON of the toggles and presets
+    actor TEXT NOT NULL,              -- who decided (free text: the app has no logins)
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_name_events_subject ON name_events(subject_type, subject_id);
+
+-- 10. Table scope and target decisions (migration 008: human decisions kept apart from the ingested table definitions)
+-- Which tables are relevant is a human decision, not part of the ingested table definition, so it lives here and a schema re-ingest can
+-- never overwrite it. A table with NO row is UNDECIDED, which is different from 'out'. The name validator and everything downstream run on
+-- every table that is not explicitly 'out'.
+CREATE TABLE table_scope (
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('in', 'out')),
+    decided_by TEXT NOT NULL,         -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    PRIMARY KEY (base_id, table_id),
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_scope_decision ON table_scope(base_id, decision);
+
+-- For each in-scope table: does it land in Workfront Planning only, or in Planning plus a Workfront Core presence (attachments, a front-facing
+-- data entry form, or a defined major workflow)? A table with no row has no target decision yet.
+CREATE TABLE table_targets (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    target TEXT NOT NULL CHECK(target IN ('planning_only', 'planning_and_core')),
+    decided_by TEXT NOT NULL,
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_targets_base ON table_targets(base_id);
+
+-- 11. Field consolidation groups (migration 009: several fields of one table become one Workfront field)
+-- A consolidation group is several Airtable fields of ONE table that will become ONE Workfront field. A person chooses the survivor (the
+-- field whose name and settings carry forward), records why, and says what the loader should do later when two members are both filled
+-- and differ. Merged members drop out of the name review and the duplicate checks, and the survivor's description lists every origin.
+-- A group can be dissolved at any time (the rows are deleted; the decision history stays in name_events, which is append-only).
+CREATE TABLE field_groups (
+    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    survivor_field_id TEXT NOT NULL,
+    conflict_rule TEXT NOT NULL DEFAULT 'review' CHECK(conflict_rule IN ('review', 'survivor_wins', 'first_filled')),
+                                      -- for the loader, when two members are both filled and differ:
+                                      -- 'review' = a person resolves each such record, 'survivor_wins' = keep the survivor's value,
+                                      -- 'first_filled' = use the first non-empty value in member order
+    reason TEXT NOT NULL,             -- why these fields are being consolidated
+    decided_by TEXT NOT NULL,         -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id),
+    FOREIGN KEY (survivor_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_groups_table ON field_groups(base_id, table_id);
+
+-- The members of each group, including the survivor. A field can be in at most one group (field_id is the primary key).
+CREATE TABLE field_group_members (
+    group_id INTEGER NOT NULL,
+    field_id TEXT NOT NULL PRIMARY KEY,
+    member_order INTEGER NOT NULL,    -- 0 = the survivor; the others in the order their origins are listed and 'first_filled' is applied
+    FOREIGN KEY (group_id) REFERENCES field_groups(group_id),
+    FOREIGN KEY (field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_group_members_group ON field_group_members(group_id);
+
+-- 12. The load ID map (migration 010: Workfront IDs against the loader's temporary IDs, per stage)
+-- Every item the loader creates in Workfront (a Planning record type or field, a Core custom field, a select option) has a TEMPORARY ID that
+-- depends only on the Airtable IDs (see loadplan.py), such as P-F-fldXXXX. The moment a create call returns, its Workfront ID is written here
+-- against the temporary ID, and a restart skips every row that already has one, so nothing is ever created twice. One row per temporary ID
+-- per stage: Core has four environments; Workfront Planning has NO environments, only Workspaces (owner, 14 November 2026): everything goes into
+-- one Workspace treated as isolated for Dev, which is then either wiped and recreated as a UAT Workspace or promoted to UAT. So 'environment' is the
+-- stage label ('sandbox1', 'sandbox2', 'preview' and 'production' for Core, 'dev' and 'uat' for Planning) and workspace_id names the Planning Workspace the IDs belong to.
+-- Promoting Dev to UAT relabels that Workspace's rows (a person's recorded decision); a wipe and recreate makes new rows. Each stage has its own IDs. Option rows (kind 'option') are rows
+-- like any other, with their position in Airtable's order, so every select field's options are recorded by ID in order.
+-- Every create call's result is ALSO logged against its temporary ID in runbook_logs (failing_component = the temporary ID), the existing log.
+-- Nothing here holds a credential or a record value.
+CREATE TABLE load_id_map (
+    temp_id TEXT NOT NULL,            -- for example P-T-tblXXXX, P-F-fldXXXX, C-F-fldXXXX, P-O-fldXXXX-selXXXX
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_id TEXT,                -- the Planning Workspace these IDs belong to (NULL for Core)
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    kind TEXT NOT NULL CHECK(kind IN ('record_type', 'form', 'field', 'option')),
+    base_id TEXT NOT NULL,
+    table_id TEXT,                    -- the Airtable table the item belongs to
+    airtable_field_id TEXT,           -- the Airtable field (NULL for a record type or form, and for fields the migration adds itself)
+    parent_temp_id TEXT,              -- the record type (for a Planning field) or the field (for an option)
+    position INTEGER,                 -- an option's position in Airtable's order
+    name TEXT NOT NULL,               -- the name sent to Workfront
+    workfront_id TEXT,                -- NULL until the create call returns; once set, the item is never created again
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'created', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,                  -- a short message with any credential removed
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (temp_id, environment)
+);
+CREATE INDEX idx_load_id_map_base ON load_id_map(base_id, environment);
+CREATE INDEX idx_load_id_map_field ON load_id_map(airtable_field_id);
+
+-- 13. The Core object type of each table (migration 011)
+-- A table that has a Workfront Core presence (table_targets.target = 'planning_and_core') becomes ONE kind of Core object: a project, a request
+-- or a task. That is a human decision, recorded with who, when and why. A table with no row has no Core object type yet, and the loader keeps
+-- its Core form on hold until it does.
+CREATE TABLE table_core_objects (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    core_object_type TEXT NOT NULL CHECK(core_object_type IN ('project', 'request', 'task')),
+    decided_by TEXT NOT NULL,         -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_core_objects_base ON table_core_objects(base_id);
+
+-- 14. Relationships between tables, defined by the Airtable schema and stored (migration 013)
+-- Relationships are DEFINED BY THE AIRTABLE SCHEMA (airtable_fields.linked_table_id and inverse_link_field_id) and are STORED here so the
+-- loader and the reports read one decided answer. The tool proposes: one row per link field, with its paired field when the schema reports
+-- one. Exactly one side of a two-way pair is the real Planning relationship (is_primary = 1); the other side is the reverse view. A person
+-- approves (approved_by, approved_at); nothing is decided silently, and a row that is not approved keeps the loader's second pass on hold.
+-- No record values are stored here.
+CREATE TABLE field_relationships (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,   -- the link field (multipleRecordLinks)
+    base_id TEXT NOT NULL,
+    from_table_id TEXT NOT NULL,                   -- the table the link field is on
+    to_table_id TEXT NOT NULL,                     -- the table it links to (airtable_fields.linked_table_id)
+    inverse_field_id TEXT,                         -- the paired field on the other table, when the schema reports one (NULL = one-way)
+    cardinality TEXT CHECK(cardinality IN ('one', 'many')),   -- how many records this side may link (from prefers_single_record_link)
+    is_primary INTEGER NOT NULL DEFAULT 1 CHECK(is_primary IN (0, 1)),   -- 1 = this side creates the relationship; 0 = the reverse view
+    source TEXT NOT NULL DEFAULT 'schema' CHECK(source IN ('schema', 'manual')),
+    approved_by TEXT,                              -- NULL until a person approves
+    approved_at TIMESTAMP,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id),
+    FOREIGN KEY (from_table_id) REFERENCES airtable_tables(table_id),
+    FOREIGN KEY (to_table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_field_relationships_base ON field_relationships(base_id);
+CREATE INDEX idx_field_relationships_inverse ON field_relationships(inverse_field_id);
+
+-- 15. Approved select option names and the option IDs read back from Workfront (migration 014)
+-- Option names follow the Core label rules. The tool proposes a repair for a name that breaks them; a person approves it here, with who, when
+-- and why. The Airtable option is identified by its stable choice ID (airtable_fields.choices_json), never by its name. An option whose name
+-- breaks the rules and has no approved row stays on hold in the load plan. No record values are stored.
+CREATE TABLE option_names (
+    airtable_field_id TEXT NOT NULL,
+    choice_id TEXT NOT NULL,          -- the Airtable select option's ID
+    approved_name TEXT NOT NULL,      -- the name to create in Workfront
+    approved_by TEXT NOT NULL,        -- initials or a short name (the app has no logins)
+    approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    PRIMARY KEY (airtable_field_id, choice_id),
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+
+-- The option IDs PULLED BACK from Workfront, so what exists there can be compared with what was approved. Core: the option object (POPT, a
+-- parameter option, per Workfront's API as reported by the community; not confirmed in Adobe's pages) of a custom field. Planning: the select
+-- option ID of a Planning field, in a Workspace. IDs differ per stage, so a row is per Core environment or per Planning Workspace.
+-- load_id_map (migration 010) records what the loader CREATED; this records what was READ BACK, with the name Workfront reports.
+CREATE TABLE option_workfront_ids (
+    airtable_field_id TEXT NOT NULL,
+    choice_id TEXT NOT NULL,
+    system TEXT NOT NULL CHECK(system IN ('core', 'planning')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_id TEXT NOT NULL DEFAULT '',   -- the Planning Workspace (empty for Core)
+    workfront_option_id TEXT NOT NULL,       -- the Core POPT ID, or the Planning option ID
+    workfront_name TEXT,                     -- the name Workfront reports for it
+    position INTEGER,                        -- its position in Workfront's order
+    pulled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (airtable_field_id, choice_id, system, environment, workspace_id),
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_option_workfront_ids_wf ON option_workfront_ids(system, workfront_option_id);
 '''
 
 
@@ -4279,6 +4511,216 @@ def api_auto_report_status(q):
     return {"unmapped": out, "version_no": row["version_no"]}
 
 
+# ---------- field and table name review (the name validator; rules in fieldnames.py, saved decisions in fieldnames_store.py) ----------
+NAMES_FILES = ("names_report.csv", "names_diff.csv", "names_duplicates.csv", "names_tables.csv", "names_import_problems.csv",
+               "names_summary.txt", "FIELD_NAMING_RULES.md")
+
+
+def _names(fn_, *a, **k):
+    """Run a store function and turn its StoreError into the app's AppError (so the page shows the plain-language reason)."""
+    try:
+        return fn_(*a, **k)
+    except names_store.StoreError as e:
+        raise AppError(e.message, e.status, e.extra)
+
+
+def _names_base(src):
+    raw = src.get("base_id") if isinstance(src, dict) else None
+    raw = raw[0] if isinstance(raw, list) else raw
+    return check_base_id(raw)
+
+
+def api_names_review(q):
+    with db() as conn:
+        return _names(names_store.review, conn, _names_base(q))
+
+
+def api_names_preview(body):
+    """The review with settings other than the saved ones (nothing is saved): used to see what a toggle or preset does before committing to it."""
+    with db() as conn:
+        st = _names(names_store.settings_from_dict, body.get("settings") or {})
+        return _names(names_store.review, conn, _names_base(body), st)
+
+
+def api_names_settings(body):
+    with db() as conn:
+        _names(names_store.save_settings, conn, _names_base(body), body.get("settings") or {}, body.get("actor"), body.get("reason") or "")
+        return _names(names_store.review, conn, _names_base(body))
+
+
+def api_names_tables_approve(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.approve_tables, conn, base, body.get("actor"), body.get("items"), body.get("mode"), body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_tables_revoke(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.revoke_tables, conn, base, body.get("actor"), body.get("table_ids") or [], body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_tables_scope(body):
+    """In or out of scope (and where an in-scope table lands): human decisions kept apart from the ingested table definitions."""
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.set_scope, conn, base, body.get("actor"), body.get("items") or [])
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_descriptions(body):
+    """Save hand-edited field descriptions (lineage syntax); empty text goes back to the generated description."""
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.save_descriptions, conn, base, body.get("actor"), body.get("items") or [], body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_approve(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.approve_fields, conn, base, body.get("actor"), body.get("items"), body.get("mode"), body.get("targets"), body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_status(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.set_field_status, conn, base, body.get("actor"), body.get("items") or [], body.get("status"), body.get("reason") or "")
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_abandon(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.abandon, conn, base, body.get("actor"), str(body.get("field_id") or ""), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_fields_unabandon(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.unabandon, conn, base, body.get("actor"), str(body.get("field_id") or ""), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+COMPARE_MAX_BYTES = 300 * 1024 * 1024        # a saved record file is loaded whole, so refuse an absurdly large one
+
+
+def api_names_compare(body):
+    """Compare the values of 2 to 8 fields of one table (duplicate-group members) from the saved record file. Returns counts and record IDs only:
+    the file is read into memory, compared and discarded; no value reaches the response, the database or a log."""
+    base = _names_base(body)
+    ids = []
+    for x in body.get("field_ids") if isinstance(body.get("field_ids"), list) else []:
+        if str(x) not in ids:
+            ids.append(str(x))
+    if not 2 <= len(ids) <= names_compare.MAX_FIELDS:
+        raise AppError("Choose between 2 and %d fields to compare." % names_compare.MAX_FIELDS)
+    with db() as conn:
+        rows = {r["field_id"]: dict(r) for r in conn.execute(
+            "SELECT field_id, table_id, table_name, field_name, data_type, row_count FROM airtable_fields WHERE base_id=? AND field_id IN (%s)" % ",".join("?" * len(ids)), [base] + ids)}
+    if len(rows) != len(ids):
+        raise AppError("One of those fields is not in this base.", 404)
+    tables = {r["table_id"] for r in rows.values()}
+    if len(tables) != 1:
+        raise AppError("Only fields of the same table can be compared.")
+    tid = tables.pop()
+    tname = rows[ids[0]]["table_name"]
+    path = _extract_path(base, tid)
+    if not os.path.isfile(path):
+        raise AppError("There is no saved record file for the table \"%s\". Run profiling for that table with \"Also save every record to JSON files\" ticked "
+                       "(Stage 1, step 5), then compare again." % tname, 404)
+    if os.path.getsize(path) > COMPARE_MAX_BYTES:
+        raise AppError("The saved record file for \"%s\" is too large to compare here." % tname)
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        raise AppError("The saved record file for \"%s\" could not be read. Save it again by profiling the table." % tname)
+    if not (isinstance(doc, dict) and doc.get("format") == "airtable-table-extract/1" and doc.get("table_id") == tid and isinstance(doc.get("records"), list)):
+        raise AppError("The saved record file for \"%s\" is not in the expected format. Save it again by profiling the table." % tname)
+    in_file = {f.get("field_id") for f in doc.get("fields") or [] if isinstance(f, dict)}
+    fields = [{"field_id": i, "field_name": rows[i]["field_name"], "data_type": rows[i]["data_type"]} for i in ids]
+    res = names_compare.compare_group([r for r in doc["records"] if isinstance(r, dict)], fields)
+    notes = []
+    pc = rows[ids[0]]["row_count"]
+    if pc and pc != len(doc["records"]):
+        notes.append("The saved file has %d records but the last profile counted %d, so the file may be out of date." % (len(doc["records"]), pc))
+    for i in ids:
+        if in_file and i not in in_file:
+            notes.append("\"%s\" is not in the saved file (it may have been added after the file was captured), so it looks empty." % rows[i]["field_name"])
+    out = {"table_id": tid, "table_name": tname, "captured_at": doc.get("captured_at"), "record_count": len(doc["records"]), "notes": notes}
+    out.update(res)
+    return out
+
+
+def api_names_groups_create(body):
+    """Consolidate several fields of one table into one (survivor, merged members, conflict rule, reason). Reversible."""
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.create_group, conn, base, body.get("actor"), body.get("survivor_id"), body.get("field_ids"), body.get("conflict_rule"), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_groups_dissolve(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.dissolve_group, conn, base, body.get("actor"), body.get("group_id"), body.get("reason"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def api_names_import(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(names_store.import_names, conn, base, body.get("actor"), csv_base64=body.get("csv_base64"))
+        return dict(r, review=_names(names_store.review, conn, base))
+
+
+def _names_base_label(base_id):
+    for b in (load_config()[0].get("bases") or []):
+        if b.get("baseId") == base_id and b.get("name"):
+            return "%s - %s" % (b["name"], base_id)
+    return base_id
+
+
+def _names_report_text(q):
+    base = _names_base(q)
+    with db() as conn:
+        return scrub(_names(names_store.report_html, conn, base, _names_base_label(base), REPORT_CSS + names_report.EXTRA_CSS)), base
+
+
+def api_names_report_html(q):
+    """The field and table name review as a self-contained HTML report (preview in the page, or download=1)."""
+    text, base = _names_report_text(q)
+    headers = {}
+    if (q.get("download") or [""])[0]:
+        headers["Content-Disposition"] = 'attachment; filename="field-name-review_%s_%s.html"' % (base, _stamp())
+    return (text.encode("utf-8"), "text/html; charset=utf-8", headers)
+
+
+def api_names_report_mhtml(q):
+    text, base = _names_report_text(q)
+    return (to_mhtml(text, "Field name review: %s" % base), "application/x-mimearchive",
+            {"Content-Disposition": 'attachment; filename="field-name-review_%s_%s.mhtml"' % (base, _stamp())})
+
+
+def api_names_report(q):
+    """One CSV (or the summary or rules document) from the saved names, or all of them as a zip."""
+    with db() as conn:
+        files = _names(names_store.report_files, conn, _names_base(q))
+    which = (q.get("file") or ["all"])[0]
+    if which == "all":
+        return (names_store.report_zip(files), "application/zip", {"Content-Disposition": 'attachment; filename="field_name_review_%s.zip"' % _stamp()})
+    if which not in NAMES_FILES:
+        raise AppError("Unknown report file.", 404)
+    ctype = "text/csv; charset=utf-8" if which.endswith(".csv") else "text/plain; charset=utf-8"
+    data = files[which].encode("utf-8-sig") if which.endswith(".csv") else files[which].encode("utf-8")
+    return (data, ctype, {"Content-Disposition": 'attachment; filename="%s"' % which})
+
+
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
@@ -4286,11 +4728,11 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
-          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML),
           "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
-          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
@@ -4308,12 +4750,21 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/list": api_automations_list, "/api/automations/spec": api_automations_spec,
               "/api/automations/usage": api_automations_usage, "/api/automations/report.html": api_auto_report_html,
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
-              "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links}
+              "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
+              "/api/names/review": api_names_review, "/api/names/report": api_names_report,
+              "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
-               "/api/automations/save": api_automations_save}
+               "/api/automations/save": api_automations_save,
+               "/api/names/preview": api_names_preview, "/api/names/settings": api_names_settings,
+               "/api/names/tables/approve": api_names_tables_approve, "/api/names/tables/revoke": api_names_tables_revoke,
+               "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
+               "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
+               "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
+               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare,
+               "/api/names/groups/create": api_names_groups_create, "/api/names/groups/dissolve": api_names_groups_dissolve}
 
 
 class Handler(BaseHTTPRequestHandler):

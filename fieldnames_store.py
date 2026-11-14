@@ -1,0 +1,772 @@
+#!/usr/bin/env python3
+"""Saved decisions for the field name review (tables from migration 007). Standard library only.
+
+Everything here takes an open sqlite3 connection (rows as sqlite3.Row or tuples) and returns plain dicts, so it can be tested without the web
+server. server.py calls these functions from thin handlers. The rules live in fieldnames.py; nothing here changes a name unless a person
+approved it: every write records who, when and why in name_events (append-only). Only schema metadata and profile counts are read; record
+values are never touched.
+"""
+import base64
+import binascii
+import io
+import json
+import sqlite3
+import zipfile
+from collections import OrderedDict, defaultdict
+from datetime import datetime, timezone
+
+import fielddesc as fd
+import fieldnames as fn
+import fieldnames_io as fio
+import fieldgroups as fgp
+import fieldnames_report as fr
+
+ACTOR_MAX = 40
+REASON_MAX = 500
+STATUSES = ("unreviewed", "approved", "needs_human")
+_COL = {t: (t, t + "_status", t + "_verdict") for t in fn.TARGETS}   # name column, status column, verdict-cache column (fixed names, never user input)
+
+
+class StoreError(Exception):
+    def __init__(self, message, status=400, extra=None):
+        super(StoreError, self).__init__(message)
+        self.message, self.status, self.extra = message, status, extra or {}
+
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def clean_actor(s):
+    """Reviewer initials or a short name, recorded with every decision."""
+    s = (s or "").strip()
+    if not s or len(s) > ACTOR_MAX or any(ord(c) < 32 for c in s):
+        raise StoreError("Enter your initials or a short name (up to %d characters) before making a decision." % ACTOR_MAX)
+    return s
+
+
+def _reason(s, required=False):
+    s = (s or "").strip()
+    if required and not s:
+        raise StoreError("A short reason is required.")
+    if len(s) > REASON_MAX or any(ord(c) < 32 and c not in "\n\t" for c in s):
+        raise StoreError("The reason must be plain text of up to %d characters." % REASON_MAX)
+    return s
+
+
+def has_table(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _rows(cur):
+    return [dict(r) for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------- reading the schema, scope, settings and decisions
+
+def load_fields(conn, base_id):
+    """{fields, tables} for one base. Fields no longer in the source are left out. 'profiled' = a profile_page call succeeded for the table at or
+    after the field was last seen in the schema and no profile failure for the table is still open (a re-ingest means profiling again)."""
+    fields = _rows(conn.execute("""
+        SELECT f.field_id, f.table_id, f.table_name, f.field_name, f.data_type, f.linked_table_id, f.source_link_field_id,
+               f.row_count, f.null_count, f.cardinality, f.cardinality_is_capped,
+               f.source_field_id, f.referenced_field_ids, f.field_description,
+               (EXISTS(SELECT 1 FROM api_call_log a WHERE a.purpose='profile_page' AND a.success=1 AND a.table_id=f.table_id AND a.timestamp >= f.updated_at)
+                AND NOT EXISTS(SELECT 1 FROM runbook_logs r WHERE r.failing_component='profile_page:' || f.table_id AND r.status='OPEN'
+                               AND r.timestamp >= f.updated_at)) AS profiled
+        FROM airtable_fields f
+        WHERE f.base_id=? AND f.updated_at >= (SELECT MAX(x.updated_at) FROM airtable_fields x WHERE x.base_id=f.base_id)
+        ORDER BY f.table_id, f.field_id""", (base_id,)))
+    tables = []
+    if has_table(conn, "airtable_tables"):
+        tables = _rows(conn.execute("SELECT table_id, base_id, table_name FROM airtable_tables WHERE base_id=? ORDER BY table_id", (base_id,)))
+    seen = {t["table_id"] for t in tables}
+    for f in fields:                                    # a database ingested before airtable_tables existed
+        if f["table_id"] not in seen:
+            seen.add(f["table_id"])
+            tables.append({"table_id": f["table_id"], "base_id": base_id, "table_name": f["table_name"]})
+    return {"fields": fields, "tables": tables}
+
+
+def read_scope(conn, base_id):
+    """({table_id: {decision, decided_by, decided_at, reason}}, available). Reads table_scope when that table exists (a later migration); until then
+    every table is simply undecided. A table with no row is undecided, which is different from out."""
+    if not has_table(conn, "table_scope"):
+        return {}, False
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(table_scope)")}
+    if not {"table_id", "decision"} <= cols:
+        return {}, False
+    out = {}
+    for r in conn.execute("SELECT * FROM table_scope WHERE base_id=?", (base_id,)):
+        r = dict(r)
+        out[r["table_id"]] = {"decision": r["decision"], "decided_by": r.get("decided_by"), "decided_at": r.get("decided_at"), "reason": r.get("reason")}
+    return out, True
+
+
+def read_targets(conn, base_id):
+    """{table_id: {target, decided_by, decided_at, reason}} from table_targets (empty when that table does not exist yet)."""
+    if not has_table(conn, "table_targets"):
+        return {}
+    return {r["table_id"]: {"target": r["target"], "decided_by": r["decided_by"], "decided_at": r["decided_at"], "reason": r["reason"]}
+            for r in conn.execute("SELECT * FROM table_targets WHERE base_id=?", (base_id,))}
+
+
+def read_groups(conn, base_id):
+    """([group, ...], available). A group is {group_id, table_id, survivor_id, member_ids (survivor first), conflict_rule, reason, decided_by,
+    decided_at}. Empty and unavailable until migration 009 (field_groups, field_group_members) exists."""
+    if not (has_table(conn, "field_groups") and has_table(conn, "field_group_members")):
+        return [], False
+    groups = []
+    for g in conn.execute("SELECT * FROM field_groups WHERE base_id=? ORDER BY group_id", (base_id,)).fetchall():
+        members = [r[0] for r in conn.execute("SELECT field_id FROM field_group_members WHERE group_id=? ORDER BY member_order, field_id", (g["group_id"],))]
+        groups.append({"group_id": g["group_id"], "table_id": g["table_id"], "survivor_id": g["survivor_field_id"], "member_ids": members,
+                       "conflict_rule": g["conflict_rule"], "reason": g["reason"], "decided_by": g["decided_by"], "decided_at": g["decided_at"]})
+    return groups, True
+
+
+def _live_groups(groups, data):
+    """Groups whose fields are all still in the schema; a group with a field that has left the source is ignored rather than half applied."""
+    live = {f["field_id"] for f in data["fields"]}
+    return [g for g in groups if g["survivor_id"] in live and all(m in live for m in g["member_ids"])]
+
+
+def scope_warnings(data, out_ids):
+    """In-scope fields that link to, or name, a table that is out of scope. A link to a dropped table has nowhere to point, so each one is
+    flagged for a human decision: bring the table back in, drop the field, or change what it points at."""
+    if not out_ids:
+        return []
+    tname = {t["table_id"]: t["table_name"] for t in data["tables"]}
+    fbi = {f["field_id"]: f for f in data["fields"]}
+    seen, out = set(), []
+    for f in data["fields"]:
+        if f["table_id"] in out_ids:
+            continue
+        via = f.get("linked_table_id") or (fbi.get(f.get("source_link_field_id")) or {}).get("linked_table_id")
+        if via in out_ids:
+            seen.add((f["field_id"], via))
+            out.append({"kind": "link", "field_id": f["field_id"], "field_name": f["field_name"], "table_id": f["table_id"], "table_name": f["table_name"],
+                        "out_table_id": via, "out_table_name": tname.get(via, via)})
+        for oid in sorted(out_ids):
+            if (f["field_id"], oid) not in seen and oid in tname and fn._whole(tname[oid]).search(f["field_name"]):
+                out.append({"kind": "mention", "field_id": f["field_id"], "field_name": f["field_name"], "table_id": f["table_id"], "table_name": f["table_name"],
+                            "out_table_id": oid, "out_table_name": tname[oid]})
+    return sorted(out, key=lambda w: (w["table_name"].casefold(), w["field_name"].casefold(), w["out_table_name"].casefold()))
+
+
+def settings_from_dict(d):
+    d = d or {}
+    known = {"table_swap", "char_cleanup", "leading_digits", "table_prefix", "digit_style", "digit_word", "label_keep_quarter", "targets", "description_include_airtable", "emoji_mode", "description_emoji_mode"}
+    try:
+        return fn.Settings(**{k: v for k, v in d.items() if k in known})
+    except (ValueError, TypeError) as e:
+        raise StoreError("Those settings are not valid: %s" % e)
+
+
+def read_settings(conn, base_id):
+    """(Settings, saved): the newest saved settings for the base, else the defaults."""
+    row = conn.execute("SELECT new_value FROM name_events WHERE subject_type='settings' AND subject_id=? ORDER BY event_id DESC LIMIT 1", (base_id,)).fetchone()
+    if not row:
+        return fn.Settings(), False
+    try:
+        return settings_from_dict(json.loads(row[0])), True
+    except (ValueError, StoreError):
+        return fn.Settings(), False
+
+
+def save_settings(conn, base_id, settings, actor, reason=""):
+    st = settings if isinstance(settings, fn.Settings) else settings_from_dict(settings)
+    actor, reason = clean_actor(actor), _reason(reason)
+    with conn:
+        conn.execute("INSERT INTO name_events(subject_type, subject_id, event_type, new_value, actor, reason) VALUES ('settings', ?, 'settings', ?, ?, ?)",
+                     (base_id, json.dumps(st.as_dict(), sort_keys=True), actor, reason or None))
+    return st
+
+
+def descriptions(data, names, settings, groups=()):
+    """{field_id: {generated, saved, text, edited, problems}} for every field of the base. 'generated' is recomputed from the schema every
+    time; 'saved' is a hand-edited description a person saved (field_names.description); 'text' is what is used (saved, else generated)."""
+    by_id = {f["field_id"]: f for f in data["fields"]}
+    surv = fgp.survivors(groups)
+    out = {}
+    for f in data["fields"]:
+        merged = [by_id[m] for m in surv[f["field_id"]]["member_ids"][1:] if m in by_id] if f["field_id"] in surv else []
+        gen = fd.generate_description(f, by_id, settings.description_include_airtable, settings.description_emoji_mode, merged)
+        saved = ((names.get(f["field_id"]) or {}).get("description") or None)
+        text = saved if saved is not None else gen
+        out[f["field_id"]] = {"generated": gen, "saved": saved, "text": text, "edited": saved is not None and saved != gen,
+                              "problems": fd.validate_description(text)}
+    return out
+
+
+def _stored(conn, base_id):
+    """Saved decisions for the base: approved table names, the field_names rows, and who abandoned what."""
+    table_rows = {r["airtable_table_id"]: r for r in _rows(conn.execute(
+        "SELECT t.* FROM table_names t JOIN airtable_tables a ON a.table_id=t.airtable_table_id WHERE a.base_id=?", (base_id,)))}
+    names = {r["airtable_field_id"]: r for r in _rows(conn.execute(
+        "SELECT n.* FROM field_names n JOIN airtable_fields f ON f.field_id=n.airtable_field_id WHERE f.base_id=?", (base_id,)))}
+    return table_rows, names
+
+
+# ---------------------------------------------------------------- the review (everything the page shows)
+
+def _compute(conn, base_id, settings, override=None):
+    data = load_fields(conn, base_id)
+    if not data["fields"]:
+        raise StoreError("No fields are stored for base %s. Ingest its schema in Stage 1 first." % base_id, 404)
+    scope, scope_ok = read_scope(conn, base_id)
+    out_tables = [tid for tid, v in scope.items() if v["decision"] == "out"]
+    table_rows, names = _stored(conn, base_id)
+    approved = {tid: r["new_table_name"] for tid, r in table_rows.items() if r["status"] == "approved" and r["new_table_name"]}
+    manual = {}
+    for fid, r in names.items():
+        m = {t: (r[t] or "") for t in fn.TARGETS if r.get(t)}
+        if m:
+            manual[fid] = m
+    for (fid, target), name in (override or {}).items():
+        manual.setdefault(fid, {})[target] = name
+    abandoned = [fid for fid, r in names.items() if r["abandoned"]]
+    groups, groups_ok = read_groups(conn, base_id)
+    groups = _live_groups(groups, data)
+    merged = fgp.merged_ids(groups)                          # merged members are not fields of their own: they leave the review like abandoned ones
+    res = fn.run(data["fields"], data["tables"], settings, manual=manual, approved_tables=approved, abandoned=abandoned + [m for m in merged if m not in abandoned],
+                 out_of_scope_tables=out_tables, gate=True)
+    return {"data": data, "scope": scope, "scope_ok": scope_ok, "out": set(out_tables), "table_rows": table_rows, "names": names,
+            "approved": approved, "manual": manual, "abandoned": abandoned, "res": res, "groups": groups, "groups_ok": groups_ok, "merged": merged}
+
+
+def review(conn, base_id, settings=None):
+    """The full payload for the page. Fields appear only when every in-scope table name is approved (the gate)."""
+    saved_settings, saved = read_settings(conn, base_id)     # 'saved' says whether anything has been saved, even when previewing other settings
+    if settings is None:
+        settings = saved_settings
+    c = _compute(conn, base_id, settings)
+    res, data = c["res"], c["data"]
+    targets = read_targets(conn, base_id)
+    by_table = defaultdict(int)
+    for f in data["fields"]:
+        by_table[f["table_id"]] += 1
+    tables = []
+    for t in sorted(data["tables"], key=lambda x: (x["table_name"].casefold(), x["table_id"])):
+        tid = t["table_id"]
+        sc = c["scope"].get(tid)
+        row = {"table_id": tid, "old": t["table_name"], "field_count": by_table.get(tid, 0),
+               "scope": sc["decision"] if sc else "undecided", "scope_by": sc and sc["decided_by"], "scope_at": sc and sc["decided_at"], "scope_reason": sc and sc["reason"],
+               "target": (targets.get(tid) or {}).get("target"), "target_by": (targets.get(tid) or {}).get("decided_by")}
+        m = res["tables"].get(tid)
+        if m:
+            sr = c["table_rows"].get(tid) or {}
+            row.update({"suggested": m["suggested"], "effective": m["effective"], "approved": m["approved"], "verdict": m["verdict"], "rules": m["rules"],
+                        "approved_by": sr.get("approved_by") if m["approved"] else None, "approved_at": sr.get("approved_at") if m["approved"] else None})
+        else:                                           # out of scope: no table-name decision is needed
+            row.update({"suggested": None, "effective": None, "approved": False, "verdict": None, "rules": [], "approved_by": None, "approved_at": None})
+        tables.append(row)
+    desc = descriptions(data, c["names"], settings, c["groups"])
+    fields, counts = [], {t: {"approved": 0, "needs_human": 0, "unreviewed": 0, "stale": 0} for t in fn.TARGETS}
+    fbi = {f["field_id"]: f for f in data["fields"]}
+    for fid, e in res["fields"].items():
+        n = c["names"].get(fid) or {}
+        row = {"field_id": fid, "table_id": e["table_id"], "table_name": fbi[fid]["table_name"], "original": e["original"], "data_type": fbi[fid]["data_type"],
+               "presence": e["presence"], "abandoned": e["abandoned"] and fid not in c["merged"], "target_type": n.get("target_type"), "import_batch": n.get("import_batch"),
+               "description": desc[fid],
+               "abandon": {"by": n.get("abandoned_by"), "at": n.get("abandoned_at"), "reason": n.get("abandoned_reason")} if e["abandoned"] and fid not in c["merged"] else None,
+               "consolidated": ({"group_id": c["merged"][fid]["group_id"], "survivor_id": c["merged"][fid]["survivor_id"], "survivor_name": fbi[c["merged"][fid]["survivor_id"]]["field_name"],
+                                 "conflict_rule": c["merged"][fid]["conflict_rule"], "reason": c["merged"][fid]["reason"], "by": c["merged"][fid]["decided_by"],
+                                 "at": c["merged"][fid]["decided_at"]} if fid in c["merged"] else None),
+               "targets": {}}
+        for t, r in e["targets"].items():
+            status = n.get(_COL[t][1]) or "unreviewed"
+            stale = status == "approved" and r["verdict"] != fn.PASS
+            tr = {k: r.get(k) for k in ("candidate", "final", "proposed", "suggested", "verdict", "rules", "reasons", "source", "differs_from_rubric",
+                                       "rubric_name", "rubric_verdict", "quarter_style")}
+            tr.update({"status": status, "approved_name": n.get(t) if status == "approved" else None, "stale": stale})
+            row["targets"][t] = tr
+            counts[t][status] += 1
+            counts[t]["stale"] += 1 if stale else 0
+        fields.append(row)
+    summary = dict(res["summary"])
+    summary["consolidated"] = sum(1 for fid in c["merged"] if fid in res["fields"])
+    summary["abandoned"] = max(0, summary["abandoned"] - summary["consolidated"])
+    groups_out = []
+    for g in c["groups"]:
+        groups_out.append({"group_id": g["group_id"], "table_id": g["table_id"], "table_name": fbi[g["survivor_id"]]["table_name"], "survivor_id": g["survivor_id"],
+                           "survivor_name": fbi[g["survivor_id"]]["field_name"], "conflict_rule": g["conflict_rule"], "conflict_rule_text": fgp.RULE_TEXT[g["conflict_rule"]],
+                           "reason": g["reason"], "by": g["decided_by"], "at": g["decided_at"],
+                           "members": [{"field_id": m, "name": fbi[m]["field_name"], "role": "survivor" if i == 0 else "merged"} for i, m in enumerate(g["member_ids"])]})
+    return {"base_id": base_id, "settings": res["settings"], "settings_saved": saved, "scope_available": c["scope_ok"], "tables": tables,
+            "gate": res["gate"], "summary": summary, "groups": groups_out, "groups_available": c["groups_ok"], "counts": counts, "fields": fields, "clusters": res["clusters"],
+            "in_scope_tables": len(res["tables"]), "out_of_scope_tables": len(c["out"]),
+            "targets_available": has_table(conn, "table_targets"), "scope_warnings": scope_warnings(data, c["out"]),
+            "scope_counts": {k: sum(1 for t in tables if t["scope"] == k) for k in ("in", "out", "undecided")}}
+
+
+# ---------------------------------------------------------------- writing decisions
+
+def _event(conn, subject_type, subject_id, event_type, actor, target=None, old=None, new=None, reason=None):
+    conn.execute("INSERT INTO name_events(subject_type, subject_id, event_type, target, old_value, new_value, actor, reason) VALUES (?,?,?,?,?,?,?,?)",
+                 (subject_type, subject_id, event_type, target, old, new, actor, reason or None))
+
+
+def _table_name_problems(name, settings):
+    bad = [r for r in fn.violations(name, "planning_name", settings) if not (r == "LEADING_DIGIT" and settings.table_prefix == "plain")]
+    return [fn.RULE_BY_ID[r].title for r in bad]
+
+
+def approve_tables(conn, base_id, actor, items=None, mode=None, reason=""):
+    """Approve new table names. items: [{table_id, name?}] (name defaults to the proposal when it is PASS or AUTO_FIXABLE, else it must be typed).
+    mode: 'unchanged' (every PASS table, name kept) or 'auto' (every AUTO_FIXABLE table, proposal used); a table that cannot be approved in a bulk
+    mode is skipped and reported. Explicit items are all-or-nothing."""
+    actor, reason = clean_actor(actor), _reason(reason)
+    settings, _ = read_settings(conn, base_id)
+    c = _compute(conn, base_id, settings)
+    tmap = c["res"]["tables"]
+    if mode not in (None, "unchanged", "auto"):
+        raise StoreError("Unknown mode.")
+    picks, skipped = [], []
+    if mode:
+        want = fn.PASS if mode == "unchanged" else fn.AUTO_FIXABLE
+        for tid, m in tmap.items():
+            if m["verdict"] == want and not m["approved"]:
+                picks.append((tid, m["old"] if mode == "unchanged" else m["suggested"]))
+    for it in items or []:
+        tid = str(it.get("table_id") or "")
+        if tid not in tmap:
+            raise StoreError("Table %s is not an in-scope table of this base." % tid)
+        m = tmap[tid]
+        name = it.get("name")
+        if name is None or str(name).strip() == "":
+            if m["verdict"] not in (fn.PASS, fn.AUTO_FIXABLE):
+                raise StoreError("The proposed name for '%s' needs a decision: type the name to approve." % m["old"])
+            name = m["old"] if m["verdict"] == fn.PASS else m["suggested"]
+        picks.append((tid, str(name)))
+    if not picks:
+        return {"approved": 0, "skipped": [], "message": "Nothing to approve."}
+    pending_names = {tid: m["effective"] for tid, m in tmap.items()}
+    done = []
+    for tid, name in picks:
+        probs = _table_name_problems(name, settings)
+        clash = [o for o, n in pending_names.items() if o != tid and n.casefold() == name.casefold()]
+        if probs or clash:
+            why = ", ".join(probs) if probs else "another table already uses that name"
+            if items:
+                raise StoreError("'%s' cannot be approved: %s." % (name, why))
+            skipped.append({"table_id": tid, "name": name, "reason": why})
+            continue
+        pending_names[tid] = name
+        done.append((tid, name))
+    with conn:
+        for tid, name in done:
+            prev = (c["table_rows"].get(tid) or {}).get("new_table_name")
+            conn.execute("""INSERT INTO table_names(airtable_table_id, new_table_name, status, approved_by, approved_at, updated_at) VALUES (?,?, 'approved', ?, ?, ?)
+                            ON CONFLICT(airtable_table_id) DO UPDATE SET new_table_name=excluded.new_table_name, status='approved',
+                            approved_by=excluded.approved_by, approved_at=excluded.approved_at, updated_at=excluded.updated_at""", (tid, name, actor, _now(), _now()))
+            _event(conn, "table", tid, "approve", actor, None, prev or tmap[tid]["old"], name, reason)
+    return {"approved": len(done), "skipped": skipped}
+
+
+def revoke_tables(conn, base_id, actor, table_ids, reason=""):
+    actor, reason = clean_actor(actor), _reason(reason)
+    rows, _names = _stored(conn, base_id)
+    n = 0
+    with conn:
+        for tid in table_ids or []:
+            r = rows.get(tid)
+            if r and r["status"] == "approved":
+                conn.execute("UPDATE table_names SET status='unreviewed', updated_at=? WHERE airtable_table_id=?", (_now(), tid))
+                _event(conn, "table", tid, "reject", actor, None, r["new_table_name"], None, reason)
+                n += 1
+    return {"revoked": n}
+
+
+SCOPE_SETUP = "Table scope is not set up in this database yet. Apply migration 008 (python sql/apply_migrations.py path/to/your.db, after a backup), then reload."
+TARGET_NAMES = ("planning_only", "planning_and_core")
+
+
+def set_scope(conn, base_id, actor, items):
+    """Record which tables are in or out of scope, and where an in-scope table lands (Planning only, or Planning plus Core). Human decisions
+    kept apart from the ingested table definitions. items: [{table_id, decision?: 'in'|'out'|'clear', reason?, target?: 'planning_only'|
+    'planning_and_core'|'clear'}]. 'out' needs a reason. 'clear' returns a table to undecided (no row), which is different from out. Each
+    change is also written to name_events (target 'scope' or 'target'); the tables themselves keep only the latest decision."""
+    actor = clean_actor(actor)
+    if not (has_table(conn, "table_scope") and has_table(conn, "table_targets")):
+        raise StoreError(SCOPE_SETUP, 409)
+    known = {t["table_id"] for t in load_fields(conn, base_id)["tables"]}
+    scope, _ok = read_scope(conn, base_id)
+    targets = read_targets(conn, base_id)
+    now, n = _now(), 0
+    with conn:
+        for it in items or []:
+            tid = str(it.get("table_id") or "")
+            if tid not in known:
+                raise StoreError("Table %s is not in this base." % tid)
+            decision, tgt = it.get("decision"), it.get("target")
+            if decision not in (None, "in", "out", "clear") or tgt not in (None, "clear") + TARGET_NAMES:
+                raise StoreError("Unknown scope or target.")
+            reason = _reason(it.get("reason"), required=(decision == "out"))
+            prev = (scope.get(tid) or {}).get("decision")
+            if decision in ("in", "out"):
+                conn.execute("""INSERT INTO table_scope(base_id, table_id, decision, decided_by, decided_at, reason) VALUES (?,?,?,?,?,?)
+                                ON CONFLICT(base_id, table_id) DO UPDATE SET decision=excluded.decision, decided_by=excluded.decided_by,
+                                decided_at=excluded.decided_at, reason=excluded.reason""", (base_id, tid, decision, actor, now, reason or None))
+                _event(conn, "table", tid, "approve" if decision == "in" else "reject", actor, "scope", prev or "undecided", decision, reason)
+                scope[tid] = {"decision": decision}
+                n += 1
+            elif decision == "clear":
+                conn.execute("DELETE FROM table_scope WHERE base_id=? AND table_id=?", (base_id, tid))
+                _event(conn, "table", tid, "needs_human", actor, "scope", prev or "undecided", "undecided", reason)
+                scope.pop(tid, None)
+                n += 1
+            if tgt in TARGET_NAMES:
+                if (scope.get(tid) or {}).get("decision") == "out":
+                    raise StoreError("A table that is out of scope has no target; bring it back in scope first.")
+                conn.execute("""INSERT INTO table_targets(table_id, base_id, target, decided_by, decided_at, reason) VALUES (?,?,?,?,?,?)
+                                ON CONFLICT(table_id) DO UPDATE SET target=excluded.target, decided_by=excluded.decided_by,
+                                decided_at=excluded.decided_at, reason=excluded.reason""", (tid, base_id, tgt, actor, now, reason or None))
+                _event(conn, "table", tid, "approve", actor, "target", (targets.get(tid) or {}).get("target"), tgt, reason)
+                targets[tid] = {"target": tgt}
+                n += 1
+            elif tgt == "clear":
+                conn.execute("DELETE FROM table_targets WHERE table_id=? AND base_id=?", (tid, base_id))
+                _event(conn, "table", tid, "needs_human", actor, "target", (targets.get(tid) or {}).get("target"), None, reason)
+                targets.pop(tid, None)
+                n += 1
+    return {"updated": n}
+
+
+def _gate_open(c):
+    if not c["res"]["gate"]["ready"]:
+        raise StoreError("Approve every in-scope table name before reviewing fields (%d still pending)." % len(c["res"]["gate"]["pending"]), 409)
+
+
+def _upsert_field(conn, fid, target, name, status, verdict, now):
+    nc, sc, vc = _COL[target]
+    conn.execute("INSERT INTO field_names(airtable_field_id, %s, %s, %s, validated_at, updated_at) VALUES (?,?,?,?,?,?) "
+                 "ON CONFLICT(airtable_field_id) DO UPDATE SET %s=excluded.%s, %s=excluded.%s, %s=excluded.%s, validated_at=excluded.validated_at, updated_at=excluded.updated_at"
+                 % (nc, sc, vc, nc, nc, sc, sc, vc, vc), (fid, name, status, verdict, now, now))
+
+
+def approve_fields(conn, base_id, actor, items=None, mode=None, targets=None, reason=""):
+    """Approve names for fields. items: [{field_id, target, name?}] (explicit, all-or-nothing, at most 50; every name is re-validated with the
+    field's duplicate group, so a name that would still collide is refused). mode: 'pass', 'auto' or 'pass_and_auto', optionally limited to
+    targets; bulk modes only take names the validator already found clean and unique."""
+    actor, reason = clean_actor(actor), _reason(reason)
+    settings, _ = read_settings(conn, base_id)
+    c = _compute(conn, base_id, settings)
+    _gate_open(c)
+    if mode not in (None, "pass", "auto", "pass_and_auto"):
+        raise StoreError("Unknown mode.")
+    tgts = [t for t in (targets or fn.TARGETS) if t in fn.TARGETS]
+    res = c["res"]["fields"]
+    picks = []
+    if mode:
+        ok = {"pass": (fn.PASS,), "auto": (fn.AUTO_FIXABLE,), "pass_and_auto": (fn.PASS, fn.AUTO_FIXABLE)}[mode]
+        for fid, e in res.items():
+            if e["abandoned"]:
+                continue
+            for t in tgts:
+                r = e["targets"][t]
+                status = (c["names"].get(fid) or {}).get(_COL[t][1]) or "unreviewed"
+                if r["verdict"] in ok and status != "approved":
+                    picks.append((fid, t, r["final"], False))
+    items = items or []
+    if len(items) > 50:
+        raise StoreError("Approve at most 50 named items at a time; use a bulk mode for the rest.")
+    override = {}
+    for it in items:
+        fid, t = str(it.get("field_id") or ""), str(it.get("target") or "")
+        if fid not in res or t not in fn.TARGETS:
+            raise StoreError("Unknown field or target.")
+        if fid in c["merged"]:
+            raise StoreError("'%s' is consolidated into another field; dissolve the group first." % res[fid]["original"])
+        if res[fid]["abandoned"]:
+            raise StoreError("That field is abandoned; un-abandon it first.")
+        r = res[fid]["targets"][t]
+        name = it.get("name")
+        name = r["final"] if name is None or str(name).strip() == "" else str(name).strip()
+        if r["verdict"] == fn.NEEDS_HUMAN and it.get("name") in (None, "") and not r["proposed"]:
+            raise StoreError("'%s' needs a decision: type the name to approve." % r["candidate"])
+        override[(fid, t)] = name
+        picks.append((fid, t, name, True))
+    if override:                                        # one run with the typed names in place: each must be clean and no longer in a duplicate group
+        again = _compute(conn, base_id, settings, override)["res"]["fields"]
+        for (fid, t), name in override.items():
+            r = again[fid]["targets"][t]
+            if r["verdict"] != fn.PASS or r["final"] != name:
+                why = "; ".join(r["reasons"]) or ("it would become '%s'" % r["final"] if r["final"] != name else "it does not pass the rules")
+                raise StoreError("'%s' cannot be approved for the %s of '%s': %s." % (name, t.replace("_", " "), res[fid]["original"], why), 400,
+                                 {"field_id": fid, "target": t})
+    elif not picks:
+        return {"approved": 0, "message": "Nothing to approve."}
+    now, n = _now(), 0
+    with conn:
+        for fid, t, name, _explicit in picks:
+            if not _explicit and fn.violations(name, t, settings):
+                continue                                # a bulk name must be clean
+            prev = (c["names"].get(fid) or {}).get(t) or res[fid]["original"]
+            _upsert_field(conn, fid, t, name, "approved", fn.PASS, now)
+            _event(conn, "field", fid, "approve", actor, t, prev, name, reason)
+            n += 1
+    return {"approved": n}
+
+
+def set_field_status(conn, base_id, actor, items, status, reason=""):
+    """Mark names 'needs_human' (flagged for a later decision) or 'unreviewed' (an approval withdrawn). items: [{field_id, target}]."""
+    if status not in ("needs_human", "unreviewed"):
+        raise StoreError("Unknown status.")
+    actor, reason = clean_actor(actor), _reason(reason, required=(status == "unreviewed"))
+    settings, _ = read_settings(conn, base_id)
+    c = _compute(conn, base_id, settings)
+    _gate_open(c)
+    now, n = _now(), 0
+    with conn:
+        for it in items or []:
+            fid, t = str(it.get("field_id") or ""), str(it.get("target") or "")
+            if fid not in c["res"]["fields"] or t not in fn.TARGETS:
+                raise StoreError("Unknown field or target.")
+            if fid in c["merged"]:
+                raise StoreError("That field is consolidated into another; dissolve the group first.")
+            row = c["names"].get(fid) or {}
+            old = row.get(_COL[t][1]) or "unreviewed"
+            conn.execute("INSERT INTO field_names(airtable_field_id, %s, updated_at) VALUES (?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET %s=excluded.%s, updated_at=excluded.updated_at"
+                         % (_COL[t][1], _COL[t][1], _COL[t][1]), (fid, status, now))
+            _event(conn, "field", fid, "needs_human" if status == "needs_human" else "reject", actor, t, old, status, reason)
+            n += 1
+    return {"updated": n}
+
+
+DESCRIPTION_HARD_CAP = 4000     # only to keep the database sane; Adobe's real limit is unconfirmed (see fielddesc.DESCRIPTION_MAX_LEN)
+
+
+def save_descriptions(conn, base_id, actor, items, reason=""):
+    """Save hand-edited descriptions. items: [{field_id, text}]; empty or missing text goes back to the generated description. A description that
+    is not in the lineage syntax is allowed (a hand edit may be free text on purpose) and reported as a warning; control characters are refused.
+    Each change is written to name_events (target 'description')."""
+    actor, reason = clean_actor(actor), _reason(reason)
+    settings, _ = read_settings(conn, base_id)
+    data = load_fields(conn, base_id)
+    scope, _ok = read_scope(conn, base_id)
+    known = {f["field_id"]: f for f in data["fields"]}
+    _, names = _stored(conn, base_id)
+    groups = _live_groups(read_groups(conn, base_id)[0], data)
+    gen = descriptions(data, names, settings, groups)
+    merged = fgp.merged_ids(groups)
+    now, n, warnings = _now(), 0, []
+    with conn:
+        for it in items or []:
+            fid = str(it.get("field_id") or "")
+            f = known.get(fid)
+            if not f:
+                raise StoreError("Field %s is not in this base." % fid, 404)
+            if (scope.get(f["table_id"]) or {}).get("decision") == "out":
+                raise StoreError("'%s' is in a table that is out of scope." % f["field_name"])
+            if fid in merged:
+                raise StoreError("'%s' is consolidated into another field, so it has no description of its own." % f["field_name"])
+            text = it.get("text")
+            text = None if text is None or str(text).strip() == "" else str(text).strip()
+            if text is not None:
+                if len(text) > DESCRIPTION_HARD_CAP:
+                    raise StoreError("A description can be at most %d characters." % DESCRIPTION_HARD_CAP)
+                problems = fd.validate_description(text)
+                errs = [p["message"] for p in problems if p["severity"] == "error"]
+                if errs:
+                    raise StoreError("'%s': %s" % (f["field_name"], " ".join(errs)))
+                warnings += [{"field_id": fid, "rule": p["rule"], "message": p["message"]} for p in problems]
+                if text == gen[fid]["generated"]:
+                    text = None                          # identical to the generated one: nothing to store
+            old = (names.get(fid) or {}).get("description")
+            if text == old:
+                continue
+            conn.execute("INSERT INTO field_names(airtable_field_id, description, updated_at) VALUES (?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET "
+                         "description=excluded.description, updated_at=excluded.updated_at", (fid, text, now))
+            _event(conn, "field", fid, "approve" if text is not None else "reject", actor, "description", old, text, reason)
+            n += 1
+    return {"saved": n, "warnings": warnings}
+
+
+GROUPS_SETUP = "Consolidation is not set up in this database yet. Apply migration 009 (python sql/apply_migrations.py path/to/your.db, after a backup), then reload."
+
+
+def create_group(conn, base_id, actor, survivor_id, field_ids, conflict_rule, reason):
+    """Consolidate several fields of one table into one: record the survivor, the others (merged), the conflict rule the loader will use later and
+    why. The merged members leave the name review and the duplicate checks; the survivor's description lists every origin. Reversible."""
+    actor, reason = clean_actor(actor), _reason(reason, required=True)
+    if not (has_table(conn, "field_groups") and has_table(conn, "field_group_members")):
+        raise StoreError(GROUPS_SETUP, 409)
+    data = load_fields(conn, base_id)
+    by_id = {f["field_id"]: f for f in data["fields"]}
+    scope, _ok = read_scope(conn, base_id)
+    _, names = _stored(conn, base_id)
+    grouped = {m for g in _live_groups(read_groups(conn, base_id)[0], data) for m in g["member_ids"]}
+    try:
+        ordered = fgp.validate_group(str(survivor_id or ""), [str(x) for x in field_ids or []], by_id, {fid for fid, r in names.items() if r["abandoned"]}, grouped,
+                                     conflict_rule or "review", [t for t, v in scope.items() if v["decision"] == "out"])
+    except ValueError as e:
+        raise StoreError(str(e))
+    now = _now()
+    with conn:
+        gid = conn.execute("INSERT INTO field_groups(base_id, table_id, survivor_field_id, conflict_rule, reason, decided_by, decided_at) VALUES (?,?,?,?,?,?,?)",
+                           (base_id, by_id[ordered[0]]["table_id"], ordered[0], conflict_rule or "review", reason, actor, now)).lastrowid
+        for i, fid in enumerate(ordered):
+            conn.execute("INSERT INTO field_group_members(group_id, field_id, member_order) VALUES (?,?,?)", (gid, fid, i))
+        _event(conn, "field", ordered[0], "approve", actor, "consolidation", None, json.dumps({"group_id": gid, "members": ordered, "conflict_rule": conflict_rule or "review"}), reason)
+        for fid in ordered[1:]:
+            _event(conn, "field", fid, "approve", actor, "consolidation", None, ordered[0], reason)
+    return {"group_id": gid}
+
+
+def dissolve_group(conn, base_id, actor, group_id, reason):
+    """Undo a consolidation: the members become ordinary fields again. The decision history stays in name_events."""
+    actor, reason = clean_actor(actor), _reason(reason, required=True)
+    if not (has_table(conn, "field_groups") and has_table(conn, "field_group_members")):
+        raise StoreError(GROUPS_SETUP, 409)
+    try:
+        gid = int(group_id)
+    except (TypeError, ValueError):
+        raise StoreError("That consolidation group does not exist.", 404)
+    g = next((x for x in read_groups(conn, base_id)[0] if x["group_id"] == gid), None)
+    if not g:
+        raise StoreError("That consolidation group does not exist.", 404)
+    with conn:
+        conn.execute("DELETE FROM field_group_members WHERE group_id=?", (gid,))
+        conn.execute("DELETE FROM field_groups WHERE group_id=?", (gid,))
+        _event(conn, "field", g["survivor_id"], "reject", actor, "consolidation", json.dumps({"group_id": gid, "members": g["member_ids"]}), None, reason)
+        for fid in g["member_ids"][1:]:
+            _event(conn, "field", fid, "reject", actor, "consolidation", g["survivor_id"], None, reason)
+    return {"dissolved": True}
+
+
+def abandon(conn, base_id, actor, field_id, reason):
+    """A recorded human decision, never automatic: who, when and why. Only a field that was profiled and has no value in any record qualifies
+    (a checkbox never does); the server enforces this, not the page."""
+    actor, reason = clean_actor(actor), _reason(reason, required=True)
+    settings, _ = read_settings(conn, base_id)
+    data = load_fields(conn, base_id)
+    f = next((x for x in data["fields"] if x["field_id"] == field_id), None)
+    if not f:
+        raise StoreError("That field is not in this base.", 404)
+    if any(field_id in g["member_ids"] for g in _live_groups(read_groups(conn, base_id)[0], data)):
+        raise StoreError("This field is in a consolidation group; dissolve the group first.")
+    p = fn.presence(f)
+    if not p["can_abandon"]:
+        raise StoreError("This field cannot be abandoned: %s." % (p["abandon_blocked_because"] or "it has values"))
+    now = _now()
+    with conn:
+        conn.execute("""INSERT INTO field_names(airtable_field_id, abandoned, abandoned_by, abandoned_at, abandoned_reason, updated_at) VALUES (?,1,?,?,?,?)
+                        ON CONFLICT(airtable_field_id) DO UPDATE SET abandoned=1, abandoned_by=excluded.abandoned_by, abandoned_at=excluded.abandoned_at,
+                        abandoned_reason=excluded.abandoned_reason, updated_at=excluded.updated_at""", (field_id, actor, now, reason, now))
+        _event(conn, "field", field_id, "abandon", actor, None, None, None, reason)
+    return {"abandoned": True}
+
+
+def unabandon(conn, base_id, actor, field_id, reason):
+    actor, reason = clean_actor(actor), _reason(reason, required=True)
+    _, names = _stored(conn, base_id)
+    if not (names.get(field_id) or {}).get("abandoned"):
+        raise StoreError("That field is not abandoned.", 404)
+    with conn:
+        conn.execute("UPDATE field_names SET abandoned=0, abandoned_by=NULL, abandoned_at=NULL, abandoned_reason=NULL, updated_at=? WHERE airtable_field_id=?", (_now(), field_id))
+        _event(conn, "field", field_id, "unabandon", actor, None, None, None, reason)
+    return {"abandoned": False}
+
+
+def import_names(conn, base_id, actor, csv_base64=None, csv_text=None):
+    """Import the renamed names by field ID. A name already approved is never overwritten. Returns the problems found (unmatched or repeated IDs,
+    fields missing from the file, a stale old_name or type) so they can be flagged."""
+    actor = clean_actor(actor)
+    if csv_base64 is not None:
+        try:
+            data = base64.b64decode(csv_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise StoreError("The file could not be read.")
+        text, note = fio.decode_csv(data)
+    elif csv_text is not None:
+        text, note = str(csv_text), ""
+    else:
+        raise StoreError("Choose a CSV file to import.")
+    fields = load_fields(conn, base_id)["fields"]
+    imp = fio.parse_import(text, fields)
+    _, names = _stored(conn, base_id)
+    batch = "import-" + _now().replace(" ", "T").replace(":", "")
+    now, applied, kept = _now(), 0, 0
+    with conn:
+        for fid in sorted(set(imp["manual"]) | set(imp["target_types"])):
+            row = names.get(fid) or {}
+            for t, name in sorted((imp["manual"].get(fid) or {}).items()):
+                if not name:
+                    continue
+                if row.get(_COL[t][1]) == "approved":
+                    kept += 1
+                    continue
+                conn.execute("INSERT INTO field_names(airtable_field_id, %s, import_batch, updated_at) VALUES (?,?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET %s=excluded.%s, "
+                             "import_batch=excluded.import_batch, updated_at=excluded.updated_at" % (t, t, t), (fid, name, batch, now))
+                _event(conn, "field", fid, "import", actor, t, row.get(t), name, batch)
+                applied += 1
+            if imp["target_types"].get(fid):
+                conn.execute("INSERT INTO field_names(airtable_field_id, target_type, import_batch, updated_at) VALUES (?,?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET "
+                             "target_type=excluded.target_type, import_batch=excluded.import_batch, updated_at=excluded.updated_at", (fid, imp["target_types"][fid], batch, now))
+    return {"batch": batch, "rows": imp["rows"], "names_imported": applied, "kept_approved": kept, "problems": imp["problems"][:2000],
+            "problem_count": len(imp["problems"]), "note": note}
+
+
+# ---------------------------------------------------------------- exports
+
+def report_files(conn, base_id, settings=None):
+    """{filename: text} for the CSV downloads, built from the saved names (the same builder as the command line)."""
+    if settings is None:
+        settings, _ = read_settings(conn, base_id)
+    c = _compute(conn, base_id, settings)
+    manual = {fid: {t: v for t, v in m.items()} for fid, m in c["manual"].items()}
+    target_types = {fid: r["target_type"] for fid, r in c["names"].items() if r.get("target_type")}
+    imp = {"manual": manual, "target_types": target_types, "problems": []}
+    desc = descriptions(c["data"], c["names"], settings, c["groups"])
+    notes = []
+    undecided = sum(1 for t in c["data"]["tables"] if t["table_id"] not in c["scope"])
+    if not c["scope_ok"]:
+        notes.append("Table scope decisions are not stored yet: every table is undecided and is validated.")
+    elif undecided:
+        notes.append("%d table(s) have no scope decision (undecided) and were validated like in-scope tables." % undecided)
+    consolidated = {fid: g["survivor_id"] for fid, g in c["merged"].items()}
+    return fio.build_reports(c["res"], c["data"]["fields"], imp, notes, consolidated=consolidated, descriptions={fid: {"text": d["text"], "source": "saved" if d["saved"] is not None else "generated",
+                                                                               "problems": [p["rule"] for p in d["problems"]]} for fid, d in desc.items()})
+
+
+def event_summary(conn, base_id):
+    """Counts of the recorded decisions for one base (by kind and by reviewer, first and last time), for the report."""
+    where = ("((subject_type='field' AND subject_id IN (SELECT field_id FROM airtable_fields WHERE base_id=?)) "
+             "OR (subject_type='table' AND subject_id IN (SELECT table_id FROM airtable_tables WHERE base_id=?)) "
+             "OR (subject_type='settings' AND subject_id=?))")
+    args = (base_id, base_id, base_id)
+    by_type = [(r[0], r[1]) for r in conn.execute("SELECT event_type, COUNT(*) FROM name_events WHERE %s GROUP BY event_type ORDER BY COUNT(*) DESC, event_type" % where, args)]
+    by_actor = [(r[0], r[1]) for r in conn.execute("SELECT actor, COUNT(*) FROM name_events WHERE %s GROUP BY actor ORDER BY COUNT(*) DESC, actor" % where, args)]
+    row = conn.execute("SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM name_events WHERE %s" % where, args).fetchone()
+    return {"total": row[0], "first": row[1], "last": row[2], "by_type": by_type, "by_actor": by_actor}
+
+
+def report_html(conn, base_id, base_label, css, generated=None):
+    """The whole review as one HTML document, from the saved settings and decisions."""
+    rv = review(conn, base_id)
+    return fr.build_html(rv, event_summary(conn, base_id), css, base_label or base_id, generated or _now())
+
+
+def loader_inputs(conn, base_id):
+    """What the loader needs: the review (approved names, scope, targets, consolidations) and each select field's options in Airtable's order.
+    Schema metadata only: no record value is read."""
+    rv = review(conn, base_id)
+    choices = {}
+    for r in conn.execute("SELECT field_id, choices_json FROM airtable_fields WHERE base_id=? AND choices_json IS NOT NULL", (base_id,)):
+        try:
+            items = json.loads(r[1])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(items, list):
+            choices[r[0]] = [{"id": str(x.get("id")), "name": str(x.get("name"))} for x in items if isinstance(x, dict) and x.get("id") is not None]
+    return {"review": rv, "choices": choices}
+
+
+def report_zip(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(files):
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))     # fixed date: the same input gives the same bytes
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, files[name].encode("utf-8-sig") if name.endswith(".csv") or name.endswith(".txt") else files[name].encode("utf-8"))
+    return buf.getvalue()

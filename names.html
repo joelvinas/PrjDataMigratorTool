@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field names - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="names">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="baseStrip">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="actor">Your initials</label>
+    <input id="actor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+  </div>
+  <p class="hint">Every decision on this page records who made it, when, and why. Nothing renames a field or table on its own: the tool proposes, a person approves. Enter your initials (or a short name) before approving anything.</p>
+  <div id="pageMessage" class="msg"></div>
+</section>
+
+<!-- A: settings -->
+<section class="card" id="settingsCard">
+  <h2><span class="num">A</span> Rules and presets</h2>
+  <p class="hint">The rules run in a fixed order: table names first, then the table-name swap, character cleanup, leading digits, and last the duplicate check. The Planning name, the Core name and the Core label are configured separately below; by default they behave the same. Switch a step off to see what it does; the count under it is how many names it changes. The checks that keep names safe (special characters, emoji, spaces, length, duplicates) can never be switched off.</p>
+  <div class="row">
+    <label for="pPrefix">Table number prefix</label>
+    <select id="pPrefix"><option value="end">Move it to the end (1.2.3 Orders becomes Orders 1-2-3)</option><option value="drop">Drop it (Orders)</option><option value="plain">Keep it as plain digits (1-2-3 Orders)</option></select>
+  </div>
+  <div style="overflow-x:auto"><table class="grid" id="settingsGrid"><thead><tr>
+    <th>Setting</th><th>Planning name</th><th>Core name</th><th>Core label</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div class="row"><label><input type="checkbox" id="descAirtable"> Include Airtable's own field description in generated descriptions (section F)</label></div>
+  <div class="row"><label for="descEmoji">Emoji in generated descriptions</label><select id="descEmoji"><option value="remove">Remove it</option><option value="word">Replace it with its word</option></select></div>
+  <div class="row"><button id="btnSaveSettings" type="button">Save these settings</button><span id="settingsState" class="hint"></span></div>
+  <div id="previewNote" class="note warn" hidden>These settings are a preview and are not saved. Save them before approving anything, so every decision is made under settings that can be reproduced.</div>
+</section>
+
+<!-- B: import -->
+<section class="card" id="importCard">
+  <h2><span class="num">B</span> Import your renamed names</h2>
+  <p class="hint">A CSV with the headers <code>field_id, old_name, new_name, new_label, old_dataType, new_dataType</code>. Rows are matched by Airtable field ID. <b>new_name</b> is checked as both the Planning name and the Core name, <b>new_label</b> as the Core label. A name you have already approved is never overwritten.</p>
+  <div class="row"><input id="importFile" type="file" accept=".csv,text/csv"><button id="btnImport" type="button">Import</button></div>
+  <div id="importResult"></div>
+</section>
+
+<!-- C: table names (the gate) -->
+<section class="card" id="tablesCard">
+  <h2><span class="num">C</span> Table names</h2>
+  <p class="hint">Approve every table name before any field is reviewed: field names that mention a table (lookups, rollups, links) follow the approved table name. A table with no scope decision is <b>undecided</b>, which is different from <b>out</b>; undecided tables are still checked, and out tables are skipped. Use <b>In</b>, <b>Out</b> (a reason is required) or <b>Clear</b> to record the decision, and choose where an in-scope table lands: Workfront Planning only, or Planning plus Core.</p>
+  <div id="gateNote" class="note"></div>
+  <div id="scopeWarnings"></div>
+  <div class="row">
+    <button id="btnApproveUnchanged" type="button">Approve all unchanged names</button>
+    <button id="btnApproveAutoTables" type="button">Approve all auto-fixable names</button>
+  </div>
+  <div id="tablesMessage" class="msg"></div>
+  <div style="overflow-x:auto"><table class="grid" id="tablesGrid"><thead><tr>
+    <th>Scope</th><th>Table</th><th class="num">Fields</th><th>Check</th><th>Proposed name</th><th>New name</th><th>Status</th><th>Decision</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<!-- D: field review -->
+<section class="card" id="fieldsCard">
+  <h2><span class="num">D</span> Field review</h2>
+  <div id="fieldsLocked" class="note info" hidden>Locked until every in-scope table name is approved (section C).</div>
+  <div id="fieldsBody" hidden>
+    <div id="summaryStrip" class="row"></div>
+    <div class="row" id="targetTabs" role="tablist"></div>
+    <div class="row">
+      <label for="fVerdict">Check</label>
+      <select id="fVerdict"><option value="">All</option><option value="PASS">Passes</option><option value="AUTO_FIXABLE">Auto-fixable</option><option value="NEEDS_HUMAN">Needs a person</option></select>
+      <label for="fStatus">Status</label>
+      <select id="fStatus"><option value="">All</option><option value="unreviewed">Unreviewed</option><option value="approved">Approved</option><option value="needs_human">Flagged</option></select>
+      <label for="fTable">Table</label>
+      <select id="fTable"></select>
+      <input id="fSearch" type="text" class="wide" placeholder="Search field name or ID" autocomplete="off">
+      <label><input type="checkbox" id="fAbandoned"> Show abandoned and consolidated</label>
+    </div>
+    <div class="row">
+      <button id="btnApprovePass" type="button">Approve all that pass (this name)</button>
+      <button id="btnApproveAuto" type="button">Approve all auto-fixable (this name)</button>
+      <button id="btnApproveAllTargets" type="button">Approve all that pass or are auto-fixable (all three names)</button>
+    </div>
+    <div id="fieldsMessage" class="msg"></div>
+    <div id="fieldsCount" class="hint"></div>
+    <div style="overflow-x:auto"><table class="grid" id="fieldsGrid"><thead><tr>
+      <th>Table</th><th>Field</th><th>Data</th><th>Your name</th><th>Proposed repair</th><th>Check</th><th>Status</th><th>Decision</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="row"><button id="btnPrev" type="button">Previous</button><span id="pageInfo" class="hint"></span><button id="btnNext" type="button">Next</button></div>
+  </div>
+</section>
+
+<!-- E: duplicate groups and consolidation -->
+<section class="card" id="dupCard" hidden>
+  <h2><span class="num">E</span> Duplicate groups and consolidation</h2>
+  <p class="hint">A duplicate is a group problem: every member is shown with its original and repaired name side by side. Rename a member, abandon one that has no values, compare their values, or consolidate them into one field; the check runs again on what remains.</p>
+  <div id="dupBody"></div>
+  <h3>Consolidate fields</h3>
+  <p class="hint">Several Airtable fields of one table that should become <b>one</b> Workfront field. Pick the fields, choose the one that survives, say what the loader should do later when two of them are filled and differ, and why. The merged fields leave the review and the duplicate checks, and the survivor's description lists every origin. A group can be dissolved at any time.</p>
+  <div id="consNeeds" class="note info" hidden>Consolidation needs migration 009 (<code>python sql/apply_migrations.py path/to/your.db</code>, after a backup). Until then the groups below cannot be saved.</div>
+  <div id="consBody">
+    <div class="row"><label for="gTable">Table</label><select id="gTable"></select><span id="gHint" class="hint"></span></div>
+    <div id="gFields" class="chips"></div>
+    <div class="row">
+      <label for="gSurvivor">Field that survives</label><select id="gSurvivor"></select>
+      <label for="gRule">If both are filled and differ</label>
+      <select id="gRule"><option value="review">A person resolves each record</option><option value="survivor_wins">Keep the survivor's value</option><option value="first_filled">Use the first non-empty value, survivor first</option></select>
+    </div>
+    <div class="row"><input id="gReason" type="text" class="wide" maxlength="500" placeholder="Why are these fields being consolidated? (required)" autocomplete="off">
+      <button id="btnGCompare" type="button">Compare values</button><button id="btnGCreate" type="button" class="primary">Consolidate</button></div>
+    <div id="gMessage" class="msg"></div>
+    <div id="gCompare"></div>
+  </div>
+  <h3>Consolidated fields</h3>
+  <div id="groupsList"></div>
+</section>
+
+<!-- F: descriptions -->
+<section class="card" id="descCard">
+  <h2><span class="num">F</span> Descriptions</h2>
+  <p class="hint">Every field gets a description in the lineage syntax, <code>Source: Airtable. Origins: Orders.Amount; Customers.Name.</code>, which lists the original Airtable table and field names it comes from so each new field can be traced back. They are generated from the schema each time. Edit one by hand and <b>Save</b> to keep your text, or <b>Reset</b> to return to the generated one. A description that is not in this syntax, or that has non-ASCII characters, is flagged. No length limit is checked yet because Adobe documents none; it will be added once one is confirmed.</p>
+  <div id="descLocked" class="note info" hidden>Available once every in-scope table name is approved (section C).</div>
+  <div id="descBody" hidden>
+    <div class="row">
+      <label for="dTable">Table</label><select id="dTable"></select>
+      <input id="dSearch" type="text" class="wide" placeholder="Search field name, ID or description" autocomplete="off">
+      <label><input type="checkbox" id="dEdited"> Edited by hand only</label>
+      <label><input type="checkbox" id="dProblems"> With problems only</label>
+    </div>
+    <div id="descMessage" class="msg"></div>
+    <div id="descCount" class="hint"></div>
+    <div style="overflow-x:auto"><table class="grid" id="descGrid"><thead><tr><th>Table</th><th>Field</th><th>Description</th><th>State</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
+    <div class="row"><button id="btnDescPrev" type="button">Previous</button><span id="descPageInfo" class="hint"></span><button id="btnDescNext" type="button">Next</button></div>
+  </div>
+</section>
+
+<!-- G: downloads -->
+<section class="card" id="downloadCard">
+  <h2><span class="num">G</span> Reports</h2>
+  <p class="hint">Built from the saved names and decisions. The report is one self-contained document for the client and for auditors: summary, settings, table names, one grid per name, duplicate groups, your names against the rules, descriptions, decisions recorded, the rules, and a sign-off block. Open the CSVs in Excel to review with the client.</p>
+  <div class="row" id="reportButtons"></div>
+  <iframe id="reportFrame" class="reportframe" title="Field name review report" sandbox hidden></iframe>
+  <h3>Spreadsheets and rules</h3>
+  <div class="row" id="downloads"></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/names.js"></script>
+</body>
+</html>
