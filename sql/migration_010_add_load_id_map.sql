@@ -10,14 +10,14 @@
 -- against the temporary ID, and a restart skips every row that already has one, so nothing is ever created twice. One row per temporary ID
 -- per stage: Core has a sandbox and production; Workfront Planning has NO environments, only Workspaces (owner, 14 November 2026): everything goes into
 -- one Workspace treated as isolated for Dev, which is then either wiped and recreated as a UAT Workspace or promoted to UAT. So 'environment' is the
--- stage label ('sandbox' and 'production' for Core, 'dev' and 'uat' for Planning) and workspace_id names the Planning Workspace the IDs belong to.
+-- stage label ('sandbox1', 'sandbox2', 'preview' and 'production' for Core, 'dev' and 'uat' for Planning) and workspace_id names the Planning Workspace the IDs belong to.
 -- Promoting Dev to UAT relabels that Workspace's rows (a person's recorded decision); a wipe and recreate makes new rows. Each stage has its own IDs. Option rows (kind 'option') are rows
 -- like any other, with their position in Airtable's order, so every select field's options are recorded by ID in order.
 -- Every create call's result is ALSO logged against its temporary ID in runbook_logs (failing_component = the temporary ID), the existing log.
 -- Nothing here holds a credential or a record value.
 CREATE TABLE IF NOT EXISTS load_id_map (
     temp_id TEXT NOT NULL,            -- for example P-T-tblXXXX, P-F-fldXXXX, C-F-fldXXXX, P-O-fldXXXX-selXXXX
-    environment TEXT NOT NULL CHECK(environment IN ('sandbox', 'production', 'dev', 'uat')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
     workspace_id TEXT,                -- the Planning Workspace these IDs belong to (NULL for Core)
     system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
     kind TEXT NOT NULL CHECK(kind IN ('record_type', 'form', 'field', 'option')),

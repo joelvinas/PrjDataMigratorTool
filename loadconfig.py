@@ -1,10 +1,10 @@
 """Workfront credentials for the loader, read from config.json. Standard library only.
 
-config.json may hold a "workfront" section. Core has environments (sandbox, production); Workfront Planning has none, only Workspaces, so its block is
+config.json may hold a "workfront" section. Core has four environments (sandbox1, sandbox2, preview, production); Workfront Planning has none, only Workspaces, so its block is
 not per environment:
 
     "workfront": {
-      "core": {"sandbox":    {"base_url": "https://yourcompany.sb01.workfront.com", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"},
+      "core": {"sandbox1":   {"base_url": "https://yourcompany.sb01.workfront.com", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"},
                "production": {"base_url": "https://...",                          "api_key": "..."}},
       "planning": {"base_url": "https://...", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE"}
     }
@@ -16,7 +16,7 @@ the page. Nothing in the loader uses these yet: creating items in Workfront is n
 import json, os
 
 SYSTEMS = ("core", "planning")
-ENVIRONMENTS = ("sandbox", "production")      # Core only; Planning uses Workspaces
+ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core only (SB01, SB02, Preview, my); Planning uses Workspaces
 SECRET_KEYS = ("bearer_token", "api_key")
 PLACEHOLDERS = ("PASTE", "REPLACE", "XXXX", "YOURCOMPANY")
 
@@ -65,8 +65,8 @@ def read_config(path):
 
 
 def credentials(data, system, environment=None):
-    """SystemCredentials, or None when the block is missing, incomplete or still holds a placeholder. Core needs an environment (sandbox or
-    production); Planning has none (it uses a Workspace), so its block is read as it is and carries the workspace_id."""
+    """SystemCredentials, or None when the block is missing, incomplete or still holds a placeholder. Core needs an environment (sandbox1, sandbox2,
+    preview or production); Planning has none (it uses a Workspace), so its block is read as it is and carries the workspace_id."""
     if system not in SYSTEMS or (system == "core" and environment not in ENVIRONMENTS):
         raise ConfigError("Unknown system or environment.")
     wf = data.get("workfront") or {}
@@ -85,7 +85,7 @@ def credentials(data, system, environment=None):
 
 
 def status(data):
-    """What is configured, as yes/no only. Safe to print or log: {"core": {"sandbox": bool, "production": bool}, "planning": bool,
+    """What is configured, as yes/no only. Safe to print or log: {"core": {"<environment>": bool, ...}, "planning": bool,
     "planning_workspace": bool}."""
     p = credentials(data, "planning")
     return {"core": {e: credentials(data, "core", e) is not None for e in ENVIRONMENTS}, "planning": p is not None, "planning_workspace": bool(p and p.workspace_id)}

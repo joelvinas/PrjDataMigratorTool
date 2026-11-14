@@ -58,12 +58,12 @@ check("plan() returns the same items the file holds", len(plan["items"]) == len(
 
 # ---- dry run
 dry = loader.main(["dry-run", "--db", dbp, "--base", "appL", "--out", out])
-check("a dry run defaults to the sandbox and describes every ready item", dry["environment"] == "sandbox" and dry["dry_run"] is True
+check("a dry run defaults to the sandbox and describes every ready item", dry["environment"] == "sandbox1" and dry["dry_run"] is True
       and dry["counts"]["would_create"] == len([r for r in rows.values() if r["status"] == "ready"]), dry["counts"])
 dr = list(csv.DictReader(open(os.path.join(out, "load_dry_run.csv"), encoding="utf-8-sig", newline="")))
 check("the dry-run file lists each item's outcome, and items that are not ready are not described", {r["outcome"] for r in dr} == {"would_create", "not_ready"} and
       all("intent only" in r["detail"] for r in dr if r["outcome"] == "would_create"))
-check("the dry-run summary names the environment", open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read().startswith("Dry run in SANDBOX"))
+check("the dry-run summary names the environment", open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read().startswith("Dry run in SANDBOX1"))
 loader.main(["dry-run", "--db", dbp, "--base", "appL", "--out", out, "--env", "production"])
 check("a production DRY run is allowed (it changes nothing) and is labelled", open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read().startswith("Dry run in PRODUCTION"))
 check("the database is still untouched after the dry runs", hashlib.sha256(open(dbp, "rb").read()).hexdigest() == h0)

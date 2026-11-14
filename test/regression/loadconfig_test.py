@@ -7,21 +7,21 @@ def check(n, c, x=""):
     global ok; ok &= bool(c); print(("PASS " if c else "FAIL ") + n, "" if c else str(x)[:300])
 
 CORE_KEY, PLAN_TOK, AT_TOK = "fake-core-key-0001", "fake-planning-token-0002", "fake-airtable-token-0003"
-data = {"token": AT_TOK, "workfront": {"core": {"sandbox": {"base_url": "https://example.sb01.workfront.com/", "api_key": CORE_KEY},
+data = {"token": AT_TOK, "workfront": {"core": {"sandbox1": {"base_url": "https://example.sb01.workfront.com/", "api_key": CORE_KEY},
                                                 "production": {"base_url": "https://YOURCOMPANY.workfront.com", "api_key": "PASTE_KEY_HERE"}},
                                      "planning": {"base_url": "https://example.workfront.com", "bearer_token": PLAN_TOK, "workspace_id": "ws-dev-0001"}}}
-core = lc.credentials(data, "core", "sandbox")
+core = lc.credentials(data, "core", "sandbox1")
 plan = lc.credentials(data, "planning")
 check("a configured Core environment is found, with the trailing slash removed", core is not None and core.base_url == "https://example.sb01.workfront.com" and core.kind == "api_key")
 check("Planning needs no environment and carries its Workspace ID", plan is not None and plan.workspace_id == "ws-dev-0001" and plan.environment is None)
 check("a bearer token is sent as an Authorization header", plan.authorization_header() == ("Authorization", "Bearer " + PLAN_TOK))
 check("an api key travels in its own header", core.authorization_header() == ("apiKey", CORE_KEY))
 check("a placeholder Core production block is not configured", lc.credentials(data, "core", "production") is None)
-check("a plain http address is refused", lc.credentials({"workfront": {"core": {"sandbox": {"base_url": "http://x.example.com", "api_key": CORE_KEY}}}}, "core", "sandbox") is None)
+check("a plain http address is refused", lc.credentials({"workfront": {"core": {"sandbox1": {"base_url": "http://x.example.com", "api_key": CORE_KEY}}}}, "core", "sandbox1") is None)
 check("a placeholder Workspace ID counts as not set", lc.credentials({"workfront": {"planning": {"base_url": "https://a.example.com", "bearer_token": PLAN_TOK, "workspace_id": "PASTE_ID"}}}, "planning").workspace_id is None)
-check("status is yes or no only", lc.status(data) == {"core": {"sandbox": True, "production": False}, "planning": True, "planning_workspace": True})
+check("status is yes or no only", lc.status(data) == {"core": {"sandbox1": True, "sandbox2": False, "preview": False, "production": False}, "planning": True, "planning_workspace": True})
 check("the secret never appears in repr, str or status", all(v not in repr(core) + str(plan) + json.dumps(lc.status(data)) for v in (CORE_KEY, PLAN_TOK)))
-for args in (("core", "qa"), ("core", None), ("nope", "sandbox")):
+for args in (("core", "qa"), ("core", None), ("nope", "sandbox1")):
     try:
         lc.credentials(data, *args); raised = False
     except lc.ConfigError:
@@ -34,7 +34,7 @@ check("redact removes every configured secret", msg == "failed with [removed] an
 d = tempfile.mkdtemp(prefix="loadconfig_")
 good = os.path.join(d, "config.json"); open(good, "w", encoding="utf-8").write(json.dumps(data))
 st = loader.main(["config", "--config", good])
-check("loader config reports yes or no", st["core"]["sandbox"] is True and st["core"]["production"] is False and st["planning"] is True)
+check("loader config reports yes or no", st["core"]["sandbox1"] is True and st["core"]["production"] is False and st["planning"] is True)
 bad = os.path.join(d, "bad.json"); open(bad, "w").write("{not json")
 for path, why in ((bad, "unreadable"), (os.path.join(d, "none.json"), "missing")):
     try:

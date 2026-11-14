@@ -10,7 +10,7 @@ The real Planning and Core transports (each with its own authentication) are add
 documentation and a sandbox; until then only a DryRunTransport exists, so the runner can be exercised end to end without credentials.
 
 Rules this module enforces:
-  * Environment defaults to SANDBOX. Production needs a deliberate extra step: the exact confirmation phrase, and only for a real run (a dry
+  * Environment defaults to SANDBOX (Sandbox 1). Production needs a deliberate extra step: the exact confirmation phrase, and only for a real run (a dry
     run changes nothing, so it needs none).
   * Idempotent: every item has a temporary ID. Its Workfront ID is written back to the STATE the moment create() returns, and any item that
     already has an ID is skipped, so a restart (or a second run) never creates a duplicate.
@@ -20,9 +20,10 @@ Rules this module enforces:
 """
 import re
 
-SANDBOX, PRODUCTION = "sandbox", "production"
+SANDBOX, PRODUCTION = "sandbox1", "production"
+CORE_ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core: Sandbox 1 (SB01), Sandbox 2 (SB02), Preview, Production (my)
 PRODUCTION_PHRASE = "CREATE IN PRODUCTION"
-ENV_COLUMN = {SANDBOX: "DEV", PRODUCTION: "PROD"}        # the environment names used by workfront_fields and field_crosswalk
+ENV_COLUMN = {"sandbox1": "DEV", "sandbox2": "DEV", "preview": "DEV", "production": "PROD"}        # the environment names used by workfront_fields and field_crosswalk
 _SECRET = re.compile(r"(?i)(authorization\s*[=:]\s*(?:bearer\s+|basic\s+)?\S+|bearer\s+\S+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}"
                      r"|(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+)")
 
@@ -38,8 +39,8 @@ class Environment(object):
 def resolve_environment(name=None, confirm=None, dry_run=True):
     """The environment to run in. Sandbox unless production is asked for; a real production run needs the exact confirmation phrase."""
     name = (name or SANDBOX).strip().lower()
-    if name not in (SANDBOX, PRODUCTION):
-        raise ValueError("The environment must be 'sandbox' or 'production'.")
+    if name not in CORE_ENVIRONMENTS:
+        raise ValueError("The environment must be one of: %s." % ", ".join(CORE_ENVIRONMENTS))
     confirmed = confirm == PRODUCTION_PHRASE
     if name == PRODUCTION and not dry_run and not confirmed:
         raise ValueError("Production needs a deliberate extra step: pass the confirmation phrase %r exactly." % PRODUCTION_PHRASE)

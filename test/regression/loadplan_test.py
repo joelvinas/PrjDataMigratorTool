@@ -89,7 +89,7 @@ check("with field review closed (no fields yet) no field from Airtable appears, 
 check("children_of groups children under their parent in plan order", [c["temp_id"] for c in lp.children_of(plan["items"])["P-F-fA3"]] == ["P-O-fA3-selA", "P-O-fA3-selB", "P-O-fA3-selC"])
 
 # ================= the runner =================
-check("the environment defaults to sandbox", lr.resolve_environment().name == "sandbox" and lr.resolve_environment(None, None, dry_run=False).name == "sandbox")
+check("the environment defaults to sandbox", lr.resolve_environment().name == "sandbox1" and lr.resolve_environment(None, None, dry_run=False).name == "sandbox1")
 def raises(fn_, *a, **k):
     try:
         fn_(*a, **k)
@@ -100,7 +100,7 @@ check("an unknown environment name is refused", raises(lr.resolve_environment, "
 check("production can be DESCRIBED without the phrase, but a real production run needs it exactly", lr.resolve_environment("production", None, dry_run=True).name == "production"
       and "deliberate extra step" in (raises(lr.resolve_environment, "production", None, False) or "") and raises(lr.resolve_environment, "production", "create in production", False) is not None
       and lr.resolve_environment("Production", lr.PRODUCTION_PHRASE, dry_run=False).confirmed)
-check("sandbox and production map to the DEV and PROD columns the crosswalk already has", lr.ENV_COLUMN == {"sandbox": "DEV", "production": "PROD"})
+check("Core environments are Sandbox 1, Sandbox 2, Preview and Production; only production maps to PROD", lr.CORE_ENVIRONMENTS == ("sandbox1", "sandbox2", "preview", "production") and [k for k, v in lr.ENV_COLUMN.items() if v == "PROD"] == ["production"])
 
 class Fake(object):
     """A transport that records its calls and can be told to fail on certain items."""
@@ -118,7 +118,7 @@ ready = [i for i in plan["items"] if i["status"] == "ready"]
 sandbox = lr.resolve_environment()
 state, log = lr.MemoryState(), []
 dry = lr.run_plan(plan["items"], state, {"planning": lr.DryRunTransport("planning"), "core": lr.DryRunTransport("core")}, sandbox, dry_run=True, log=lambda *a: log.append(a))
-check("a dry run describes every ready item and changes nothing", dry["counts"]["would_create"] == len(ready) and not state.ids and dry["dry_run"] is True and dry["environment"] == "sandbox")
+check("a dry run describes every ready item and changes nothing", dry["counts"]["would_create"] == len(ready) and not state.ids and dry["dry_run"] is True and dry["environment"] == "sandbox1")
 check("a dry run's children see their parent as 'would be created'", all(r["outcome"] == "would_create" for r in dry["results"] if r["temp_id"] in ("P-F-fA1", "P-O-fA3-selA")))
 check("items that are not ready are reported with their reasons, not described", dry["counts"]["not_ready"] == len(plan["items"]) - len(ready)
       and any("derived field" in (r["detail"] or "") for r in dry["results"] if r["temp_id"] == "P-F-fA4"))
@@ -131,8 +131,8 @@ P, C = Fake("planning"), Fake("core")
 state = lr.MemoryState()
 r1 = lr.run_plan(plan["items"], state, {"planning": P, "core": C}, sandbox, dry_run=False)
 check("a real run creates every ready item, parents before children, passing the parent's Workfront ID", r1["counts"]["created"] == len(ready)
-      and dict(P.calls)["P-F-fA1"] == state.get("P-T-tA", "sandbox") and dict(P.calls)["P-O-fA3-selA"] == state.get("P-F-fA3", "sandbox"))
-check("each Workfront ID is written back against its temporary ID, per environment", state.get("P-F-fA1", "sandbox") is not None and state.get("P-F-fA1", "production") is None)
+      and dict(P.calls)["P-F-fA1"] == state.get("P-T-tA", "sandbox1") and dict(P.calls)["P-O-fA3-selA"] == state.get("P-F-fA3", "sandbox1"))
+check("each Workfront ID is written back against its temporary ID, per environment", state.get("P-F-fA1", "sandbox1") is not None and state.get("P-F-fA1", "production") is None)
 before = len(P.calls) + len(C.calls)
 r2 = lr.run_plan(plan["items"], state, {"planning": P, "core": C}, sandbox, dry_run=False)
 check("running again creates nothing: everything is already created (idempotent)", len(P.calls) + len(C.calls) == before and r2["counts"]["already_created"] == len(ready) and "created" not in r2["counts"])
@@ -144,7 +144,7 @@ st2 = lr.MemoryState()
 r3 = lr.run_plan(plan["items"], st2, {"planning": P2, "core": C2}, sandbox, dry_run=False)
 check("one failure does not stop the run", r3["counts"]["failed"] == 1 and r3["counts"]["parent_missing"] == 2 and r3["counts"]["created"] == len(ready) - 1 - 2, r3["counts"])
 failed = [r for r in r3["results"] if r["outcome"] == "failed"][0]
-check("a failed item has a scrubbed message: no credential survives", "SECRETVALUE" not in failed["detail"] and "Bearer abc" not in failed["detail"] and "[removed]" in failed["detail"] and st2.status[("P-F-fA3", "sandbox")].startswith("failed"), failed["detail"])
+check("a failed item has a scrubbed message: no credential survives", "SECRETVALUE" not in failed["detail"] and "Bearer abc" not in failed["detail"] and "[removed]" in failed["detail"] and st2.status[("P-F-fA3", "sandbox1")].startswith("failed"), failed["detail"])
 check("the failed item's children are skipped because their parent has no ID", {r["temp_id"]: r["outcome"] for r in r3["results"] if r["temp_id"].startswith("P-O-fA3")} == {"P-O-fA3-selA": "parent_missing", "P-O-fA3-selB": "not_ready", "P-O-fA3-selC": "parent_missing"})
 P3 = Fake("planning")
 r4 = lr.run_plan(plan["items"], st2, {"planning": P3, "core": C2}, sandbox, dry_run=False)
@@ -156,7 +156,7 @@ check("a restart after the fix does not touch what already existed", all(t.start
 prod_unconfirmed = lr.Environment("production", False)
 check("the runner itself refuses an unconfirmed production run, but allows a dry run", raises(lr.run_plan, ready, lr.MemoryState(), {}, prod_unconfirmed, False) is not None
       and lr.run_plan(ready[:1], lr.MemoryState(), {"planning": lr.DryRunTransport("planning")}, prod_unconfirmed, dry_run=True)["dry_run"] is True)
-check("the runner refuses a bare string instead of an Environment", raises(lr.run_plan, ready, lr.MemoryState(), {}, "sandbox") is not None)
+check("the runner refuses a bare string instead of an Environment", raises(lr.run_plan, ready, lr.MemoryState(), {}, "sandbox1") is not None)
 for secret_text, leaked in (("Authorization: Bearer abc123xyz", "abc123xyz"), ("Bearer abc.def.ghi failed", "abc.def.ghi"), ("token=TOK123", "TOK123"), ("password: pw1", "pw1"),
                             ("client_secret=SEC9", "SEC9"), ("api_key=KEY7", "KEY7"), ("x eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4 y", "eyJhbGciOi"),
                             ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz")):

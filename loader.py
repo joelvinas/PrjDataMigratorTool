@@ -2,7 +2,7 @@
 """The migration loader: build the load plan and dry-run it. Standard library only.
 
     python loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX [--out out/loader]
-    python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX [--env sandbox|production] [--out out/loader]
+    python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX [--env sandbox1|sandbox2|preview|production] [--out out/loader]
     python loader.py config  [--config config.json]     (which Workfront credentials are set: yes or no only)
 
 The database is opened READ-ONLY and nothing is sent anywhere. `plan` lists everything the migration would create in Workfront Planning and
@@ -82,7 +82,7 @@ def main(argv=None):
         p.add_argument("--out", default="out/loader")
         p.add_argument("--no-link-fields", action="store_true", help="leave out the fields that link a Core object to its Planning record")
         if name != "plan":
-            p.add_argument("--env", default="sandbox", choices=("sandbox", "production"), help="the environment (default: sandbox)")
+            p.add_argument("--env", default="sandbox1", choices=lr.CORE_ENVIRONMENTS, help="the Core environment (default: sandbox1)")
     a = ap.parse_args(argv)
     if a.cmd == "config":
         try:
