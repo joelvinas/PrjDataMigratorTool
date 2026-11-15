@@ -143,6 +143,7 @@ const NAV_PAGES = [
   { key: "stage2", href: "/stage2", label: "Stage 2: Forms", sub: "Form recorder" },
   { key: "stage3", href: "/stage3", label: "Stage 3: Automations", sub: "Automation recorder" },
   { key: "names", href: "/names", label: "Field names", sub: "Naming rules and review" },
+  { key: "postman", href: "/postman", label: "Postman tests", sub: "Planning API checks" },
   { key: "stage4", label: "Stage 4: Map and load", sub: "Planned" },
 ];
 const NAV_BOTTOM = [{ key: "log", href: "/log", label: "API call log", sub: "Audit trail" }];

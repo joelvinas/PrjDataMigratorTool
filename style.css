@@ -178,3 +178,7 @@ th.sortable:focus-visible { outline: 2px solid currentColor; outline-offset: -2p
 th.sortable.sorted-asc::after { content: " B2"; font-size: 0.7em; }
 th.sortable.sorted-desc::after { content: " BC"; font-size: 0.7em; }
 #linkTable tr.undecided td { background: rgba(255, 243, 168, 0.35); }
+
+pre.code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: rgba(127, 127, 127, 0.12); padding: 8px 10px; border-radius: 4px; overflow-x: auto; margin: 4px 0 8px; }
+li.step { margin: 0 0 14px; }
+details.card > summary { cursor: pointer; }

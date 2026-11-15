@@ -38,6 +38,7 @@ import urllib.error
 import urllib.request
 import fieldcompare as names_compare
 import fieldwriters
+import postmantests
 import linkdirections as ld
 import recordmap
 import selectvalues
@@ -4958,6 +4959,17 @@ def api_field_writers_validate(body):
             "csv": _csv_bytes(WRITER_FINDING_COLUMNS, out_rows).decode("utf-8"), "marker_prefix": fieldwriters.MARKER_PREFIX}
 
 
+def api_postman_guide(_q=None):
+    """The Postman test guide: five DEV-Workspace tests to run by hand. Static text; no database, no token and no call to Workfront."""
+    return postmantests.guide()
+
+
+def api_postman_collection(_q=None):
+    """The same requests as a Postman collection (v2.1) with variables and NO authorization: the person adds their own in Postman."""
+    body = json.dumps(postmantests.collection(), indent=2, sort_keys=False).encode("utf-8")
+    return (body, "application/json; charset=utf-8", {"Content-Disposition": 'attachment; filename="workfront_planning_v2_design_tests.postman_collection.json"'})
+
+
 def api_field_writers_decide(body):
     """A person's decision about a formula-only or automation-only field (recompute | park; fusion_owned | go_stale | users_also_edit; or clear). Who, when and why are kept."""
     base = _names_base(body)
@@ -5198,15 +5210,15 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
-          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML), "/postman": ("postman.html", HTML),
           "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
-          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/postman.js": ("postman.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,

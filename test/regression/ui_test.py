@@ -15,7 +15,7 @@ with sync_playwright() as p:
     pg.goto(B); pg.wait_for_timeout(1200)
     navtxt=lambda p: [a.inner_text().split("\n")[0] for a in p.query_selector_all("#sidenav .nav-label")]
     check("home page is Setup with steps 1 and 2 only", pg.query_selector("#step1") and pg.query_selector("#step2") and not pg.query_selector("#step3") and pg.inner_text("#sidenav a.current .nav-label")=="Setup")
-    check("nav order, Stage 4 is a planned slot, log is last", navtxt(pg)==["Setup","Stage 1: Data","Stage 2: Forms","Stage 3: Automations","Field names","Stage 4: Map and load","API call log"], navtxt(pg))
+    check("nav order, Stage 4 is a planned slot, log is last", navtxt(pg)==["Setup","Stage 1: Data","Stage 2: Forms","Stage 3: Automations","Field names","Postman tests","Stage 4: Map and load","API call log"], navtxt(pg))
     check("Stage 4 is not a link", pg.query_selector("#sidenav .planned") is not None and pg.query_selector("#sidenav .planned").get_attribute("href") is None)
     box=lambda sel: pg.eval_on_selector(sel,"e=>{const r=e.getBoundingClientRect();return [r.top,r.bottom]}")
     nb=pg.eval_on_selector("#sidenav","e=>{const r=e.getBoundingClientRect();return r.bottom}")
@@ -63,6 +63,13 @@ with sync_playwright() as p:
     pg.click("#orderTable thead th:nth-child(3)"); ids=col("#orderTable",2)
     check("the load order grid sorts on table ID", ids==sorted(ids,key=str.lower) and len(ids)>=2, ids)
     pg.click("#orderTable thead th:nth-child(3)"); pg.click("#orderTable thead th:nth-child(3)")
+    # Postman test guide page
+    pg.goto(B+"/postman"); pg.wait_for_selector("#tests details.card", timeout=8000)
+    check("the Postman guide shows five tests and the variables", pg.locator("#tests details.card").count()==5 and pg.locator("#varTable tbody tr").count()>=10)
+    check("a step shows its method, URL with Postman variables, and a JSON body", "https://{{customer_domain}}/maestro/api/v2/workspaces/{{workspace_id}}/record-types" in pg.inner_text("#test1") and "ZZ Migration Test Name" in pg.inner_text("#test1"))
+    check("the page states it never calls Workfront and the collection link is there", "never calls Workfront" in pg.inner_text("#introCard") and pg.get_attribute("#lnkCollection","href")=="/api/postman/collection.json")
+    check("the navigation lists the page", "Postman tests" in pg.inner_text("#sidenav"))
+    pg.goto(B+"/stage1"); pg.wait_for_timeout(800)
     # mode help
     pg.select_option("#depMode","literal"); t1=pg.inner_text("#depModeHelp")
     pg.select_option("#depMode","collapse"); t2=pg.inner_text("#depModeHelp")
