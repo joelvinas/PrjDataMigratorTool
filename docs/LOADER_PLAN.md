@@ -46,7 +46,7 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 
 ## Facts supplied by the owner (14 November 2026)
 
-- **Planning authenticates with a Bearer token** from `config.json`. The Planning field description property is `description`; its length limit is unproven (512 in the v2 reference, 1,024 quoted from a v3 PATCH page that describes a record type's description). The plan checks against 512 until Postman test 3 says otherwise.
+- **Planning authenticates with a Bearer token** from `config.json`. The Planning field description property is `description`; its length is 512 in the v2 reference and 1,024 in the v3 field PATCH documentation. Owner decision: the plan keeps 512 as the safer limit regardless.
 - **Core create calls (templates only, from the owner's reference):** `POST /param` creates a custom field. Properties: ID, customerID, dataType (for example DATE), description, displaySize, displayType (for example MULT), extRefID, formatConstraint, isRequired, label, lastUpdateDate, lastUpdatedByID, name, refObjCode. `POST /popt` creates a select option. Properties: ID, customerID, displayOrder, extRefID, isDefault, isHidden, label, parameterID, value. The bodies are bare templates: which properties are required, the dataType and displayType per Airtable type, and the call that attaches a field to a form are still to be proven in a sandbox (S6). The community-reported objects (PARAM, POPT, CTGYPA) match these paths.
 - **The 30 reference-field cap and back references** cannot be tested without a 31-link table: a documented limitation, not assumed either way.
 
