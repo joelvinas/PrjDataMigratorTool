@@ -10,7 +10,7 @@ shorten a description). Only the Planning items of the plan are checked (Core ha
     long-text fields per record type 20
     formula fields per record type   20    (formulas are on hold in the plan, so they are counted only if they are planned)
     reference (link) fields per record type 30
-    field description               512 characters
+    field description               512 characters (v2 reference). A v3 PATCH page quotes 1,024, but in wording about a record type's description; unproven for a field (Postman test 3), so the stricter 512 is used
     record type name                255 characters, field name 256 (the app's own Planning name limit of 250 is stricter)
     select options                  a non-blank name, unique without regard to letter case, within one field
     records per record type         25,000  (needs the profile row count; see check_record_counts)

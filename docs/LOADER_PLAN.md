@@ -44,6 +44,12 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 - Core custom fields are `PARAM` objects and custom forms are `CTGY` objects; a field is attached to a form by updating the form's `categoryParameters` (objCode `CTGYPA`). ([community thread](https://experienceleaguecommunities.adobe.com/adobe-workfront-general-23/api-call-attach-assign-existing-custom-field-parameter-to-existing-custom-form-category-127216))
 - Planning: field IDs are not shown in the UI, fields cannot easily be found by name, and patching individual select options may be undocumented. The only reply in that thread is from a partner, not Adobe, and says V2 may cover it. ([thread, May to October 2026](https://experienceleaguecommunities.adobe.com/adobe-workfront-23/workfront-planning-fusion-api-limitations-250603))
 
+## Facts supplied by the owner (14 November 2026)
+
+- **Planning authenticates with a Bearer token** from `config.json`. The Planning field description property is `description`; its length limit is unproven (512 in the v2 reference, 1,024 quoted from a v3 PATCH page that describes a record type's description). The plan checks against 512 until Postman test 3 says otherwise.
+- **Core create calls (templates only, from the owner's reference):** `POST /param` creates a custom field. Properties: ID, customerID, dataType (for example DATE), description, displaySize, displayType (for example MULT), extRefID, formatConstraint, isRequired, label, lastUpdateDate, lastUpdatedByID, name, refObjCode. `POST /popt` creates a select option. Properties: ID, customerID, displayOrder, extRefID, isDefault, isHidden, label, parameterID, value. The bodies are bare templates: which properties are required, the dataType and displayType per Airtable type, and the call that attaches a field to a form are still to be proven in a sandbox (S6). The community-reported objects (PARAM, POPT, CTGYPA) match these paths.
+- **The 30 reference-field cap and back references** cannot be tested without a 31-link table: a documented limitation, not assumed either way.
+
 ## What is not verified (so not built)
 
 1. The exact **request shapes** for creating a Planning record type, field and select option, and a Core custom field and its options. Adobe's published pages found do not give an endpoint reference for them; the Fusion modules show they exist.

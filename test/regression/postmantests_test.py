@@ -26,7 +26,7 @@ check("no path or body contains a token, a password or a real address", not re.s
 body = lambda t, k: t["steps"][k]["body"]
 check("test 2 sends a PATCH with only the changed property", [s["body"] for s in T[1]["steps"] if s["method"] == "PATCH"][0] == {"description": "after"})
 check("test 3 sends the real marker, and descriptions of exactly 512 and 513 characters", body(T[2], 1)["description"].startswith('Fusion-driven: written by scenario "Order sync".')
-      and len(pt.LONG_512) == 512 and len(pt.LONG_513) == 513 and {v[0]: v[1] for v in pt.VARIABLES}["long_description_513"] == pt.LONG_513)
+      and len(pt.LONG_512) == 512 and len(pt.LONG_513) == 513 and len(pt.LONG_1024) == 1024 and len(pt.LONG_1025) == 1025 and {v[0]: v[1] for v in pt.VARIABLES}["long_description_513"] == pt.LONG_513)
 check("test 4 creates the link with the back reference on, and a control with it off", [s["body"]["referenceOptions"]["createBackReference"] for s in T[3]["steps"] if s["body"] and "referenceOptions" in s["body"]] == [True, False])
 check("test 5 bulk-creates a JSON array of records each with a distinct value, under the documented limit of 100", isinstance(body(T[4], 2), list) and len(body(T[4], 2)) == 5 and len(body(T[4], 2)) <= 100
       and len({json.dumps(r) for r in body(T[4], 2)}) == 5)

@@ -14,6 +14,8 @@ BASE_URL = "https://{customer-domain}/maestro/api"
 PREFIX = "ZZ Migration Test"
 LONG_512 = "x" * 512
 LONG_513 = "x" * 513
+LONG_1024 = "x" * 1024
+LONG_1025 = "x" * 1025
 MARKER_EXAMPLE = 'Fusion-driven: written by scenario "Order sync". Source: Airtable. Origins: Orders.Total.'
 
 # Postman collection variables, in the order a person sets them. The ones with a value are fixed test text; the rest the person fills in (or a step saves).
@@ -29,7 +31,9 @@ VARIABLES = [
     ("field_id", "", "Saved by the step that creates a throwaway field."),
     ("primary_field_id", "", "Saved by test 5: the record type's primary field, which the test records are written into."),
     ("long_description_512", LONG_512, "512 characters, the documented maximum (test 3)."),
-    ("long_description_513", LONG_513, "513 characters, one over the documented maximum (test 3)."),
+    ("long_description_513", LONG_513, "513 characters, one over the v2 reference maximum for a field description (test 3)."),
+    ("long_description_1024", LONG_1024, "1,024 characters, the maximum quoted from the v3 PATCH documentation (test 3)."),
+    ("long_description_1025", LONG_1025, "1,025 characters, one over that (test 3)."),
 ]
 
 
@@ -100,9 +104,13 @@ TESTS = [
                   expect="201."),
             _step("Create a field with a 513-character description", "POST", "/v2/record-types/{{rt_a_id}}/fields", {"displayName": PREFIX + " Long 513", "type": "text", "description": "{{long_description_513}}"},
                   expect="400 if the limit is enforced (note the errorCode); 201 if it is not."),
+            _step("Create a field with a 1,024-character description", "POST", "/v2/record-types/{{rt_a_id}}/fields", {"displayName": PREFIX + " Long 1024", "type": "text", "description": "{{long_description_1024}}"},
+                  expect="201 means the limit is above 512 (the v3 PATCH documentation quotes 1,024, but that wording describes a record type's description, so it must be proven for a field).", optional=True),
+            _step("Create a field with a 1,025-character description", "POST", "/v2/record-types/{{rt_a_id}}/fields", {"displayName": PREFIX + " Long 1025", "type": "text", "description": "{{long_description_1025}}"},
+                  expect="400 means 1,024 is the real maximum; 201 means there is no limit this low.", optional=True),
         ],
         "results": [
-            ("Step 3 returns the description exactly as sent, and step 5 is refused", "PASS. The marker can be written on create. The limit is 512, so the generated description (marker first) must be checked against 512 before it is sent."),
+            ("Step 3 returns the description exactly as sent, and step 5 is refused", "PASS. The marker can be written on create. The limit is 512 (the v2 reference), so the generated description (marker first) must be checked against 512 before it is sent. If steps 6 and 7 show 1,024 is allowed, raise the limit to 1,024."),
             ("Step 3 returns the description exactly as sent and step 5 succeeds", "PASS for the marker. The 512 limit is documented but not enforced: still keep descriptions under it."),
             ("The description is missing or changed in step 3", "FAIL. The marker cannot be written on create. Write it with a PATCH afterwards (test 2), or find the right property name."),
         ],
