@@ -56,4 +56,9 @@ s, d, h = get("/api/postman/collection.json")
 check("the collection downloads as a file", s == 200 and "attachment" in h["Content-Disposition"] and "postman_collection.json" in h["Content-Disposition"] and json.loads(d)["info"]["name"].startswith("Workfront Planning v2"))
 s, d, h = get("/postman")
 check("the page is served with its script and in the navigation", s == 200 and b"Postman tests" in d and get("/postman.js")[0] == 200 and b"/postman" in get("/common.js")[1])
+s, d, h = get("/api/sandbox-plan")
+sp = json.loads(d)["items"]
+check("the sandbox plan is served: the five items from the design plus the Core call and the attachment link life, each with steps and a result", s == 200 and [i["id"] for i in sp] == ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
+      and all(i["steps"] and i["result"] and i["decides"] and i["why"] for i in sp))
+check("a Planning item that a Postman test covers says which, and no sandbox step contains a token or an address", sp[0]["covered_by"] == "Postman test 3" and not re.search(r"(?i)bearer|secret|password|https?://", json.dumps(sp)))
 sys.exit(0 if ok else 1)

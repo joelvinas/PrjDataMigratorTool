@@ -70,6 +70,8 @@ Still open: how the runner's single environment maps to a Core stage plus a Plan
 
 ## The sandbox test plan (from the Migration Design prompt)
 
+The plan is also shown, with steps and how to read each result, on the Postman tests page (`/postman`, `sandboxplan.py`), together with two more items found while building it: the Core custom field create call and the life of Airtable attachment links.
+
 Each is an undocumented or unconfirmed behavior to prove once in a sandbox before the loader relies on it.
 
 1. The **description length limit** for a field.

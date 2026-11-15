@@ -49,4 +49,16 @@ async function load() {
   d.tests.forEach((t) => box.appendChild(testCard(d, t)));
 }
 
-startPage("postman", {}, () => { load().catch((e) => showGlobalError(e.message)); });
+const HOW = { postman: "Postman", postman_partly: "Postman and by hand", manual: "By hand in the product" };
+
+async function loadSandbox() {
+  const d = await api("GET", "/api/sandbox-plan");
+  $("sandboxNote").textContent = d.note;
+  const box = $("sandbox"); clear(box);
+  d.items.forEach((s) => box.appendChild(el("details", { class: "card", id: "sandbox" + s.id },
+    el("summary", {}, el("strong", { text: s.id + ": " + s.title }), " ", el("span", { class: "tag run", text: s.system }), " ", el("span", { class: "tag", text: HOW[s.how] || s.how }), s.covered_by ? el("span", { class: "hint", text: " (" + s.covered_by + ")" }) : null),
+    el("p", {}, el("strong", { text: "Why: " }), s.why), el("ol", {}, s.steps.map((x) => el("li", { text: x }))),
+    el("p", {}, el("strong", { text: "Result: " }), s.result), el("p", {}, el("strong", { text: "It decides: " }), s.decides))));
+}
+
+startPage("postman", {}, () => { load().catch((e) => showGlobalError(e.message)); loadSandbox().catch((e) => showGlobalError(e.message)); });

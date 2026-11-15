@@ -39,6 +39,7 @@ import urllib.request
 import fieldcompare as names_compare
 import fieldwriters
 import postmantests
+import sandboxplan
 import linkdirections as ld
 import recordmap
 import selectvalues
@@ -4964,6 +4965,10 @@ def api_postman_guide(_q=None):
     return postmantests.guide()
 
 
+def api_sandbox_plan(_q=None):
+    return sandboxplan.plan()
+
+
 def api_postman_collection(_q=None):
     """The same requests as a Postman collection (v2.1) with variables and NO authorization: the person adds their own in Postman."""
     body = json.dumps(postmantests.collection(), indent=2, sort_keys=False).encode("utf-8")
@@ -5218,7 +5223,7 @@ STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
