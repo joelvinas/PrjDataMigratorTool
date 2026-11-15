@@ -143,5 +143,25 @@ check("a link pair that touches an out-of-scope table is not a pair to decide", 
 check("field states feed the plan: decided is True, undecided is False", ld.field_states(c)["fOC"] is True and ld.field_states(c2)["fIO"] is False)
 check("an older database without the columns reports no states", ld.field_states(sqlite3.connect(":memory:")) is None)
 
+# ---- connection-field counts and ambiguous pairs
+cc = {x["table_name"]: x for x in ld.connection_counts(srv._link_direction_rows(c))}
+check("each table's link fields are counted, each side of a pair on its own table, with the cap", cc["Orders"]["links"] == 2 and cc["Customers"]["links"] == 2 and cc["Items"]["links"] == 2 and cc["Orders"]["cap"] == 30 and cc["Orders"]["status"] == "ok", cc)
+check("the result is sorted largest first, then by name", [x["links"] for x in ld.connection_counts(srv._link_direction_rows(c))] == sorted([x["links"] for x in ld.connection_counts(srv._link_direction_rows(c))], reverse=True))
+HUB = {"tH": "Hub"}; HUB.update({"t%02d" % i: "Spoke%02d" % i for i in range(31)})
+def hub(n):
+    fs = [("h%02d" % i, "tH", "Link%02d" % i, "t%02d" % i, None, 0) for i in range(n)]
+    fs += [("p%02d" % i, "t%02d" % i, "Name", None, None, None) for i in range(31)]     # every table has a plain field, as real tables do
+    return make(HUB, fs)
+for n, want in ((26, "ok"), (27, "near"), (30, "near"), (31, "over")):
+    got = {x["table_name"]: x for x in ld.connection_counts(srv._link_direction_rows(hub(n)))}["Hub"]
+    check("a table with %d link fields is %s (the cap is 30, near is within 3)" % (n, want), got["links"] == n and got["status"] == want, got)
+cH = hub(5); cH.execute("INSERT INTO table_scope(base_id, table_id, decision, decided_by) VALUES ('appLink', 't00', 'out', 'JV')"); cH.commit()
+check("a link to a table out of scope is not a field Planning would create, so it is not counted", {x["table_name"]: x for x in ld.connection_counts(srv._link_direction_rows(cH))}["Hub"]["links"] == 4)
+c9 = make(T, F); ld.sync(c9, srv._link_direction_rows(c9))
+p = srv._direction_payload(c9)
+check("the payload carries the counts and the ambiguous pairs: Articles/Tags and Items/Customers are many to many", p["counts"]["ambiguous"] == 2 and p["counts"]["ambiguous_undecided"] == 2 and p["counts"]["ambiguous_by_type"] == {"many_to_many": 2} and p["connection_cap"] == 30 and p["connection_counts"], p["counts"])
+ld.decide(c9, "JV", "fAT", "many_to_many", "this_first", "")
+check("an ambiguous pair that has a tiebreaker is no longer undecided, but is still counted as ambiguous", srv._direction_payload(c9)["counts"]["ambiguous"] == 2 and srv._direction_payload(c9)["counts"]["ambiguous_undecided"] == 1)
+
 print("ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

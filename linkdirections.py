@@ -141,6 +141,36 @@ def settle_automatic(binding_edges, automatic, order_key):
     return settled, added, loops
 
 
+CAP = 30            # reference (connection) fields per Planning record type (v2 reference)
+NEAR = 3            # warn when a table is within this many of the cap
+
+
+def connection_counts(rows):
+    """Link fields per table, from the ingested schema (rows: non-stale airtable_fields rows of tables in scope). Counts every link field whose linked table is also in
+    scope, self-links included: those are the reference fields Planning would have to create. Each side of a two-way pair is its own field, so a pair uses a slot on
+    both tables. Whether a back reference ALSO uses a slot beyond that is unknown and cannot be tested without a table of about 31 links (see the README), so no
+    extra slot is assumed. Returns [{table_id, table_name, links, status}] sorted by count (largest first) then name; status is over, near or ok."""
+    tables = {r["table_id"] for r in rows}
+    n, names = {}, {}
+    for r in rows:
+        names[r["table_id"]] = r["table_name"]
+        if r["linked_table_id"] and r["linked_table_id"] in tables:
+            n[r["table_id"]] = n.get(r["table_id"], 0) + 1
+    out = [{"table_id": t, "table_name": names[t], "links": c, "cap": CAP, "status": "over" if c > CAP else "near" if c >= CAP - NEAR else "ok"} for t, c in n.items()]
+    out.sort(key=lambda x: (-x["links"], x["table_name"].lower(), x["table_id"]))
+    return out
+
+
+def ambiguous(units):
+    """Pairs the schema cannot orient (one to one, or many to many): they need a tiebreaker. {total, undecided, by_type}."""
+    amb = [u for u in units if any(f["suggested_type"] in NEEDS_TIEBREAKER for f in u["fields"])]
+    kinds = {}
+    for u in amb:
+        k = sorted({f["suggested_type"] for f in u["fields"] if f["suggested_type"] in NEEDS_TIEBREAKER})[0]
+        kinds[k] = kinds.get(k, 0) + 1
+    return {"total": len(amb), "undecided": sum(1 for u in amb if not u["decision"]), "by_type": dict(sorted(kinds.items()))}
+
+
 # ------------------------------------------------------------------ stored decisions (field_relationships)
 def has_direction_columns(conn):
     return "suggested_type" in {r[1] for r in conn.execute("PRAGMA table_info(field_relationships)")}

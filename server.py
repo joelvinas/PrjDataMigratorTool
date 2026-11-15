@@ -1918,10 +1918,11 @@ def _direction_payload(conn):
         u["status"] = "undecided" if not u["decision"] else ("automatic" if u["decision"]["ordering"] == "automatic" else "confirmed")
         u["decision"] = None if not u["decision"] else {k: u["decision"][k] for k in ("field_id", "relationship_type", "tiebreaker")}
     undecided = sum(1 for u in units if u["status"] == "undecided")
-    counts = {"pairs": len(units), "undecided": undecided, "confirmed": sum(1 for u in units if u["status"] == "confirmed"),
+    amb = ld.ambiguous([dict(u, decision=u["decision"]) for u in units])
+    counts = {"ambiguous": amb["total"], "ambiguous_undecided": amb["undecided"], "ambiguous_by_type": amb["by_type"], "pairs": len(units), "undecided": undecided, "confirmed": sum(1 for u in units if u["status"] == "confirmed"),
               "automatic": sum(1 for u in units if u["status"] == "automatic"),
               "two_way": sum(1 for u in units if len(u["fields"]) == 2), "one_way": sum(1 for u in units if len(u["fields"]) == 1)}
-    return {"available": True, "pairs": units, "counts": counts, "schema_build_blocked": undecided > 0, "type_labels": ld.TYPE_LABEL}
+    return {"available": True, "pairs": units, "counts": counts, "schema_build_blocked": undecided > 0, "type_labels": ld.TYPE_LABEL, "connection_counts": ld.connection_counts(rows), "connection_cap": ld.CAP}
 
 
 def _direction_call(fn_, *a):

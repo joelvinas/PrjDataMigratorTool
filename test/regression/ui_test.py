@@ -46,6 +46,7 @@ with sync_playwright() as p:
     pg.click("#btnLinkRefresh"); pg.wait_for_timeout(1500)
     ls=pg.inner_text("#linkSummary")
     check("link directions list the detected pairs and say the order is provisional", "undecided" in ls and "provisional" in ls and pg.is_visible("#linkTable") and len(pg.query_selector_all("#linkTable tbody tr"))>=2, ls)
+    check("the link section shows connection fields per table against the cap of 30, and how many pairs are ambiguous", "Connection fields per table" in pg.inner_text("#linkCaps") and "30" in pg.inner_text("#linkCaps") and ("ambiguous" in ls or "No pair is ambiguous" in ls), (pg.inner_text("#linkCaps"), ls))
     check("the default link handling follows the confirmed directions", pg.input_value("#depMode")=="confirmed" and pg.inner_text("#depModeHelp").startswith("Confirmed"))
     pg.fill("#linkActor",""); pg.select_option("#linkTable tbody tr:first-child td:nth-child(5) select","many_to_one"); pg.click("#linkTable tbody tr:first-child td:last-child button"); pg.wait_for_timeout(300)
     check("a decision without initials is refused with a plain message", "initials" in pg.inner_text("#linkMessage"), pg.inner_text("#linkMessage"))
