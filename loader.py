@@ -48,6 +48,8 @@ def summary_text(plan, base_id, title="Load plan"):
     L += ["", "By system, kind and status:"] + ["  %s: %d" % (k, v) for k, v in s["by_system_kind_status"].items()]
     if s["reasons"]:
         L += ["", "Why items are not ready (count of items):"] + ["  %d x %s" % (v, k) for k, v in s["reasons"].items()]
+    if s.get("limit_findings"):
+        L += ["", "Workfront Planning limits (documented, not yet tested; a person decides, nothing changes on its own):"] + ["  %s: %s" % (f["scope"], f["detail"]) for f in s["limit_findings"]]
     L += ["", "Tables out of scope (skipped): %d" % s["out_of_scope_tables"], "",
           "Nothing was sent to Workfront. Creating items is not implemented yet (docs/LOADER_PLAN.md)."]
     return "\n".join(L) + "\n"
@@ -117,7 +119,7 @@ def main(argv=None):
         sys.exit(e.message)
     finally:
         conn.close()
-    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"))
+    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"))
     _write(a.out, "load_plan.csv", plan_csv(plan))
     text = summary_text(plan, a.base)
     if a.cmd == "plan":

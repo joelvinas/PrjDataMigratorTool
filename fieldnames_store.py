@@ -781,7 +781,8 @@ def loader_inputs(conn, base_id):
             continue
         if isinstance(items, list):
             choices[r[0]] = [{"id": str(x.get("id")), "name": str(x.get("name"))} for x in items if isinstance(x, dict) and x.get("id") is not None]
-    return {"review": rv, "choices": choices}
+    counts = {r[0]: r[1] for r in conn.execute("SELECT table_id, MAX(row_count) FROM airtable_fields WHERE base_id=? GROUP BY table_id", (base_id,))}
+    return {"review": rv, "choices": choices, "record_counts": counts}
 
 
 def report_zip(files):
