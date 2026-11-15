@@ -706,6 +706,7 @@ startPage("stage3", { onReadyChange, afterConnect }, () => {
   $("btnRepPreview").addEventListener("click", previewRep);
   $("btnUsage").addEventListener("click", guarded(runUsage));
   sortableTable("writersTable");
+  watchSort("usageTable");
   $("btnWriters").addEventListener("click", guarded(loadWriters));
   sortableTable("wrValTable");
   $("btnWrValidate").addEventListener("click", guarded(validateWriters));

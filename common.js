@@ -284,6 +284,16 @@ function applySort(id) {
   rows.forEach((r) => body.appendChild(r));
 }
 
+/* Makes a grid sortable AND keeps its sort when the page redraws its rows (for grids the page fills with its own code). */
+function watchSort(id) {
+  const t = $(id);
+  if (!t || t.dataset.watched) return;
+  t.dataset.watched = "1";
+  sortableTable(id);
+  const obs = new MutationObserver(() => { obs.disconnect(); applySort(id); obs.observe(t.tBodies[0], { childList: true }); });
+  obs.observe(t.tBodies[0], { childList: true });
+}
+
 function ageTag(iso) {
   const a = ageInfo(iso);
   return a ? el("span", { class: "tag age-" + a.level, text: a.text, title: "Data older than " + AGE_STALE_HOURS + " hours is stale; older than " + AGE_OBSOLETE_HOURS + " hours is obsolete. Pull it again before relying on it." }) : "";

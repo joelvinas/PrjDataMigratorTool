@@ -28,6 +28,7 @@ startPage("log", {
   onReadyChange() { $("btnLog").disabled = !state.ready; },
   afterConnect: loadLog,
 }, () => {
+  watchSort("logTableEl");
   $("btnLog").addEventListener("click", guard(loadLog));
   for (const id of ["logFail", "logTable", "logPurpose"]) $(id).addEventListener("change", guard(loadLog));
 });

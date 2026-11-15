@@ -493,6 +493,7 @@ async function afterConnect() {
 const guarded = (fn) => async () => { try { await fn(); } catch (e) { showGlobalError(e.message); } };
 
 startPage("stage2", { onReadyChange, afterConnect }, () => {
+  watchSort("usageTable");
   initBaseCombo();
   const dl = el("datalist", { id: "presetSources" }, ["URL parameter (prefill_...)", "Form default", "Set by an automation"].map((t) => el("option", { value: t })));
   document.body.appendChild(dl);

@@ -161,7 +161,7 @@
   <p class="hint">One row per field, giving its <strong>row count</strong>, <strong>null count</strong> and <strong>cardinality</strong> (distinct values; a capped value is a lower bound) for every table in the base and table selected above. This is the data-quality summary to share with support or use to plan field mapping. The file name shows your selection, for example <code>Bases_Tables_Profile_&lt;date&gt;.csv</code> for everything. It contains counts only, no record values.</p>
   <p class="hint">Null = missing, empty text or empty list. Zero and unchecked boxes count as real values. A cardinality marked "capped" is a lower bound: the field has more distinct values than the cap.</p>
   <div class="scroll"><table id="resultsTable" class="grid" hidden>
-    <thead><tr><th>Table</th><th>Field</th><th>Type</th><th class="num">row_count</th><th class="num">null_count</th><th class="num">null %</th><th class="num">cardinality</th></tr></thead>
+    <thead data-sort="text"><tr><th>Table</th><th data-sort="text">Field</th><th data-sort="text">Type</th><th class="num" data-sort="num">row_count</th><th class="num" data-sort="num">null_count</th><th class="num" data-sort="num">null %</th><th class="num" data-sort="num">cardinality</th></tr></thead>
     <tbody></tbody>
   </table></div>
 
@@ -171,8 +171,8 @@
     <button id="btnAttRefresh">Refresh</button></div>
   <div id="attSummary" class="msg"></div>
   <div class="scroll"><table id="attBandTable" class="grid compact" hidden><thead><tr><th>Size band</th><th class="num">Files</th></tr></thead><tbody></tbody></table></div>
-  <div class="scroll"><table id="attTypeTable" class="grid compact" hidden><thead><tr><th>Extension</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
-  <div class="scroll"><table id="attTableTable" class="grid compact" hidden><thead><tr><th>Table</th><th class="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="attTypeTable" class="grid compact" hidden><thead data-sort="text"><tr><th>Extension</th><th class="num" data-sort="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="attTableTable" class="grid compact" hidden><thead data-sort="text"><tr><th>Table</th><th class="num" data-sort="num">Files</th><th class="num">Total size</th><th class="num">Largest</th></tr></thead><tbody></tbody></table></div>
 </section>
 
 <!-- STEP 6 -->
@@ -181,7 +181,7 @@
   <p class="hint">Files written when "Also save every record to JSON files" is ticked in step 5. One JSON file per table in <code id="exFolder">...</code>, written to a temporary name and swapped in only when the whole table was read, so a failed table keeps its earlier file. The folder is excluded from Git. These files contain record values: keep them private and delete them when the migration no longer needs them. Attachment links inside the data are temporary links from Airtable and expire after a few hours; the attached files are downloaded only when "Also download the attachment files" was ticked in step 5, into an <code>attachments</code> folder beside the table files.</p>
   <div id="exFilesSummary" class="msg"></div>
   <div class="scroll"><table id="exFilesTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th class="num">Records</th><th class="num">Fields</th><th class="num">Size</th><th class="num">Attachment files</th><th>Captured (UTC)</th><th>Age</th><th>Check</th><th>SHA-256</th></tr></thead>
+    <thead data-sort="text"><tr><th>Table</th><th class="num" data-sort="num">Records</th><th class="num" data-sort="num">Fields</th><th class="num">Size</th><th class="num" data-sort="num">Attachment files</th><th data-sort="text">Captured (UTC)</th><th>Age</th><th>Check</th><th>SHA-256</th></tr></thead>
     <tbody></tbody>
   </table></div>
   <p class="hint">The page shows counts, sizes and checksums only. "Matches profile" compares the file's record count with the table's latest profile.</p>
@@ -198,7 +198,7 @@
   <div class="row"><button id="btnSelectValues">Check select values</button></div>
   <div id="svSummary" class="msg"></div>
   <div class="scroll"><table id="svTable" class="grid compact" hidden>
-    <thead><tr><th>Table</th><th>Field</th><th class="num">Declared options</th><th class="num">Records</th><th class="num">Empty</th><th class="num">Distinct values in data</th><th class="num">Not declared</th><th class="num">Records affected</th><th class="num">Near matches</th><th>Declared but never used</th><th>Example records (not declared)</th></tr></thead>
+    <thead data-sort="text"><tr><th>Table</th><th data-sort="text">Field</th><th class="num" data-sort="num">Declared options</th><th class="num" data-sort="num">Records</th><th class="num" data-sort="num">Empty</th><th class="num" data-sort="num">Distinct values in data</th><th class="num" data-sort="num">Not declared</th><th class="num" data-sort="num">Records affected</th><th class="num" data-sort="num">Near matches</th><th>Declared but never used</th><th>Example records (not declared)</th></tr></thead>
     <tbody></tbody>
   </table></div>
   <div id="svSkipped"></div>

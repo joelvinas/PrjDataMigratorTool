@@ -67,6 +67,7 @@ startPage("setup", {
   onDbError(e) { setMsg("dbMessage", e.message, "err"); },
   afterConnect,
 }, () => {
+  watchSort("countsTable");
   $("btnConnect").addEventListener("click", connectDb);
   $("dbPath").addEventListener("keydown", (e) => { if (e.key === "Enter") connectDb(); });
   $("btnCreate").addEventListener("click", createDb);

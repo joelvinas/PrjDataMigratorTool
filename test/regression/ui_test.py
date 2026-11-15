@@ -64,6 +64,14 @@ with sync_playwright() as p:
     pg.click("#orderTable thead th:nth-child(3)"); ids=col("#orderTable",2)
     check("the load order grid sorts on table ID", ids==sorted(ids,key=str.lower) and len(ids)>=2, ids)
     pg.click("#orderTable thead th:nth-child(3)"); pg.click("#orderTable thead th:nth-child(3)")
+    # older grids sort too, and keep their sort when redrawn
+    pg.click("#btnResults"); pg.wait_for_selector("#resultsTable tbody tr", timeout=8000)
+    pg.click("#resultsTable thead th:nth-child(2)"); fl=pg.eval_on_selector_all("#resultsTable tbody tr","rs=>rs.map(r=>r.cells[1].textContent.trim())")
+    check("the profile results grid sorts on field name", len(fl)>2 and fl==sorted(fl,key=str.lower), fl[:6])
+    pg.click("#btnResults"); pg.wait_for_timeout(800); fl2=pg.eval_on_selector_all("#resultsTable tbody tr","rs=>rs.map(r=>r.cells[1].textContent.trim())")
+    check("the sort is kept when the grid is redrawn", fl2==fl and "sorted-asc" in pg.get_attribute("#resultsTable thead th:nth-child(2)","class"))
+    pg.click("#resultsTable thead th:nth-child(4)"); pg.click("#resultsTable thead th:nth-child(4)"); nums=pg.eval_on_selector_all("#resultsTable tbody tr","rs=>rs.map(r=>parseFloat(r.cells[3].textContent.replace(/,/g,'')))")
+    check("a number column sorts numerically, descending on the second click", nums==sorted(nums,reverse=True), nums[:6])
     # Postman test guide page
     pg.goto(B+"/postman"); pg.wait_for_selector("#tests details.card", timeout=8000)
     check("the Postman guide shows five tests and the variables", pg.locator("#tests details.card").count()==5 and pg.locator("#varTable tbody tr").count()>=10)

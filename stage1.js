@@ -562,6 +562,7 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
   for (const id of ["linkTable", "regTable", "orderTable"]) sortableTable(id);
+  for (const id of ["resultsTable", "exFilesTable", "svTable", "attTypeTable", "attTableTable"]) watchSort(id);
   $("btnRecompute").addEventListener("click", recompute);
   $("btnLinkRefresh").addEventListener("click", guard(() => loadLinkDirections(true)));
   $("btnLinkAccept").addEventListener("click", guard(acceptSuggestions));
