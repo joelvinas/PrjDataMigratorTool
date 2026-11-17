@@ -1,6 +1,7 @@
 """End-to-end test of loader.py (plan and dry-run) against a throwaway database built through the real store functions. Fabricated names only."""
 import base64, csv, hashlib, io, json, os, sqlite3, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import fieldnames_store as st, loader
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

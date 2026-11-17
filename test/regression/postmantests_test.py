@@ -1,6 +1,7 @@
 """Tests for postmantests.py (the Postman test guide and collection) and its pages. Needs the app on port 8765 for the HTTP part. No token, no Workfront call."""
 import json, os, re, sys, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import postmantests as pt
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

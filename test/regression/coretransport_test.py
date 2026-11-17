@@ -1,6 +1,7 @@
 """Tests for typemap.py, the new loadconfig settings, workfronthttp.py and coretransport.py. A fake opener stands in for the network; fabricated names and a fake secret only."""
 import io, json, os, sys, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import loadconfig as lc, loadrun as lr, typemap as tm, workfronthttp as wh, coretransport as ct
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

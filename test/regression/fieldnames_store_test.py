@@ -1,6 +1,7 @@
 """Tests for fieldnames_store.py (saved decisions for the name review) against a throwaway SQLite database. Fabricated names only; no server."""
 import base64, csv, io, os, sqlite3, sys, tempfile, zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import fieldnames as fn, fieldnames_store as st
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

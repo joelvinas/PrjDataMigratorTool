@@ -2,6 +2,7 @@
 import io, json, os, sqlite3, sys, urllib.error
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "src"))
 import loadconfig as lc, loadrun as lr, recordload as rl, recordmap as rm, workfronthttp as wh, planningtransport as pt
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

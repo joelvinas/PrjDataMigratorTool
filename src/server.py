@@ -56,7 +56,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 # --------------------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # the project root: server.py itself lives in src/
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HOST = "127.0.0.1"  # never anything else
 PORT = int(os.environ.get("PORT", "8765"))

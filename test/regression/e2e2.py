@@ -155,8 +155,8 @@ c=sqlite3.connect("t.db"); card=c.execute("select field_name,cardinality,cardina
 check("1,000 distinct == cap is still exact (not capped); rerun cleared the flag", card==[("Bucket",4,0),("Unique Key",1000,0)], card); c.close()
 # SQL files
 import importlib.util
-sys.path.insert(0,".")   # server.py imports its sibling modules (fieldnames_store)
-spec=importlib.util.spec_from_file_location("server","server.py"); srv=importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)
+sys.path.insert(0,"src")   # server.py imports its sibling modules (fieldnames_store)
+spec=importlib.util.spec_from_file_location("server","src/server.py"); srv=importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)
 check("sql/DatabaseSchemaLibrary.sql == embedded DDL", open("sql/DatabaseSchemaLibrary.sql",encoding="utf-8").read()==srv.DDL)
 orig=open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)),"original_ddl.sql"),encoding="utf-8").read()
 a=sqlite3.connect(":memory:"); a.executescript(orig)
@@ -185,7 +185,7 @@ for path,key in PAGES.items():
 for path in ["/style.css","/common.js","/setup.js","/stage1.js","/stage2.js","/stage3.js","/editor-kit.js","/log.js"]:
     st,h,body=raw(path); check("asset %s served"%path, st==200 and len(body)>200, st)
 st,h,body=raw("/index.html"); check("/index.html redirects to the home page (Setup)", st==302 and h.get("Location")=="/", (st,h.get("Location")))
-for path in ["/scripts.js","/server.py","/config.json","/README.md","/../server.py","/%2e%2e/server.py","/stage1/../server.py","/test/mock_airtable.py","/db/migration.db","/stage4","/stage1.html"]:
+for path in ["/scripts.js","/server.py","/src/server.py","/src/loader.py","/config.json","/README.md","/../server.py","/%2e%2e/server.py","/stage1/../server.py","/test/mock_airtable.py","/db/migration.db","/stage4","/stage1.html"]:
     st,h,body=raw(path); check("not served: %s"%path, st==404 and b"def " not in body and b"patMOCK" not in body, st)
 st,h,body=raw("/stage1","POST"); check("POST to a page is rejected", st in (404,415), st)
 # every page loads the shared script first; no page or script builds markup from data or carries a token
@@ -197,5 +197,5 @@ t=open("stage1.html",encoding="utf-8").read(); check("Stage 1 holds steps 3 to 6
 t=open("setup.html",encoding="utf-8").read(); check("Setup holds steps 1 and 2 only", 'id="step1"' in t and 'id="step2"' in t and 'id="step3"' not in t)
 t=open("common.js",encoding="utf-8").read(); check("log is pinned at the bottom of the nav and Stage 4 is in it", "NAV_BOTTOM" in t and '"/log"' in t and "Stage 4: Map and load" in t)
 import re as _re
-check("APP_VERSION matches EXPECTED_SERVER_VERSION", _re.search(r'APP_VERSION = "([^"]+)"', open("server.py",encoding="utf-8").read()).group(1)==_re.search(r'EXPECTED_SERVER_VERSION = "([^"]+)"', t).group(1))
+check("APP_VERSION matches EXPECTED_SERVER_VERSION", _re.search(r'APP_VERSION = "([^"]+)"', open("src/server.py",encoding="utf-8").read()).group(1)==_re.search(r'EXPECTED_SERVER_VERSION = "([^"]+)"', t).group(1))
 print("ALL PASS" if ok else "SOME FAILED"); sys.exit(0 if ok else 1)

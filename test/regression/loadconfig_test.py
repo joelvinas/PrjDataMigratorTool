@@ -1,6 +1,7 @@
 """Tests of loadconfig.py (Workfront credentials from config.json). Fabricated values only."""
 import json, os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import loadconfig as lc, loader
 ok = True
 def check(n, c, x=""):

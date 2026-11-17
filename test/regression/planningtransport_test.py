@@ -1,6 +1,7 @@
 """Tests for planningtransport.py, the plan's link second pass and the runner's `requires`. A fake opener stands in for the network; fabricated names and a fake secret only."""
 import io, json, os, sys, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import loadconfig as lc, loadplan as lp, loadrun as lr, workfronthttp as wh, planningtransport as pt
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

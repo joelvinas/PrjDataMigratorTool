@@ -36,7 +36,7 @@ def run_suite(scripts, mock_files):
         f.write('{"token":"%s","scopes":["data.records:read","schema.bases:read"],"bases":[{"name":"Sample Shop","baseId":"appSampleBase001"}],"db_path":"db/migration.db","requests_per_second":5}' % TOKEN)
     env = dict(os.environ, MOCK_FILES=mock_files, MOCK_PORT="9100", AIRTABLE_API_BASE="http://127.0.0.1:9100", AT_BACKOFF_BASE="0.2")
     procs = [subprocess.Popen([sys.executable, "test/mock_airtable.py"], cwd=proj, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-             subprocess.Popen([sys.executable, "server.py"], cwd=proj, env=env, stdout=open(os.path.join(proj, "server.log"), "w"), stderr=subprocess.STDOUT)]
+             subprocess.Popen([sys.executable, "src/server.py"], cwd=proj, env=env, stdout=open(os.path.join(proj, "server.log"), "w"), stderr=subprocess.STDOUT)]
     results = []
     try:
         if not (wait_port(9100) and wait_port(8765)):

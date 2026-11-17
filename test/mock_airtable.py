@@ -6,8 +6,8 @@ Standard library only.
   python test/mock_airtable.py            (listens on 127.0.0.1:9100)
 
 Then start the app against it:
-  Mac/Linux:   AIRTABLE_API_BASE=http://127.0.0.1:9100 AT_BACKOFF_BASE=0.2 python server.py
-  Windows cmd: set AIRTABLE_API_BASE=http://127.0.0.1:9100 && set AT_BACKOFF_BASE=0.2 && python server.py
+  Mac/Linux:   AIRTABLE_API_BASE=http://127.0.0.1:9100 AT_BACKOFF_BASE=0.2 python src/server.py
+  Windows cmd: set AIRTABLE_API_BASE=http://127.0.0.1:9100 && set AT_BACKOFF_BASE=0.2 && python src/server.py
 
 Behaviour:
   * GET /v0/meta/bases/<base>/tables  serves test/sample_schema.json (base appSampleBase001)

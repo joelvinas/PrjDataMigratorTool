@@ -49,25 +49,35 @@ The only non-deterministic parts are incidental: timestamps in logs, the timing 
 
 ```
 airtable-migration-control/
-├── server.py                    backend: DB, Airtable calls, graph, profiling, JSON endpoints
+├── src/                         every Python module; the app runs as: python src/server.py (pages, config.json, db/ and data_extract/ stay in this folder)
+│   ├── server.py                backend: DB, Airtable calls, graph, profiling, JSON endpoints, the web server
+│   ├── fieldnames.py            field and table name validator: the rules and the pipeline (pure functions, no I/O)
+│   ├── fieldnames_io.py         validator command line: CSV import, read-only database loader, report files
+│   ├── fieldnames_store.py      the review page's saved decisions: approvals, abandon, import, settings, exports (tables from migration 007)
+│   ├── fieldnames_report.py     the HTML report (pure: builds one self-contained document from the review)
+│   ├── emojitext.py             emoji handling shared by names, labels and descriptions: remove, or replace with the Unicode name
+│   ├── fielddesc.py             field descriptions in the lineage syntax: generate, parse back, validate (pure functions)
+│   ├── fieldgroups.py           consolidation rules: validate a group, merged members, survivors (pure)
+│   ├── fieldcompare.py          compares the values of fields in one table from a saved record file: counts and record IDs only (pure)
+│   ├── fieldwriters.py          who fills each field (user, form, automation, formula) and the Fusion-driven marker
+│   ├── selectvalues.py          select values in the data compared with the options the schema declares
+│   ├── linkdirections.py        link pairs, suggested directions and the decisions a person records
+│   ├── loadplan.py              the load plan: everything the migration would create in Workfront, with temporary IDs and a status (pure)
+│   ├── loadrun.py               runs a plan: sandbox by default, idempotent, dry run, one failure never stops it
+│   ├── loadstate.py             the runner's state in load_id_map
+│   ├── loadconfig.py            reads the Workfront credentials and settings from config.json; never shows or stores a secret
+│   ├── loader.py                the loader command line: plan, dry-run, run --send and records
+│   ├── typemap.py  workfronthttp.py  coretransport.py  planningtransport.py   the target type mapping, the HTTP layer and the two Workfront transports
+│   ├── recordmap.py             the record ID map: surrogate IDs, targets, pass markers, attachment map and the views behind the Stage 4 screens
+│   ├── recordload.py            the Planning record load: the records pass and the links pass
+│   ├── coretargets.py           what each table becomes in Core and where it goes (object type and parent decisions)
+│   ├── planlimits.py            Planning limits and the Core history size, checked in the load plan
+│   └── postmantests.py  sandboxplan.py   the Postman test guide and collection, and the sandbox test plan
 ├── setup.html  setup.js         Setup (home page, steps 1 and 2) and the list of stages
 ├── stage1.html  stage1.js       Stage 1: Data (steps 3 to 6)
 ├── stage2.html  stage2.js       Stage 2: Forms (the form recorder, reports and field usage)
 ├── stage3.html  stage3.js       Stage 3: Automations (the automation recorder, reports and field usage)
 ├── names.html  names.js         Field names: review table and field names against the naming rules and approve them
-├── fieldnames.py                field and table name validator: the rules and the pipeline (pure functions, no I/O)
-├── fieldnames_io.py             validator command line: CSV import, read-only database loader, report files
-├── emojitext.py                 emoji handling shared by names, labels and descriptions: remove, or replace with the Unicode name
-├── loadplan.py                  the load plan: everything the migration would create in Workfront, with temporary IDs and a status (pure)
-├── loadrun.py                   runs a plan: sandbox by default, idempotent, dry run, one failure never stops it (pure; real transports not built)
-├── loadconfig.py                reads the Workfront credentials from config.json; never shows or stores a secret
-├── loader.py                    the loader command line: plan and dry-run (nothing is sent) and run --send
-├── typemap.py  workfronthttp.py  coretransport.py  planningtransport.py   the target type mapping, the HTTP layer and the two Workfront transports
-├── fieldgroups.py               consolidation rules: validate a group, merged members, survivors (pure)
-├── fieldcompare.py              compares the values of fields in one table from a saved record file: counts and record IDs only (pure)
-├── fielddesc.py                 field descriptions in the lineage syntax: generate, parse back, validate (pure functions)
-├── fieldnames_report.py         the HTML report (pure: builds one self-contained document from the review)
-├── fieldnames_store.py          the review page's saved decisions: approvals, abandon, import, settings, exports (tables from migration 007)
 ├── editor-kit.js                shared by Stages 2 and 3: type-ahead picker and the Markdown text box with live preview
 ├── log.html  log.js             API call log (its own page, last in the side panel)
 ├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
@@ -135,8 +145,8 @@ airtable-migration-control/
    - `bases`: the bases you plan to migrate. They appear in the Step 2 picker; a single entry fills in the Base ID for you. Placeholder entries (`appXXXX...`) are ignored.
    - `db_path`: the SQLite file offered in Step 1.
    - `requests_per_second`: pacing per base, between 0.5 and 5 (Airtable's limit). 4.5 leaves a small margin.
-2. In a terminal in this folder: `python server.py` (on Mac you may need `python3 server.py`).
-3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
+2. In a terminal in this folder: `python src/server.py` (on Mac you may need `python3 src/server.py`).
+3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python src/server.py` (Mac) or `set PORT=8800 && python src/server.py` (Windows cmd).
 4. Stop with Ctrl+C.
 
 Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/names` (Field names), `/load` (Stage 4: Map and load), `/postman` (Postman tests), `/log` (API call log). The left panel links them. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
@@ -395,8 +405,8 @@ Steps 1 and 2 are on Setup (`/setup`); steps 3 to 6 are on Stage 1 (`/stage1`), 
 **B. Profiling and API handling against the mock (still no real data)**
 
 1. Terminal 1: `python test/mock_airtable.py`
-2. Terminal 2 (Mac): `AIRTABLE_API_BASE=http://127.0.0.1:9100 AT_BACKOFF_BASE=0.2 python server.py`
-   Windows cmd: `set AIRTABLE_API_BASE=http://127.0.0.1:9100 && set AT_BACKOFF_BASE=0.2 && python server.py`
+2. Terminal 2 (Mac): `AIRTABLE_API_BASE=http://127.0.0.1:9100 AT_BACKOFF_BASE=0.2 python src/server.py`
+   Windows cmd: `set AIRTABLE_API_BASE=http://127.0.0.1:9100 && set AT_BACKOFF_BASE=0.2 && python src/server.py`
    Use a `config.json` whose token is `patMOCK.0000000000000000000000`. (`AIRTABLE_API_BASE` and `AT_BACKOFF_BASE` exist only for testing; leave them unset for real use.)
 3. Ingest `appSampleBase001` with **Fetch from Airtable Metadata API**, then profile that base. Expected: Customers has 250 records in 3 pages; OrderItems has 301 records in 4 pages; Active (checkbox) has null_count 0 and cardinality 2; Orders.Total has null_count 0 although it contains zeros.
 4. Ingest `appSampleBase002` via the API, set the cap to 500, profile it. Expected:
@@ -533,7 +543,7 @@ A proposed repair is shown beside the original for both non-PASS verdicts, and n
 **Command line** (read-only: the database is opened read-only and no record value is read):
 
 ```
-python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import renames.csv --out out/names
+python src/fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import renames.csv --out out/names
 ```
 
 - `--import` takes a CSV with the headers `field_id, old_name, new_name, new_label, old_dataType, new_dataType`, matched to the database by Airtable field ID. `new_name` is validated as both the Planning name and the Core name; `new_label` as the label. Unmatched, repeated or blank IDs, fields missing from the spreadsheet, a stale `old_name`, and a data type that disagrees with the database are listed in `names_import_problems.csv`. A file that is not UTF-8 is read as Windows-1252 and the summary says so.
@@ -554,8 +564,8 @@ python fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --import r
 Stage 4 creates the target in Workfront in steps. Built: a **load plan**, a **dry run** (they send nothing), and **`run --send`**, which creates the plan's ready record types, fields and select options in Workfront Planning and Workfront Core. The record load itself (the records, their links and attachments) is not built. Full detail, including what Adobe's documentation confirms and what is not verified, is in [docs/LOADER_PLAN.md](docs/LOADER_PLAN.md).
 
 ```
-python loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX
-python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env sandbox
+python src/loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX
+python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env sandbox
 ```
 
 - **`plan`** (read-only) writes `load_plan.csv` and a summary: every Planning record type, Core custom form, field and select option (in Airtable's order) the migration would create, plus the fields that link a Core object to its Planning record, each with a **temporary ID** that depends only on the Airtable IDs (so it is the same on every run) and a **status**: `ready`; `hold` (a design decision is open: a derived field, a relationship, an attachment, the Core object type); or `blocked` (a table or name is not approved, there is no target data type, or scope or target is undecided), with the reasons.
@@ -564,17 +574,17 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 - **`run --send`** creates the plan's `ready` items, in the plan's order. Without `--send` it sends nothing and says so.
 
   ```
-  python loader.py run --db db/migration.db --base appXXXXXXXXXXXXXX --send                      (Core sandbox1 and Planning dev)
-  python loader.py run --db db/migration.db --base appXXXXXXXXXXXXXX --send --only planning --planning-stage uat
-  python loader.py run --db db/migration.db --base appXXXXXXXXXXXXXX --send --only core --core-env production --confirm "CREATE IN PRODUCTION"
+  python src/loader.py run --db db/migration.db --base appXXXXXXXXXXXXXX --send                      (Core sandbox1 and Planning dev)
+  python src/loader.py run --db db/migration.db --base appXXXXXXXXXXXXXX --send --only planning --planning-stage uat
+  python src/loader.py run --db db/migration.db --base appXXXXXXXXXXXXXX --send --only core --core-env production --confirm "CREATE IN PRODUCTION"
   ```
 
   Core and Planning run one after the other, each with its own stage (`--core-env`, default sandbox1; `--planning-stage`, dev or uat, which is a Workspace). The state is kept in `load_id_map`: a pending row before every call, the new ID after it, so a stopped run carries on and a rerun creates nothing twice; after an interrupted attempt, a name that already exists is adopted only when exactly one item matches. One failure never stops the run; its reason is scrubbed of secrets. Reports: `load_run.csv` (every item, its outcome and ID) and `load_run_summary.txt`. A real Core production run needs the exact phrase. **Attaching Core fields to a custom form is a manual step**, and a Core rich text field cannot be created through the API (build it by hand in the custom form viewer), so those are not sent.
 - **`records`** loads the saved Airtable records into the Planning record types the field load created, in two passes: every record first (without its links), then each record's links, once the records they point at exist.
 
   ```
-  python loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX                   (counts only; nothing is sent)
-  python loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX --send [--planning-stage dev|uat] [--pass records|links|both] [--batch 50]
+  python src/loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX                   (counts only; nothing is sent)
+  python src/loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX --send [--planning-stage dev|uat] [--pass records|links|both] [--batch 50]
   ```
 
   It reads the saved record files (`data_extract`) in memory, registers each Airtable record ID, sends records in small batches, and writes each new Planning ID and a pass marker to the database straight away, so a stopped run carries on and a finished record is never sent again. One bad record never holds up the rest: its batch is split and only that record fails; it is listed by Airtable ID with a scrubbed reason in `record_load_failures.csv` and tried again next run. **No record value goes into the database, the reports or the log**, and a value that does not fit its field is left out and counted, never described. A link whose target record is not loaded yet waits for a later run. Known limit: a stop between Workfront's answer and writing it can send that batch twice, so keep `record_batch_size` small. **Unverified:** the record route and body, the value formats and the reply shape (see docs/LOADER_PLAN.md). Core objects and attachments are not part of this command yet.
@@ -582,14 +592,14 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 - **How it creates each thing.** *Core:* `POST /param` with name, dataType and displayType (TEXT, or TXTA for long text; any dataType works with them), and `POST /popt` for each select option; the reply's ID is recorded. *Planning:* `POST /v2/workspaces/{id}/record-types` and `POST /v2/record-types/{id}/fields`; a select field is sent with its ready options in one call; **links are the second pass**, created after every record type, each side of a pair as its own reference field. A description over 512 characters is refused, never cut (**the real Planning limit is 1,024; 512 is kept deliberately for testing**).
 - **Unverified: to be proven in the first DEV and sandbox run** (see docs/LOADER_PLAN.md). Planning: the type-specific options sent for each field type (date format `locale`, no time format, number precision, the currency code from `config.json`), the primary field of a new record type, select option IDs, whether a back reference is wanted (Postman test 4) and how a duplicate record type name is refused. Core: the displayTypes for select, multiple select and checkbox (SLCT, MULT, CHCK) and the option properties. Nothing here has been run against a real Workfront.
 - **Select option names** follow the label rules; a name that breaks them is put on hold with the proposed repair.
-- **Credentials:** the `workfront` section of `config.json` (see `config.example.json`) holds the Core credential per environment and the Planning bearer token and Workspace ID (Planning has Workspaces, not environments). `python loader.py config` says only whether each is configured. They are never stored, logged or shown in the browser. `run` reads them, and also reads `api_path` (Core: the API version, for example `/attask/api/v21.0`, no default; Planning defaults to `/maestro/api`) and, for Planning currency fields, `default_currency` and an optional `currency_by_symbol`. Every value comes from `config.json`, never from code.
+- **Credentials:** the `workfront` section of `config.json` (see `config.example.json`) holds the Core credential per environment and the Planning bearer token and Workspace ID (Planning has Workspaces, not environments). `python src/loader.py config` says only whether each is configured. They are never stored, logged or shown in the browser. `run` reads them, and also reads `api_path` (Core: the API version, for example `/attask/api/v21.0`, no default; Planning defaults to `/maestro/api`) and, for Planning currency fields, `default_currency` and an optional `currency_by_symbol`. Every value comes from `config.json`, never from code.
 - **Schema added for the loader (applied and folded into the schema library, 2026-11-14):** migration 010 `load_id_map` (Workfront IDs against temporary IDs, per stage); 011 `table_core_objects` (project, request or task per table); 012 the column `field_names.core_target_type` (the Core data type, beside the Planning one); 013 `field_relationships` (links defined by the schema, which side is the real relationship, who approved); 014 `option_names` and `option_workfront_ids` (approved option names, and option IDs read back from Core and Planning). Nothing reads them yet except the migrations check. Migrations 015 to 017 (applied 2026-11-14): 015 adds the link direction columns to `field_relationships`; 016 puts `workspace_key` in the key of `load_id_map` (a table rebuild, refused if the table has rows); 017 adds the record ID map (`source_records` with an integer surrogate ID assigned in sorted order, `target_mappings`, `record_pass_markers`, `attachment_map`). The runner state (`loadstate.py`) reads and writes `load_id_map`, and the record registry (`recordmap.py`) reads and writes the four record ID map tables: Stage 1, step 6 has a **Record ID registry** button that registers the record IDs found in the saved record files (IDs only, in sorted order so the numbers repeat, safe to run again, out-of-scope tables skipped). Target mappings, pass markers and the attachment map have code and tests but no screen yet, because nothing loads records. Migration 018 (`link_direction_events`, an append-only history of link direction decisions) is applied and folded in. `sql/apply_migrations.py` applies 001 to 019 to an older database. Migration 019 adds `field_writer_decisions` and `field_writer_events` (a person's decisions about the field-writer matrix, with who, when and why, and an append-only history).
 
 ## Troubleshooting
 
-**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
+**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python src/server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
 
-**"Port 8765 is already in use."** Another copy is running. Close it, or use another port (`PORT=8800 python server.py`, or `start.bat 8800`).
+**"Port 8765 is already in use."** Another copy is running. Close it, or use another port (`PORT=8800 python src/server.py`, or `start.bat 8800`).
 
 **"No database is connected yet."** Complete step 1 first. The server forgets the connection when it restarts, so connect again after a restart.
 

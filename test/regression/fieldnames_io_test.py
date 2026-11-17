@@ -1,6 +1,7 @@
 """Tests for fieldnames_io.py: CSV import, read-only database loading, report files and the command line. Fabricated data only."""
 import csv, hashlib, io, os, sqlite3, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import fieldnames as fn, fieldnames_io as fio
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

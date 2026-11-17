@@ -79,7 +79,7 @@ r=post("/api/extract/delete",{"base_id":"../x"}); check("bad base id refused", "
 post("/api/profile/start",{"scope":"table","table_id":cust,"cap":1000,"save_records":False}); wait()
 check("toggle off again: nothing on disk", not os.path.exists(D))
 # 9. in-process: failure keeps old file, duplicate ids, unsafe ids
-sys.path.insert(0,"."); import server
+sys.path.insert(0,"src"); import server
 server.STATE["db_path"]="ip.db"; server.api_db_create({"path":"ip.db"}); server.api_db_connect({"path":"ip.db"})
 sch={"tables":[{"id":"tblIp000000001","name":"Ip","primaryFieldId":"fldIp0000000001","fields":[{"id":"fldIp0000000001","name":"Name","type":"singleLineText"}]}]}
 server.upsert_schema("appIp0000000001",server.parse_schema(sch),"json")
