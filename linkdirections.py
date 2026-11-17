@@ -87,7 +87,8 @@ def build_units(rows, rel):
                            "suggested_type": suggest(single, psingle, p is not None),
                            "relationship_type": st.get("relationship_type"), "tiebreaker": st.get("tiebreaker"),
                            "confirmed": bool(st.get("confirmed")), "auto_set": bool(st.get("auto_set")), "derived": bool(st.get("derived")),
-                           "decided_by": st.get("approved_by"), "decided_at": st.get("approved_at"), "reason": st.get("reason")})
+                           "decided_by": st.get("approved_by"), "decided_at": st.get("approved_at"), "reason": st.get("reason"),
+                           "row_count": m["row_count"], "null_count": m["null_count"], "cardinality": m["cardinality"], "cardinality_capped": bool(m["cardinality_is_capped"])})
         units.append({"key": "|".join(sorted(f["field_id"] for f in fields)), "fields": fields, "decision": decision_of(fields)})
     return units
 

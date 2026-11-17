@@ -69,8 +69,15 @@
   <div id="linkSummary"></div>
   <div id="linkCaps"></div>
   <div id="linkMessage" class="msg"></div>
-  <div style="overflow-x:auto"><table id="linkTable" class="grid" hidden>
-    <thead><tr><th data-sort="text">Link field</th><th data-sort="text">Links to</th><th data-sort="text">Paired with</th><th data-sort="text">Suggested</th><th>Direction</th><th>Tiebreaker</th><th data-sort="text">Status</th><th></th></tr></thead>
+  <div class="row">
+    <label for="linkTableFilter">Show only links of table</label>
+    <select id="linkTableFilter"><option value="">All tables</option></select>
+    <label class="check"><input id="linkHideDone" type="checkbox"> Hide fields already decided</label>
+    <span id="linkShown" class="hint"></span>
+  </div>
+  <p class="hint">Names in [square brackets] are tables and fields. <b>This table</b> is the one that owns the link field on that row; <b>links to</b> is the table the field points at; <b>paired with</b> is the field on the other table that Airtable created for the same relationship. Choosing a table above keeps every row where that table owns the field or is the table linked to. Scroll inside the window; the headings stay in view.</p>
+  <div id="linkWindow" class="tablewin"><table id="linkTable" class="grid" hidden>
+    <thead><tr><th data-sort="text">This table and its link field</th><th data-sort="text">Links to table</th><th data-sort="text">Paired with (table and field)</th><th data-sort="text">Suggested</th><th>Direction</th><th>Tiebreaker</th><th data-sort="text">Status</th><th></th></tr></thead>
     <tbody></tbody>
   </table></div>
   <h3>Load order</h3>
