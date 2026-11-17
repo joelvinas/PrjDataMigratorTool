@@ -33,6 +33,7 @@ check("oriented pair text", "Tasks is the child of Projects" in html)
 check("no token / no db path", "patMOCK" not in html and "/run5" not in html and "t.db" in html)
 check("in sync after recompute (no warning)", "differs from the order computed here" not in html)
 # literal mode while stored matrix is collapse => warning
+st,h,b=get("/api/report.html?mode=confirmed"); check("confirmed mode builds a report", st==200 and "Confirmed link directions" in b.decode())
 st,h,b=get("/api/report.html?mode=literal"); check("out-of-sync warning when mode differs from saved", "differs from the order computed here" in b.decode())
 # determinism: same report twice (strip generated time)
 strip=lambda s: re.sub(r"Generated [^b]*by the", "Generated X by the", s)

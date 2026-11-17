@@ -2742,6 +2742,11 @@ MODE_TEXT = {
                  "Airtable's single-record-link hint. If exactly one side is a single-record link, that side's "
                  "table is the child and only that field orders the load. Otherwise the pair adds no ordering "
                  "and its links are set in a second pass."),
+    "confirmed": ("Confirmed link directions",
+                  "Each link pair follows the direction a person confirmed in Stage 1, step 4 (Link directions). "
+                  "A pair that is still undecided keeps its literal edges, so the order is provisional until every "
+                  "pair is decided. Automatic pairs never bind the order: they are settled by the other decisions, "
+                  "or flagged when the tool had to choose."),
 }
 
 
