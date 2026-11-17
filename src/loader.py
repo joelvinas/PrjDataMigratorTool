@@ -24,6 +24,7 @@ import loadrun as lr
 import loadstate as ls
 import coretransport as ct
 import planningtransport as pt
+import attachments as at
 import coreobjects as co
 import recordload as rl
 import recordmap as rm
@@ -280,6 +281,61 @@ def _core_objects(a, opener=None):
     return {"rows": rows, "failures": fails}
 
 
+ATTACHMENT_COLUMNS = ["table_id", "table_name", "indexed", "planned", "downloaded", "failed_in_stage1", "unregistered", "missing_file"]
+
+
+def _attachments(a, opener=None):
+    """Plan the downloaded attachment files and upload each as a Core document on its record's Core object. Without --send nothing is sent and nothing is written. Reports hold
+    table IDs, Airtable IDs and counts only: no file name and no link."""
+    try:
+        data = lc.read_config(a.config)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    creds = lc.credentials(data, "core", a.core_env)
+    if creds is None:
+        sys.exit("Core (%s) is not configured in %s. Run 'config' to see what is set." % (a.core_env, a.config))
+    try:
+        env = lr.resolve_environment(a.core_env, a.confirm, dry_run=not a.send)
+    except ValueError as e:
+        sys.exit(str(e))
+    secrets = lc.secret_values(data)
+    if not os.path.isfile(a.db):
+        sys.exit("No such database: %s" % a.db)
+    conn = sqlite3.connect(a.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not rm.available(conn):
+            sys.exit("This database does not have the record map tables. Apply the migrations (python sql/apply_migrations.py, after a backup) first.")
+        try:
+            tr = ct.CoreTransport(wh.Http(creds, secrets, opener=opener))
+        except ValueError as e:
+            sys.exit(str(e))
+        tables = [(r[0], r[1]) for r in conn.execute("SELECT table_id, table_name FROM airtable_tables WHERE base_id=? ORDER BY lower(table_name), table_id", (a.base,))]
+        rows = []
+        if a.send:
+            for tid, name in tables:
+                c = at.plan_table(conn, a.base, tid, env.name, a.extract_dir)
+                if c["indexed"]:
+                    rows.append([tid, name, c["indexed"], c["planned"], c["downloaded"], c["failed"], c["unregistered"], c["missing_file"]])
+        res = at.upload_all(conn, a.base, env.name, tr, a.extract_dir, dry_run=not a.send)
+        counts = rm.summary(conn, a.base, env.name, "core", "")["attachments"]
+    finally:
+        conn.close()
+    _write(a.out, "attachments.csv", lc.redact(_csv(ATTACHMENT_COLUMNS, rows), secrets))
+    _write(a.out, "attachments_failures.csv", lc.redact(_csv(["table_id", "airtable_record_id", "airtable_attachment_id", "reason"], [list(f) for f in res["failures"]]), secrets))
+    lines = ["Attachments for %s in %s%s" % (a.base, env.name.upper(), "" if a.send else ", nothing was sent"), "",
+             "In the attachment map now: " + ", ".join("%d %s" % (counts[k], k) for k in sorted(counts)) + ".", ""]
+    if a.send:
+        lines.append("This run: %d uploaded, %d failed, %d retried, %d waiting for their record's Core object, %d with no file to send." % (res["uploaded"], res["failed"], res["retried"], res["waiting"], res["no_file"]))
+    else:
+        lines.append("Would upload %d; %d wait for their record's Core object; %d have no file to send. Attachments are planned from the saved files only when you add --send." % (res["would_upload"], res["waiting"], res["no_file"]))
+    lines += ["", "A record's Core object comes from 'core-objects'. A failed upload is tried again on the next run. Nothing here names a file."]
+    text = lc.redact(chr(10).join(lines), secrets)
+    _write(a.out, "attachments_summary.txt", text)
+    print(text + chr(10) + "Reports written to %s" % a.out)
+    return {"rows": rows, "result": res}
+
+
 def main(argv=None, opener=None):
     ap = argparse.ArgumentParser(description="Build the migration load plan and dry-run it (read-only; nothing is sent to Workfront).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -319,7 +375,18 @@ def main(argv=None, opener=None):
     pc2.add_argument("--extract-dir", default="data_extract")
     pc2.add_argument("--core-env", default="sandbox1", choices=lc.ENVIRONMENTS)
     pc2.add_argument("--confirm", default=None, help="the exact phrase a real Core production run needs: %s" % lr.PRODUCTION_PHRASE)
+    pa = sub.add_parser("attachments", help="upload the downloaded attachment files as Core documents on the Core objects their records became")
+    pa.add_argument("--db", required=True)
+    pa.add_argument("--base", required=True, help="Airtable base ID")
+    pa.add_argument("--out", default="out/loader")
+    pa.add_argument("--send", action="store_true", help="actually upload to Core. Without it nothing is sent or written")
+    pa.add_argument("--config", default="config.json")
+    pa.add_argument("--extract-dir", default="data_extract")
+    pa.add_argument("--core-env", default="sandbox1", choices=lc.ENVIRONMENTS)
+    pa.add_argument("--confirm", default=None, help="the exact phrase a real Core production run needs: %s" % lr.PRODUCTION_PHRASE)
     a = ap.parse_args(argv)
+    if a.cmd == "attachments":
+        return _attachments(a, opener)
     if a.cmd == "core-objects":
         return _core_objects(a, opener)
     if a.cmd == "records":

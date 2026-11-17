@@ -111,6 +111,33 @@ class CoreTransport(object):
             raise HttpError("The create call worked but its reply holds no ID, so the object cannot be recorded.")
         return new
 
+    # ---- documents (UNVERIFIED: the upload route, the field name and the document properties; see docs/LOADER_PLAN.md)
+    DOC_OBJECT = {"PROJ": "PROJ", "OPTASK": "OPTASK", "TASK": "TASK"}
+
+    def upload_file(self, file_path, filename, content_type="application/octet-stream"):
+        """Upload one file and return the handle Core gives it (a second call, create_document, turns the handle into a document)."""
+        reply = self.http.upload("/upload", "uploadedFile", filename, file_path, content_type)
+        d = reply.get("data", reply) if isinstance(reply, dict) else None
+        handle = d.get("handle") if isinstance(d, dict) else None
+        if not handle:
+            raise HttpError("The upload worked but its reply holds no file handle, so the document cannot be created.")
+        return str(handle)
+
+    def document_request(self, name, handle, object_code, object_id, file_name):
+        if object_code not in self.DOC_OBJECT:
+            raise ValueError("Documents cannot be attached to an object of type %r." % str(object_code))
+        if not (name and handle and object_id):
+            raise ValueError("A document needs a name, an uploaded file handle and the object it belongs to.")
+        return "POST", "/docu", {"name": name, "handle": handle, "docObjCode": object_code, "objID": object_id, "currentVersion": {"version": "v1.0", "fileName": file_name or name}}
+
+    def create_document(self, name, handle, object_code, object_id, file_name=None):
+        """Create the document on its Core object from an uploaded handle and return the document's ID."""
+        method, path, body = self.document_request(name, handle, object_code, object_id, file_name)
+        new = reply_id(self.http.request(method, path, body))
+        if not new:
+            raise HttpError("The document call worked but its reply holds no ID, so it cannot be recorded.")
+        return new
+
     def find_existing(self, item, parent_id, refs=None):
         """The IDs of items that already have this name (a field by name, an option by field and label), for adopting after an interrupted run."""
         if item["kind"] == "field":

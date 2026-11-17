@@ -228,6 +228,19 @@ def attachment_failed(conn, row_id, message):
         conn.execute("UPDATE attachment_map SET status='failed', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE attachment_row_id=? AND status!='uploaded'", (lr.scrub(message), row_id))
 
 
+def attachment_retry(conn, row_id):
+    """A failed upload (the file was downloaded and its size checked) goes back to 'downloaded' so the next run tries it again. A download that failed in Stage 1
+    has no file and stays failed. Returns True when the row was reset."""
+    r = _att(conn, row_id)
+    if r["status"] != "failed" or r["sha256"] is None or r["downloaded_bytes"] is None:
+        return False
+    if r["api_size_bytes"] is not None and r["api_size_bytes"] != r["downloaded_bytes"]:
+        return False                                                  # the size check failed: this file is not the one Airtable described, so it is never sent
+    with conn:
+        conn.execute("UPDATE attachment_map SET status='downloaded', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE attachment_row_id=?", (row_id,))
+    return True
+
+
 def attachments_with_status(conn, env, status, limit=500):
     """Rows still to do (or failed), oldest first. Each is IDs, sizes and status only."""
     _need(conn)
