@@ -73,14 +73,10 @@ airtable-migration-control/
 │   ├── coretargets.py           what each table becomes in Core and where it goes (object type and parent decisions)
 │   ├── planlimits.py            Planning limits and the Core history size, checked in the load plan
 │   └── postmantests.py  sandboxplan.py   the Postman test guide and collection, and the sandbox test plan
-├── setup.html  setup.js         Setup (home page, steps 1 and 2) and the list of stages
-├── stage1.html  stage1.js       Stage 1: Data (steps 3 to 6)
-├── stage2.html  stage2.js       Stage 2: Forms (the form recorder, reports and field usage)
-├── stage3.html  stage3.js       Stage 3: Automations (the automation recorder, reports and field usage)
-├── names.html  names.js         Field names: review table and field names against the naming rules and approve them
-├── editor-kit.js                shared by Stages 2 and 3: type-ahead picker and the Markdown text box with live preview
-├── log.html  log.js             API call log (its own page, last in the side panel)
-├── common.js  style.css         shared by every page: API helper, left navigation, base picker, connection check
+├── web/                         The pages the server serves (URLs are unchanged: /stage1, /common.js, /style.css)
+│   ├── pages/                   setup.html (home, steps 1 and 2), stage1.html (steps 3 to 6), stage2.html (forms), stage3.html (automations), names.html (field names), load.html, postman.html, log.html (API call log, last in the side panel)
+│   ├── js/                      one script per page, plus common.js (API helper, left navigation, base picker, connection check) and editor-kit.js (shared by Stages 2 and 3)
+│   └── css/                     style.css, shared by every page
 ├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
 ├── docs/
 │   ├── FIELD_NAMING_RULES.md    the naming rules in plain language (generated from the validator's rule list)
@@ -613,7 +609,7 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
 
 ## Troubleshooting
 
-**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (`setup.html`, `stage1.html`, `stage2.html`, `stage3.html`, `log.html`, the `.js` files and `style.css`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python src/server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
+**`{"error": "Not found."}` on a button or link, or a red banner saying the server is older than the page.** An older copy of `server.py` is still running. The page files (everything under `web/`) are read from disk on every request, but `server.py` is only loaded when it starts, so replacing the files does not update a server that is already running. Close the window or terminal running the app (Ctrl+C), start it again with `start.bat` or `python src/server.py`, and reload the page. `start.bat` also refuses to start if something is already listening on the port.
 
 **"Port 8765 is already in use."** Another copy is running. Close it, or use another port (`PORT=8800 python src/server.py`, or `start.bat 8800`).
 

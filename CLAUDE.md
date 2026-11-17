@@ -8,7 +8,7 @@ A local, standard-library-only Python web app (`server.py`, plain HTML/CSS/JS, S
 
 ## Layout
 
-Every Python module lives in `src/` (run the app with `python src/server.py`, the loader with `python src/loader.py`). The pages (`*.html`, `*.js`, `style.css`), `config.json`, `db/`, `data_extract/`, `sql/`, `docs/` and `test/` stay at the project root. `server.py` finds the project root from its own location, so new modules go in `src/` and tests add `src/` to their import path. Do not add loose `.py` files to the root.
+Every Python module lives in `src/` (run the app with `python src/server.py`, the loader with `python src/loader.py`). The pages live in `web/` (`web/pages/*.html`, `web/js/*.js`, `web/css/style.css`; the URLs stay flat, e.g. `/stage1.js`, and `STATIC` in `server.py` maps each one to its file). `config.json`, `db/`, `data_extract/`, `sql/`, `docs/` and `test/` stay at the project root. `server.py` finds the project root from its own location, so new modules go in `src/` and tests add `src/` to their import path. Do not add loose `.py`, `.html`, `.js` or `.css` files to the root; a new page goes in `web/` and gets a `STATIC` entry.
 
 **Keep the root tidy.** Scratch files never go in the root: no `*.db`, logs, CSVs or exports. Throwaway files go in `tmp/` (git-ignored, safe to delete at any time); a one-off script's own output goes in `out/`. A hand-run test against a live server needs a database path that is relative to the project root, so use `tmp/name.db` (create `tmp/` first; the app only auto-creates `db/`), never a bare `name.db`. Delete what you create there when you are done.
 
@@ -27,7 +27,7 @@ Every Python module lives in `src/` (run the app with `python src/server.py`, th
 
 - Say **allowlist** and **blocklist**, never whitelist or blacklist.
 - Docs and report text are plain language for a client audience.
-- **Long grids sit in a scrolling window** (`class="tablewin"`, sticky headings). Every window must stay keyboard-focusable (common.js does this): the owner pans and scrolls with the arrow keys, Page Up/Down, Home and End, and that must not be lost. A browser test covers it.
+- **Long grids sit in a scrolling window** (`class="tablewin"`, sticky headings). Every window must stay keyboard-focusable (`web/js/common.js` does this): the owner pans and scrolls with the arrow keys, Page Up/Down, Home and End, and that must not be lost. A browser test covers it.
 - Match the existing style of nearby code; keep rules as small, separate, testable functions or data.
 
 ## Testing
