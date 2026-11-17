@@ -21,6 +21,7 @@ A local, standard-library-only Python web app (`server.py`, plain HTML/CSS/JS, S
 
 - Say **allowlist** and **blocklist**, never whitelist or blacklist.
 - Docs and report text are plain language for a client audience.
+- **Long grids sit in a scrolling window** (`class="tablewin"`, sticky headings). Every window must stay keyboard-focusable (common.js does this): the owner pans and scrolls with the arrow keys, Page Up/Down, Home and End, and that must not be lost. A browser test covers it.
 - Match the existing style of nearby code; keep rules as small, separate, testable functions or data.
 
 ## Testing

@@ -194,3 +194,4 @@ details.card > summary { cursor: pointer; }
 #linkTable td.dirhelp { min-width: 340px; }
 #linkTable .relhelp { margin-top: 8px; font-size: 13px; line-height: 1.5; }
 #linkTable .relhelp div + div { margin-top: 3px; }
+.tablewin:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }

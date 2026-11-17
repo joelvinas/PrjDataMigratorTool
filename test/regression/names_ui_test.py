@@ -321,6 +321,7 @@ with sync_playwright() as p:
     pg.click("#tablesGrid th[data-key=table]"); pg.wait_for_timeout(300)
     tnames = pg.eval_on_selector_all("#tablesGrid tbody tr:not(.reason) td:nth-child(2) > div:first-child", "els => els.map(e => e.textContent)")
     check("the table grid sorts by table name too, out-of-scope rows included", tnames == sorted(tnames, key=lambda x: x.lower()) and len(tnames) == 3, tnames)
+    check("every scrolling window on the page can take keyboard focus, so the arrow keys pan it", pg.eval_on_selector_all(".tablewin", "els => els.length > 0 && els.every(e => e.getAttribute('tabindex') === '0' && e.getAttribute('role') === 'region')"))
     # ---- sticky headings inside a scrolling window
     for gid in ("tablesGrid", "fieldsGrid", "descGrid"):
         got = pg.evaluate("(id) => { const t = document.getElementById(id), w = t.parentElement, th = t.tHead.rows[0].cells[0]; w.scrollTop = 150; "

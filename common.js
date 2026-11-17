@@ -210,8 +210,22 @@ async function bootstrap(hooks) {
 }
 
 /* Pages call this once the document is ready. */
+/* Every scrolling window (class "tablewin") can take keyboard focus, so the arrow keys, Page Up/Down, Home and End pan and scroll it. Do not remove this: it is how a long
+   grid is moved without the mouse. */
+function focusableWindows() {
+  document.querySelectorAll(".tablewin").forEach((w) => {
+    if (!w.hasAttribute("tabindex")) w.setAttribute("tabindex", "0");
+    w.setAttribute("role", "region");
+    if (!w.getAttribute("aria-label")) {
+      const h = (w.previousElementSibling && w.previousElementSibling.tagName === "H3") ? w.previousElementSibling : w.closest(".card") && w.closest(".card").querySelector("h2, h3");
+      w.setAttribute("aria-label", (h ? h.textContent.trim() : "Table") + " (scrollable: use the arrow keys)");
+    }
+  });
+}
+
 function startPage(key, hooks, wire) {
   window.addEventListener("DOMContentLoaded", () => {
+    focusableWindows();
     renderNav(key);
     if (wire) wire();
     applyReady();

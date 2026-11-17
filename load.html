@@ -46,7 +46,7 @@
   <h2>Where each table stands</h2>
   <p class="hint">How many records are registered per table, and how many have each pass done in the chosen environment. A pass marker means that step is finished for that record, so a restart never repeats it. The <strong>links</strong> pass can only follow a finished <strong>records</strong> pass.</p>
   <div id="passSummary" class="msg"></div>
-  <div class="scroll"><table id="passTable" class="grid compact" hidden>
+  <div class="tablewin"><table id="passTable" class="grid compact" hidden>
     <thead><tr><th data-sort="text">Table</th><th data-sort="text">Table ID</th><th class="num" data-sort="num">Registered</th><th class="num" data-sort="num">Records done</th><th class="num" data-sort="num">Links done</th><th class="num" data-sort="num">Attachments done</th><th class="num" data-sort="num">Core backfill done</th><th class="num" data-sort="num">New Workfront records</th></tr></thead>
     <tbody></tbody>
   </table></div>
@@ -62,7 +62,7 @@
     <button id="btnMapPrev" type="button">Previous</button><button id="btnMapNext" type="button">Next</button>
     <span id="mapPage" class="hint"></span>
   </div>
-  <div class="scroll"><table id="mapGrid" class="grid compact" hidden>
+  <div class="tablewin"><table id="mapGrid" class="grid compact" hidden>
     <thead><tr><th data-key="uid" class="num">Number</th><th data-key="table">Table</th><th data-key="record_id">Airtable record ID</th><th data-key="target">New Workfront ID</th><th data-key="passes">Passes done</th></tr></thead>
     <tbody></tbody>
   </table></div>
@@ -78,7 +78,7 @@
     <span id="attPage" class="hint"></span>
   </div>
   <div id="attSummary" class="msg"></div>
-  <div class="scroll"><table id="attGrid" class="grid compact" hidden>
+  <div class="tablewin"><table id="attGrid" class="grid compact" hidden>
     <thead><tr><th data-key="row" class="num">Row</th><th>Table</th><th data-key="record_id">Airtable record ID</th><th data-key="field">Field ID</th><th data-key="attachment">Attachment ID</th><th data-key="status">Status</th><th data-key="size" class="num">Size (bytes)</th><th data-key="document">Core document ID</th><th>Check value (SHA-256)</th><th>Reason</th></tr></thead>
     <tbody></tbody>
   </table></div>
