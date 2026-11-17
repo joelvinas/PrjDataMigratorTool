@@ -26,7 +26,7 @@ I3 = [item("P-T-a", "record_type", "Orders")]; f, t = fields("a", 31, "multipleR
 check("31 reference fields is over the limit of 30", ("reference", "Orders") in kinds(pl.check(I3, t)))
 I4 = [item("P-T-a", "record_type", "Orders")]; f, t = fields("a", 28, "multipleRecordLinks"); I4 += f
 r = pl.check(I4, t)
-check("28 of 30 reference fields is flagged as near the limit, and says the back-reference question is open", kinds(r) == [("reference_near", "Orders")] and "Postman test 4" in r[0]["detail"])
+check("28 of 30 reference fields is flagged as near the limit, and mentions the back-reference finding", kinds(r) == [("reference_near", "Orders")] and "Postman test 4" in r[0]["detail"])
 I5 = [item("P-T-a", "record_type", "Orders")]; f, t = fields("a", 501); I5 += f
 check("501 fields in one record type is over the limit of 500", ("fields", "Orders") in kinds(pl.check(I5, t)))
 I6 = [item("P-T-a", "record_type", "Orders")]; f, t = fields("a", 500); I6 += f; I6.append(item("S-P-a-x", "field", "Core object type", "P-T-a", source="migration"))

@@ -149,7 +149,7 @@ NEAR = 3            # warn when a table is within this many of the cap
 def connection_counts(rows):
     """Link fields per table, from the ingested schema (rows: non-stale airtable_fields rows of tables in scope). Counts every link field whose linked table is also in
     scope, self-links included: those are the reference fields Planning would have to create. Each side of a two-way pair is its own field, so a pair uses a slot on
-    both tables. Whether a back reference ALSO uses a slot beyond that is unknown and cannot be tested without a table of about 31 links (see the README), so no
+    both tables. The loader sends no back reference (Postman test 4 showed one would use a slot on the other table too), so no
     extra slot is assumed. Returns [{table_id, table_name, links, status}] sorted by count (largest first) then name; status is over, near or ok."""
     tables = {r["table_id"] for r in rows}
     n, names = {}, {}

@@ -217,7 +217,7 @@ function renderLinkDirections(r) {
   const top = (r.connection_counts || []).slice(0, 3).map((x) => x.table_name + " " + x.links);
   caps.appendChild(note(hot.some((x) => x.status === "over") ? "err" : hot.length ? "warn" : "info",
     "Connection fields per table (Planning allows " + r.connection_cap + " per record type): " + (hot.length ? hot.map((x) => x.table_name + " has " + x.links + (x.status === "over" ? ", over the cap" : ", close to the cap")).join("; ") : "none is near the cap" + (top.length ? " (most: " + top.join(", ") + ")" : "")) +
-    ". Each side of a two-way pair counts on its own table. Whether a back reference also uses an extra slot is unknown and cannot be tested without a table of about 31 links, so none is assumed."));
+    ". Each side of a two-way pair counts on its own table. The loader sends no back reference, so no extra slot is used."));
   sum.appendChild(note(c.undecided ? "warn" : "ok", c.pairs + " link relationship(s) (" + c.two_way + " two-way, " + c.one_way + " one-way): " + c.undecided + " undecided, " + c.confirmed + " confirmed, " + c.automatic + " automatic." +
     (c.ambiguous ? " " + c.ambiguous + " ambiguous pair(s) that the schema cannot orient (one to one or many to many: " + Object.entries(c.ambiguous_by_type || {}).map((kv) => kv[1] + " " + kv[0].replace(/_/g, " ")).join(", ") + "), " + c.ambiguous_undecided + " still need a tiebreaker." : " No pair is ambiguous.") +
     (c.undecided ? " The load order is provisional and the schema build is blocked until every one is decided." : " Every direction is decided; recompute the load order to use them.")));
