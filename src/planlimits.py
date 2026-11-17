@@ -54,7 +54,7 @@ def check(items, airtable_types):
             if n > cap:
                 out.append(_f(key, nm, "%d %s are planned in this record type, and the limit is %d." % (n, what, cap), count=n, cap=cap))
             elif key == "reference" and n >= cap - 3 and n > 0:
-                out.append(_f("reference_near", nm, "%d of %d reference (link) fields are planned. The limit leaves little room, and it is not yet known whether a back reference uses a second slot (Postman test 4)." % (n, cap), count=n, cap=cap))
+                out.append(_f("reference_near", nm, "%d of %d reference (link) fields are planned. The limit leaves little room, and a back reference would use a slot on the other table too (Postman test 4), though the loader sends none." % (n, cap), count=n, cap=cap))
     for i in live:
         if i["kind"] in ("record_type", "field") and i.get("description") and len(i["description"]) > MAX_DESCRIPTION:
             out.append(_f("description", i["name"], "The description is %d characters, and the limit is %d. The Fusion-driven marker comes first, so shorten the lineage text." % (len(i["description"]), MAX_DESCRIPTION),
