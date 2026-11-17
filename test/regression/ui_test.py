@@ -59,6 +59,7 @@ with sync_playwright() as p:
     pg.set_viewport_size({"width":900,"height":700}); pg.wait_for_timeout(200)
     pg.focus("#linkWindow"); before=pg.eval_on_selector("#linkWindow","e=>[e.scrollLeft,e.scrollTop]")
     for k in ("ArrowRight","ArrowRight","ArrowDown","ArrowDown"): pg.keyboard.press(k)
+    pg.wait_for_timeout(400)   # Chromium animates keyboard scrolling; read the position after it settles
     after=pg.eval_on_selector("#linkWindow","e=>[e.scrollLeft,e.scrollTop,e.scrollWidth>e.clientWidth]")
     check("the link grid window takes keyboard focus and the arrow keys pan it sideways (and down when it is long)", pg.get_attribute("#linkWindow","tabindex")=="0" and after[2] and after[0]>before[0], (before,after))
     pg.set_viewport_size({"width":1280,"height":900})
