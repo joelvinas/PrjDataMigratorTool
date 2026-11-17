@@ -104,14 +104,101 @@ async function loadAtt() {
   $("btnAttNext").disabled = s.offset + d.rows.length >= d.total;
 }
 
-const all = () => Promise.all([loadPasses(), loadMap(), loadAtt()]);
+/* ---------- where Core objects go ---------- */
+const HEX32 = /^[0-9a-fA-F]{32}$/;
+let coreData = null;
+const TYPE_LABEL = { project: "Project (PROJ)", request: "Request (OPTASK)", task: "Task (TASK)" };
+
+function parentOptions(type) {
+  const opts = [el("option", { value: "", text: type ? "Choose..." : "Decide the type first" })];
+  if (!type) return opts;
+  if (coreData.parent_optional[type]) opts.push(el("option", { value: "none", text: "No parent" }));
+  coreData.parent_codes[type].forEach((c) => opts.push(el("option", { value: c, text: coreData.parent_labels[c] + " (" + c + ")" })));
+  return opts;
+}
+
+function renderCore(d) {
+  coreData = d;
+  const t = $("coreGrid"), body = t.querySelector("tbody");
+  clear(body);
+  d.rows.forEach((row) => {
+    let r = row;
+    const typeSel = el("select", { "aria-label": "What " + r.table_name + " becomes in Core" }, el("option", { value: "", text: "Not decided" }), d.object_types.map((o) => el("option", { value: o.type, text: TYPE_LABEL[o.type] })));
+    typeSel.value = r.core_object_type || "";
+    const parSel = el("select", { "aria-label": "Parent object type for " + r.table_name });
+    const idIn = el("input", { type: "text", maxlength: "100", placeholder: "32 hexadecimal characters", "aria-label": "Parent ID for " + r.table_name, autocomplete: "off" });
+    const why = el("input", { type: "text", maxlength: "500", placeholder: "why (recorded)", "aria-label": "Reason for " + r.table_name, autocomplete: "off" });
+    const fillParent = () => {
+      clear(parSel);
+      parentOptions(typeSel.value).forEach((o) => parSel.appendChild(o));
+      const opts = coreData.parent_codes[typeSel.value] || [];
+      parSel.value = r.parent_decided ? (r.parent_obj_code === null ? (coreData.parent_optional[typeSel.value] ? "none" : "") : opts.includes(r.parent_obj_code) ? r.parent_obj_code : "") : "";
+      idIn.disabled = parSel.value === "none" || parSel.value === "";
+    };
+    idIn.value = r.parent_obj_id || "";
+    typeSel.addEventListener("change", () => { idIn.value = ""; r = Object.assign({}, r, { parent_decided: false }); fillParent(); });
+    parSel.addEventListener("change", () => { idIn.disabled = parSel.value === "none" || parSel.value === ""; if (idIn.disabled) idIn.value = ""; });
+    fillParent();
+    const save = el("button", { type: "button", text: "Save" });
+    save.addEventListener("click", () => saveCore(row, typeSel.value, parSel.value, idIn.value.trim(), why.value.trim()).catch((e) => setMsg("coreMessage", e.message, "err")));
+    const clr = el("button", { type: "button", text: "Clear" });
+    clr.addEventListener("click", () => clearCore(row, why.value.trim()).catch((e) => setMsg("coreMessage", e.message, "err")));
+    const status = r.ready ? "Ready. Decided by " + (r.type_by || "?") + (r.type_at ? " on " + r.type_at.slice(0, 10) : "") + "; parent by " + (r.parent_by || "?") + "."
+      : r.problem + (r.type_by ? " (type decided by " + r.type_by + ")" : "");
+    body.appendChild(el("tr", { class: r.ready ? "" : "undecided" }, el("td", { "data-sort": r.table_name }, el("b", { text: "[" + r.table_name + "]" }), el("div", { class: "hint", text: r.table_id })),
+      el("td", {}, typeSel), el("td", {}, parSel), el("td", {}, idIn), el("td", {}, why), el("td", { "data-sort": r.ready ? "ready" : "open", text: status }), el("td", { class: "stack" }, save, clr)));
+  });
+  t.hidden = d.rows.length === 0;
+  setMsg("coreMessage", d.rows.length ? "" : "No table is in scope and set to land in Planning plus Core yet. Decide that on the Field names page (tables).", "");
+  applySort("coreGrid");
+  const h = $("coreHistory"), hb = h.querySelector("tbody");
+  clear(hb);
+  const names = {};
+  d.rows.forEach((x) => { names[x.table_id] = x.table_name; });
+  d.history.forEach((e) => hb.appendChild(el("tr", {}, el("td", { text: e.created_at }), el("td", { text: names[e.table_id] || e.table_id }), el("td", { text: (e.subject === "parent" ? "parent " : "object type ") + e.event_type }),
+    el("td", { text: e.old_value || "" }), el("td", { text: e.new_value || "" }), el("td", { text: e.actor }), el("td", { text: e.reason || "" }))));
+  h.hidden = d.history.length === 0;
+}
+
+async function loadCore() {
+  if (!baseNow()) { $("coreGrid").hidden = true; return; }
+  renderCore(await api("GET", "/api/core/targets?base_id=" + encodeURIComponent(baseNow())));
+}
+
+async function saveCore(r, type, parentCode, parentId, reason) {
+  const actor = $("actor").value.trim();
+  if (!actor) { setMsg("coreMessage", "Enter your initials first.", "err"); $("actor").focus(); return; }
+  if (!type) { setMsg("coreMessage", "Choose what " + r.table_name + " becomes in Core first.", "err"); return; }
+  if (!parentCode) { setMsg("coreMessage", "Choose the parent object type for " + r.table_name + (coreData.parent_optional[type] ? " (or 'No parent')." : "."), "err"); return; }
+  if (parentCode !== "none" && !HEX32.test(parentId)) { setMsg("coreMessage", "A Workfront ID is 32 hexadecimal characters (0 to 9 and a to f). Check the parent ID for " + r.table_name + ".", "err"); return; }
+  const base = baseNow();
+  let d = null;
+  if (type !== r.core_object_type) d = await api("POST", "/api/core/object-type", { base_id: base, table_id: r.table_id, object_type: type, actor, reason });
+  d = await api("POST", "/api/core/parent", parentCode === "none" ? { base_id: base, table_id: r.table_id, none: true, actor, reason } : { base_id: base, table_id: r.table_id, parent_code: parentCode, parent_id: parentId, actor, reason });
+  renderCore(d);
+  setMsg("coreMessage", "Saved for " + r.table_name + ".", "ok");
+}
+
+async function clearCore(r, reason) {
+  const actor = $("actor").value.trim();
+  if (!actor) { setMsg("coreMessage", "Enter your initials first.", "err"); $("actor").focus(); return; }
+  const base = baseNow();
+  await api("POST", "/api/core/parent", { base_id: base, table_id: r.table_id, clear: true, actor, reason });
+  const d = await api("POST", "/api/core/object-type", { base_id: base, table_id: r.table_id, object_type: "clear", actor, reason });
+  renderCore(d);
+  setMsg("coreMessage", "Cleared for " + r.table_name + ".", "ok");
+}
+
+const all = () => Promise.all([loadCore(), loadPasses(), loadMap(), loadAtt()]);
 const guarded = (fn) => () => fn().catch((e) => showGlobalError(e.message));
 
 async function afterConnect() { await loadKnownBases(); if (baseNow()) await all(); }
 
 startPage("load", { afterConnect }, () => {
   initBaseCombo();
-  sortableTable("passTable");
+  sortableTable("passTable"); sortableTable("coreGrid");
+  try { $("actor").value = sessionStorage.getItem("migrationControl.actor") || ""; } catch (e) { /* storage can be blocked */ }
+  $("actor").addEventListener("input", () => { try { sessionStorage.setItem("migrationControl.actor", $("actor").value.trim()); } catch (e) { /* ignore */ } });
   headers("mapGrid", view.map, loadMap);
   headers("attGrid", view.att, loadAtt);
   $("baseId").addEventListener("input", guarded(all));

@@ -42,6 +42,7 @@ import postmantests
 import sandboxplan
 import linkdirections as ld
 import recordmap
+import coretargets
 import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
@@ -5113,6 +5114,45 @@ def api_records_attachments(q):
         return _record_map_call(lambda: recordmap.attachments_view(conn, base, env, _one(q, "status") or None, _one(q, "sort", "row"), _one(q, "dir") == "desc", _one(q, "limit", "100"), _one(q, "offset", "0")))
 
 
+def _target_call(fn_, *a, **k):
+    try:
+        return fn_(*a, **k)
+    except coretargets.TargetError as e:
+        raise AppError(e.message, e.status)
+
+
+def _core_targets_payload(conn, base):
+    return {"base_id": base, "rows": coretargets.rows(conn, base), "object_types": [{"type": t, "code": c} for t, c in sorted(coretargets.OBJECT_CODE.items())],
+            "parent_codes": {t: list(c) for t, c in coretargets.PARENT_CODES.items()}, "parent_optional": coretargets.PARENT_OPTIONAL, "parent_labels": coretargets.PARENT_LABEL,
+            "history": coretargets.history(conn, base, limit=100)}
+
+
+def api_core_targets(q):
+    """Where each Planning-plus-Core table's Core objects go: the object type and the parent (object code and ID), with who, when and why, and the history."""
+    base = _names_base(q)
+    with db() as conn:
+        return _target_call(_core_targets_payload, conn, base)
+
+
+def api_core_object_type(body):
+    """A person decides what a table becomes in Core (project, request, task) or clears the decision."""
+    base = _names_base(body)
+    with db() as conn:
+        res = _target_call(coretargets.set_object_type, conn, base, str(body.get("table_id") or ""), str(body.get("object_type") or ""), body.get("actor"), body.get("reason") or "")
+        return dict(_core_targets_payload(conn, base), result=res)
+
+
+def api_core_parent(body):
+    """A person decides where a table's Core objects go (parent object code and ID, or none for a project), or clears the decision."""
+    base = _names_base(body)
+    with db() as conn:
+        clear = body.get("clear") is True
+        code = None if body.get("none") is True or clear else (str(body.get("parent_code") or "") or None)
+        pid = None if body.get("none") is True or clear else (str(body.get("parent_id") or "") or None)
+        res = _target_call(coretargets.set_parent, conn, base, str(body.get("table_id") or ""), code, pid, body.get("actor"), body.get("reason") or "", clear=clear)
+        return dict(_core_targets_payload(conn, base), result=res)
+
+
 def api_select_values(body):
     """The select-value inventory: for every single or multiple select field of the base (or one table), the values that sit in the saved records
     compared with the options the schema declares. Counts, record IDs and declared option names only; an undeclared value's text is never returned.
@@ -5279,7 +5319,7 @@ STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/records/view": api_records_view, "/api/records/attachments": api_records_attachments, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/records/view": api_records_view, "/api/core/targets": api_core_targets, "/api/records/attachments": api_records_attachments, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
@@ -5297,7 +5337,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,

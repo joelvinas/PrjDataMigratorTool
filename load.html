@@ -36,10 +36,28 @@
     </select>
     <label for="wsKey">Planning Workspace ID</label>
     <input id="wsKey" type="text" maxlength="100" placeholder="needed for Planning rows" autocomplete="off">
+    <label for="actor">Your initials</label>
+    <input id="actor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
     <button id="btnRefresh" type="button">Refresh</button>
   </div>
   <p class="hint">This page only <strong>shows</strong> what the loader has recorded. It never calls Workfront and never shows a record value, a file name or a link: only Airtable and Workfront IDs, statuses, counts and sizes. The loader itself is run from the command line (<code>loader.py records</code>); see the README. A Planning row belongs to a Workspace, and a Core row has none, so leave the Workspace ID empty when you choose a Core environment.</p>
   <div id="pageMessage" class="msg"></div>
+</section>
+
+<section class="card" id="coreCard">
+  <h2>Where Core objects go</h2>
+  <p class="hint">For each table that lands in Planning plus Core, decide <strong>what it becomes in Workfront Core</strong> (a project, a request, which is an <code>OPTASK</code>, or a task) and <strong>where those objects are created</strong>: the parent's object type and its ID. A request normally goes under its Request Queue project. A task goes under a project or another task. A project goes under a program or a portfolio, or under nothing. Every table has its own parent, so these are kept here, never in <code>config.json</code>. Each decision records who, when and why, and the loader will not create Core objects for a table until both are decided.</p>
+  <div id="coreMessage" class="msg"></div>
+  <div class="tablewin"><table id="coreGrid" class="grid" hidden>
+    <thead><tr><th data-sort="text">Table</th><th>Becomes</th><th>Parent object type</th><th>Parent ID</th><th>Reason</th><th data-sort="text">Status</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <details><summary>Decision history</summary>
+    <div class="tablewin"><table id="coreHistory" class="grid" hidden>
+      <thead><tr><th>When</th><th>Table</th><th>What</th><th>Was</th><th>Now</th><th>Who</th><th>Why</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </details>
 </section>
 
 <section class="card" id="passCard">
