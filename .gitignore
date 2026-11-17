@@ -1,6 +1,9 @@
 # Output folder
 /out
 
+# Scratch space for throwaway files and hand-run test databases
+/tmp/
+
 # Secrets and local data: never commit these
 config.json
 data_extract/
