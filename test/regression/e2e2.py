@@ -195,7 +195,7 @@ for f in ["common.js","setup.js","stage1.js","stage2.js","stage3.js","editor-kit
     t=open(f,encoding="utf-8").read(); check("%s: no innerHTML use, no document.write and no token text"%f, not re.search(r"\.innerHTML|insertAdjacentHTML|document\.write|outerHTML", t) and "patMOCK" not in t and "Authorization" not in t)
 t=open("stage1.html",encoding="utf-8").read(); check("Stage 1 holds steps 3 to 6 and no step 1 or 2", all('id="step%d"'%i in t for i in (3,4,5,6)) and 'id="step1"' not in t and 'id="step2"' not in t)
 t=open("setup.html",encoding="utf-8").read(); check("Setup holds steps 1 and 2 only", 'id="step1"' in t and 'id="step2"' in t and 'id="step3"' not in t)
-t=open("common.js",encoding="utf-8").read(); check("log is pinned at the bottom of the nav and Stage 4 is a planned slot", "NAV_BOTTOM" in t and '"/log"' in t and "Stage 4: Map and load" in t)
+t=open("common.js",encoding="utf-8").read(); check("log is pinned at the bottom of the nav and Stage 4 is in it", "NAV_BOTTOM" in t and '"/log"' in t and "Stage 4: Map and load" in t)
 import re as _re
 check("APP_VERSION matches EXPECTED_SERVER_VERSION", _re.search(r'APP_VERSION = "([^"]+)"', open("server.py",encoding="utf-8").read()).group(1)==_re.search(r'EXPECTED_SERVER_VERSION = "([^"]+)"', t).group(1))
 print("ALL PASS" if ok else "SOME FAILED"); sys.exit(0 if ok else 1)

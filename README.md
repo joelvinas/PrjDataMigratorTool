@@ -1,6 +1,6 @@
 # Airtable → Workfront Planning Migration Control Plane
 
-Current state: **Stage 1 (Data), Stage 2 (Forms) and Stage 3 (Automations) are built and working** (version 1.14; Stages 2 and 3 are manual recorders), plus the **Field names** page (the naming rules and review), inside a **multi-page site** with a left navigation panel: Setup, Stage 1: Data, placeholder pages for Stage 2 (Forms) and Stage 3 (Automations), a slot for Stage 4 (Map and load), and the API call log pinned at the bottom. Stages 2 to 4 are **not built**; see "Roadmap and structure" below.
+Current state: **Stage 1 (Data), Stage 2 (Forms) and Stage 3 (Automations) are built and working** (version 1.15; Stages 2 and 3 are manual recorders), plus the **Field names** page (the naming rules and review), inside a **multi-page site** with a left navigation panel: Setup, Stage 1: Data, placeholder pages for Stage 2 (Forms) and Stage 3 (Automations), the Stage 4 page (Map and load: the record map and attachment map screens), and the API call log pinned at the bottom. Stages 2 to 4 are **not built**; see "Roadmap and structure" below.
 
 A small local web application that captures the **schema metadata** of Airtable bases into SQLite, computes a safe table load order, and records baseline data-profile statistics (row, null and distinct-value counts). It is the first stage of a migration from Airtable to Adobe Workfront Planning.
 
@@ -139,7 +139,7 @@ airtable-migration-control/
 3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python server.py` (Mac) or `set PORT=8800 && python server.py` (Windows cmd).
 4. Stop with Ctrl+C.
 
-Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/names` (Field names), `/log` (API call log). The left panel links them; Stage 4 appears as a greyed "planned" entry. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
+Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/names` (Field names), `/load` (Stage 4: Map and load), `/postman` (Postman tests), `/log` (API call log). The left panel links them. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
 
 Without `config.json`, or with an empty token, the page shows a setup message and still works for everything that does not call Airtable (for example, pasted schema JSON).
 
@@ -602,7 +602,7 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 | Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
 | Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14) |
-| Stage 4: Map and load | none yet | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.14): the load plan and dry run are built (`loader.py`); nothing is created in Workfront yet. See `docs/LOADER_PLAN.md` |
+| Stage 4: Map and load | `/load` | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.15): the load plan, dry run, field creation (`run --send`), the Planning record load (`records`) and the screens that show the record map, pass markers and attachment map (`/load`, read-only, IDs and counts only, sortable on the server). See `docs/LOADER_PLAN.md` |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 
 Decisions made:

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Map and load - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="load">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="baseStrip">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="envSel">Environment</label>
+    <select id="envSel">
+      <option value="dev">Planning: dev</option><option value="uat">Planning: uat</option>
+      <option value="sandbox1">Core: sandbox1</option><option value="sandbox2">Core: sandbox2</option><option value="preview">Core: preview</option><option value="production">Core: production</option>
+    </select>
+    <label for="wsKey">Planning Workspace ID</label>
+    <input id="wsKey" type="text" maxlength="100" placeholder="needed for Planning rows" autocomplete="off">
+    <button id="btnRefresh" type="button">Refresh</button>
+  </div>
+  <p class="hint">This page only <strong>shows</strong> what the loader has recorded. It never calls Workfront and never shows a record value, a file name or a link: only Airtable and Workfront IDs, statuses, counts and sizes. The loader itself is run from the command line (<code>loader.py records</code>); see the README. A Planning row belongs to a Workspace, and a Core row has none, so leave the Workspace ID empty when you choose a Core environment.</p>
+  <div id="pageMessage" class="msg"></div>
+</section>
+
+<section class="card" id="passCard">
+  <h2>Where each table stands</h2>
+  <p class="hint">How many records are registered per table, and how many have each pass done in the chosen environment. A pass marker means that step is finished for that record, so a restart never repeats it. The <strong>links</strong> pass can only follow a finished <strong>records</strong> pass.</p>
+  <div id="passSummary" class="msg"></div>
+  <div class="scroll"><table id="passTable" class="grid compact" hidden>
+    <thead><tr><th data-sort="text">Table</th><th data-sort="text">Table ID</th><th class="num" data-sort="num">Registered</th><th class="num" data-sort="num">Records done</th><th class="num" data-sort="num">Links done</th><th class="num" data-sort="num">Attachments done</th><th class="num" data-sort="num">Core backfill done</th><th class="num" data-sort="num">New Workfront records</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" id="mapCard">
+  <h2>Record map: Airtable record to Workfront record</h2>
+  <p class="hint">One row per registered Airtable record: its surrogate number, the new Workfront ID (several when one record became several), and the passes done. Click a heading to sort the whole list (not only this page of it); search matches an Airtable record ID or a Workfront ID.</p>
+  <div class="row">
+    <label for="mapTable">Table</label><select id="mapTable"><option value="">All tables</option></select>
+    <label for="mapQ">Search</label><input id="mapQ" type="text" maxlength="100" placeholder="part of an ID" autocomplete="off">
+    <button id="btnMapSearch" type="button">Search</button>
+    <button id="btnMapPrev" type="button">Previous</button><button id="btnMapNext" type="button">Next</button>
+    <span id="mapPage" class="hint"></span>
+  </div>
+  <div class="scroll"><table id="mapGrid" class="grid compact" hidden>
+    <thead><tr><th data-key="uid" class="num">Number</th><th data-key="table">Table</th><th data-key="record_id">Airtable record ID</th><th data-key="target">New Workfront ID</th><th data-key="passes">Passes done</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" id="attCard">
+  <h2>Attachments</h2>
+  <p class="hint">Each Airtable attachment and the Core document it became, with sizes and a check value. Statuses: <strong>pending</strong> (planned), <strong>downloaded</strong> (the file was fetched and its size matched what Airtable reported), <strong>uploaded</strong> (it is a Core document; never uploaded twice) and <strong>failed</strong> (see the short reason). Attachments are a Core feature, so this list follows the Core environment chosen above.</p>
+  <div class="row">
+    <label for="attStatus">Status</label>
+    <select id="attStatus"><option value="">All</option><option value="pending">pending</option><option value="downloaded">downloaded</option><option value="uploaded">uploaded</option><option value="failed">failed</option></select>
+    <button id="btnAttPrev" type="button">Previous</button><button id="btnAttNext" type="button">Next</button>
+    <span id="attPage" class="hint"></span>
+  </div>
+  <div id="attSummary" class="msg"></div>
+  <div class="scroll"><table id="attGrid" class="grid compact" hidden>
+    <thead><tr><th data-key="row" class="num">Row</th><th>Table</th><th data-key="record_id">Airtable record ID</th><th data-key="field">Field ID</th><th data-key="attachment">Attachment ID</th><th data-key="status">Status</th><th data-key="size" class="num">Size (bytes)</th><th data-key="document">Core document ID</th><th>Check value (SHA-256)</th><th>Reason</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/load.js"></script>
+</body>
+</html>

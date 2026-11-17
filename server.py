@@ -76,7 +76,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -5058,6 +5058,27 @@ def api_records_registry(q):
         return _record_map_call(recordmap.summary, conn, base, env, system, ws)
 
 
+def _one(q, name, default=""):
+    return (q.get(name) or [default])[0]
+
+
+def api_records_view(q):
+    """The record map screen: one row per registered record with its new Workfront ID and the passes done. Sorted and paged on the server. IDs only."""
+    base = _names_base(q)
+    env = _one(q, "environment", "dev")
+    with db() as conn:
+        return _record_map_call(lambda: recordmap.records_view(conn, base, env, _one(q, "system", "planning"), _one(q, "workspace_key"), _one(q, "table_id") or None, _one(q, "q") or None,
+                                                              _one(q, "sort", "record_id"), _one(q, "dir") == "desc", _one(q, "limit", "100"), _one(q, "offset", "0")))
+
+
+def api_records_attachments(q):
+    """The attachment map screen: IDs, sizes, status and a short scrubbed error. Never a file name or a link."""
+    base = _names_base(q)
+    env = _one(q, "environment", "production")
+    with db() as conn:
+        return _record_map_call(lambda: recordmap.attachments_view(conn, base, env, _one(q, "status") or None, _one(q, "sort", "row"), _one(q, "dir") == "desc", _one(q, "limit", "100"), _one(q, "offset", "0")))
+
+
 def api_select_values(body):
     """The select-value inventory: for every single or multiple select field of the base (or one table), the values that sit in the saved records
     compared with the options the schema declares. Counts, record IDs and declared option names only; an undeclared value's text is never returned.
@@ -5216,15 +5237,15 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
-          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML), "/postman": ("postman.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML), "/postman": ("postman.html", HTML), "/load": ("load.html", HTML),
           "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
-          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/postman.js": ("postman.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/postman.js": ("postman.js", JS), "/load.js": ("load.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/records/view": api_records_view, "/api/records/attachments": api_records_attachments, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,

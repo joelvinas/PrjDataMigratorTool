@@ -50,4 +50,24 @@ check("an unknown environment is refused", call("GET", "/api/records/registry?ba
 open("data_extract/%s/%s.json" % (BASE, T2), "w").write("{SECRETVALUE bad")
 s, r = post("/api/records/register", {"base_id": BASE})
 check("an unreadable file is reported as not registered without echoing its content", s == 200 and any(n["table_name"] == "Notes" for n in r["not_registered"]) and "SECRETVALUE" not in json.dumps(r), r)
+# ---- the Stage 4 screens
+w = sqlite3.connect("recmap.db")
+uids = {r[1]: r[0] for r in w.execute("SELECT source_record_uid, record_id FROM source_records")}
+w.execute("INSERT INTO target_mappings(source_record_uid, system, environment, workspace_key, target_kind, target_record_id) VALUES (?,?,?,?,?,?)", (uids["recT02"], "planning", "dev", "wsDev", "record", "PLREC9"))
+w.execute("INSERT INTO record_pass_markers(source_record_uid, pass, environment, workspace_key) VALUES (?,?,?,?)", (uids["recT02"], "records", "dev", "wsDev"))
+w.execute("INSERT INTO attachment_map(source_record_uid, airtable_field_id, airtable_attachment_id, environment, api_size_bytes, status, last_error) VALUES (?,?,?,?,?,?,?)", (uids["recT01"], "fldR01", "attOne", "production", 20, "failed", "link expired"))
+w.commit(); w.close()
+s, r = call("GET", "/api/records/view?base_id=%s&environment=dev&system=planning&workspace_key=wsDev&sort=record_id&dir=desc" % BASE)
+check("the record map screen is sorted on the server and shows IDs, targets and passes only", s == 200 and r["total"] == 5 and [x["record_id"] for x in r["rows"]][0] == "recT03" and "SECRETVALUE" not in json.dumps(r)
+      and [x for x in r["rows"] if x["record_id"] == "recT02"][0]["targets"] == "record:PLREC9" and [x for x in r["rows"] if x["record_id"] == "recT02"][0]["passes"] == ["records"], r)
+s, r = call("GET", "/api/records/view?base_id=%s&environment=dev&system=planning&workspace_key=wsDev&q=PLREC9&limit=1" % BASE)
+check("it searches by Workfront ID and pages", s == 200 and r["total"] == 1 and r["rows"][0]["record_id"] == "recT02", r)
+check("a Planning view without a Workspace, an unknown sort and a bad base are refused", call("GET", "/api/records/view?base_id=%s&environment=dev&system=planning" % BASE)[0] == 400
+      and call("GET", "/api/records/view?base_id=%s&environment=dev&system=planning&workspace_key=wsDev&sort=x" % BASE)[0] == 400 and call("GET", "/api/records/view?base_id=x%%20y&environment=dev")[0] == 400)
+s, r = call("GET", "/api/records/attachments?base_id=%s&environment=production&status=failed" % BASE)
+check("the attachment screen lists the failed attachment with its short reason and no file name or link", s == 200 and r["total"] == 1 and r["rows"][0]["attachment_id"] == "attOne" and r["rows"][0]["last_error"] == "link expired" and "filename" not in r["rows"][0], r)
+check("an unknown attachment status is refused", call("GET", "/api/records/attachments?base_id=%s&environment=production&status=x" % BASE)[0] == 400)
+for path, word in (("/load", "Record map"), ("/load.js", "records/view")):
+    with urllib.request.urlopen(B + path) as resp:
+        check("%s is served" % path, resp.status == 200 and word in resp.read().decode("utf-8"))
 sys.exit(0 if ok else 1)

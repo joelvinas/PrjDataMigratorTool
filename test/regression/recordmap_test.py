@@ -92,5 +92,32 @@ check("the summary gives counts only: registered, passes, targets, attachment st
       and ta["Orders"]["targets"] == 3 and s["attachments"] == {"pending": 0, "downloaded": 0, "uploaded": 1, "failed": 2}, s)
 check("without an environment the summary lists only the registered counts", "passes" not in rm.summary(c, "appL")["tables"][0] and "attachments" not in rm.summary(c, "appL"))
 
+# ---- the screens: sorted and paged on the server, IDs only
+v = db()
+rm.register(v, "appL", "tA", ["recC", "recA", "recB"]); rm.register(v, "appL", "tB", ["recZ"])
+ua, ub, uc, uz = (rm.lookup(v, "appL", t, r) for t, r in (("tA", "recA"), ("tA", "recB"), ("tA", "recC"), ("tB", "recZ")))
+rm.add_target(v, uc, "planning", "dev", "wsDev", "record", "PR_100"); rm.add_target(v, ua, "planning", "dev", "wsDev", "record", "PR_2"); rm.add_target(v, ua, "planning", "dev", "wsDev", "record", "PR_1")
+rm.mark_pass(v, [ua, uc], "records", "dev", "planning", "wsDev"); rm.mark_pass(v, [ua], "links", "dev", "planning", "wsDev")
+rm.add_target(v, ua, "core", "sandbox1", "", "project", "PRJ1")
+view = lambda **k: rm.records_view(v, "appL", "dev", "planning", "wsDev", **k)
+check("the record view lists every registered record with its targets and passes, sorted by Airtable ID by default", [r["record_id"] for r in view()["rows"]] == ["recA", "recB", "recC", "recZ"] and view()["total"] == 4
+      and view()["rows"][0]["targets"] == "record:PR_1, record:PR_2" and view()["rows"][0]["passes"] == ["links", "records"] and view()["rows"][1]["passes"] == [])
+check("it sorts on any whole column, ascending or descending, with the surrogate number breaking ties", [r["uid"] for r in view(sort="uid", desc=True)["rows"]] == [4, 3, 2, 1]
+      and [r["record_id"] for r in view(sort="table", desc=True)["rows"]] == ["recA", "recB", "recC", "recZ"] and [r["record_id"] for r in view(sort="table")["rows"]][0] == "recZ" and [r["record_id"] for r in view(sort="target")["rows"]][-1] == "recC" and [r["record_id"] for r in view(sort="record_id", desc=True)["rows"]] == ["recZ", "recC", "recB", "recA"])
+check("it is paged: the total counts everything, the page only its slice", [r["record_id"] for r in view(limit=2, offset=1)["rows"]] == ["recB", "recC"] and view(limit=2, offset=1)["total"] == 4)
+check("it filters on one table and searches a record ID or a Workfront ID, treating % and _ as plain characters", [r["record_id"] for r in view(table_id="tB")["rows"]] == ["recZ"] and [r["record_id"] for r in view(q="recB")["rows"]] == ["recB"]
+      and [r["record_id"] for r in view(q="PR_1")["rows"]] == ["recA", "recC"] and view(q="PR%")["total"] == 0 and view(q="R_2")["total"] == 1)
+check("the record view uses one environment and Workspace only", rm.records_view(v, "appL", "sandbox1", "core")["rows"][0]["targets"] == "project:PRJ1" and rm.records_view(v, "appL", "dev", "planning", "wsOther")["rows"][0]["targets"] == ""
+      and rm.records_view(v, "appL", "dev", "planning", "wsDev")["rows"][0]["targets"] != "")
+check("a sort or page it does not know is refused", "Sort by" in (err(rm.records_view, v, "appL", "dev", "planning", "wsDev", sort="record_id; drop table x") or "") and "whole numbers" in (err(rm.records_view, v, "appL", "dev", "planning", "wsDev", limit="x") or "")
+      and "Workspace" in (err(rm.records_view, v, "appL", "dev", "planning", "") or ""))
+r1 = rm.plan_attachment(v, ua, "fldAtt1", "attB", "production", 50); r2 = rm.plan_attachment(v, ub, "fldAtt1", "attA", "production", 10); r3 = rm.plan_attachment(v, ub, "fldAtt2", "attC", "production", 99)
+rm.attachment_downloaded(v, r2, 10, "a" * 64); rm.attachment_uploaded(v, r2, "DOC7"); rm.attachment_failed(v, r3, "link expired token=abc123secret")
+av = lambda **k: rm.attachments_view(v, "appL", "production", **k)
+check("the attachment view holds IDs, sizes and status, and filters by status", av()["total"] == 3 and [r["attachment_id"] for r in av(sort="attachment")["rows"]] == ["attA", "attB", "attC"] and [r["attachment_id"] for r in av(status="failed")["rows"]] == ["attC"]
+      and [r["attachment_id"] for r in av(sort="size", desc=True)["rows"]] == ["attC", "attB", "attA"])
+check("a failure reason in the attachment view has no credential, and no file name or link is a column", "abc123secret" not in str(av()) and not any(k in av()["rows"][0] for k in ("filename", "file", "url", "link")))
+check("an attachment view of another environment is empty, and a bad status or sort is refused", rm.attachments_view(v, "appL", "sandbox1")["total"] == 0 and "status" in (err(rm.attachments_view, v, "appL", "production", status="x") or "") and "Sort by" in (err(rm.attachments_view, v, "appL", "production", sort="x") or ""))
+
 print("ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
