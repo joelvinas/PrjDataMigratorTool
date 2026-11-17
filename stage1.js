@@ -177,6 +177,19 @@ function linkStatus(f) {
 const linkView = { table: "", hideDone: false };
 const bracket = (s) => "[" + s + "]";
 
+/* Plain words for what a direction means, written from the point of view of the row's field. `type` is the direction (chosen or suggested). Returns a list of sentences. */
+function relationText(f, type) {
+  const me = bracket(f.table_name), other = bracket(f.linked_table_name);
+  const mine = me + "." + bracket(f.field_name), theirs = f.partner_field_name ? other + "." + bracket(f.partner_field_name) : null;
+  if (type === "many_to_one") return ["Many references to one record in " + other + " are found in " + mine + ".",
+    "ONE side (parent, loads first): " + other + ". MANY side (child): " + me + ". From " + me + "'s point of view this is many to one."];
+  if (type === "one_to_many") return ["Many references to one record in " + me + " are found in " + (theirs || other) + ".",
+    "ONE side (parent, loads first): " + me + ". MANY side (child): " + other + ". From " + me + "'s point of view this is one to many." + (theirs ? "" : " (There is no paired field, so this is only a guess.)")];
+  if (type === "one_to_one") return ["Each record in " + me + " links to one record in " + other + ", and the reverse. Neither is clearly the parent.", "Choose a tiebreaker: which table loads first."];
+  if (type === "many_to_many") return ["Many records in " + me + " can link to many records in " + other + ", and the reverse. Neither is clearly the parent.", "Choose a tiebreaker: which table loads first."];
+  return ["Choose a direction to see what it means."];
+}
+
 function cardinalityText(f) {
   if (f.cardinality === null || f.cardinality === undefined || !f.row_count) return "No profile data yet (run profiling in step 5 to see distinct values)";
   return "Distinct values: " + fmt(f.cardinality) + (f.cardinality_capped ? " or more" : "") + " in " + fmt(f.row_count) + " record(s), " + fmt(f.null_count || 0) + " empty";
@@ -220,7 +233,14 @@ function renderLinkDirections(r) {
       const tieSel = el("select", { "aria-label": "Tiebreaker for " + f.field_name }, LINK_TIES.map((t) => el("option", { value: t[0], text: t[1] })));
       typeSel.value = f.relationship_type || "";
       tieSel.value = f.tiebreaker || "automatic";
-      const needTie = () => { tieSel.disabled = !(typeSel.value === "one_to_one" || typeSel.value === "many_to_many"); };
+      const help = el("div", { class: "relhelp" });
+      const showHelp = () => {
+        const type = typeSel.value || f.suggested_type;
+        clear(help);
+        help.appendChild(el("div", { class: "hint", text: typeSel.value ? "If you choose this:" : "If you accept the suggestion:" }));
+        relationText(f, type).forEach((t) => help.appendChild(el("div", { text: t })));
+      };
+      const needTie = () => { tieSel.disabled = !(typeSel.value === "one_to_one" || typeSel.value === "many_to_many"); showHelp(); };
       typeSel.addEventListener("change", needTie);
       needTie();
       const save = el("button", { type: "button", text: f.confirmed ? "Change" : "Confirm" });
@@ -238,7 +258,7 @@ function renderLinkDirections(r) {
         el("td", { "data-sort": f.table_name + " " + f.field_name }, el("div", {}, "Table ", el("b", { text: bracket(f.table_name) })), el("div", {}, "Field ", el("b", { text: bracket(f.field_name) })), el("div", { class: "hint", text: cardinalityText(f) })),
         el("td", { "data-sort": f.linked_table_name }, el("b", { text: bracket(f.linked_table_name) })),
         el("td", { "data-sort": f.partner_field_name ? f.linked_table_name + " " + f.partner_field_name : "" }, f.partner_field_name ? [el("div", {}, "Table ", el("b", { text: bracket(f.linked_table_name) })), el("div", {}, "Field ", el("b", { text: bracket(f.partner_field_name) }))] : el("span", { class: "hint", text: "(one-way: no paired field)" })),
-        el("td", { text: linkLabel(f.suggested_type) }), el("td", {}, typeSel), el("td", {}, tieSel), el("td", { text: linkStatus(f) }), el("td", { class: "stack" }, kids)));
+        el("td", { text: linkLabel(f.suggested_type) }), el("td", { class: "dirhelp" }, typeSel, help), el("td", {}, tieSel), el("td", { text: linkStatus(f) }), el("td", { class: "stack" }, kids)));
     }
   }
   tbl.hidden = false;

@@ -179,8 +179,10 @@ th.sortable.sorted-asc::after { content: " B2"; font-size: 0.7em; }
 th.sortable.sorted-desc::after { content: " BC"; font-size: 0.7em; }
 #linkTable tr.undecided td { background: rgba(255, 243, 168, 0.35); }
 /* a scrolling window for a long grid: about ten tall rows at a time, with the horizontal scroll bar inside reach and the headings kept in view */
-.tablewin { overflow: auto; height: clamp(560px, 80vh, 1000px); border: 1px solid var(--line); border-radius: 4px; margin: 8px 0; }
+.tablewin { overflow: auto; max-height: clamp(560px, 80vh, 1000px); border: 1px solid var(--line); border-radius: 4px; margin: 8px 0; }
 .tablewin table.grid { margin: 0; min-width: 1150px; }
+.tablewin table.grid th { z-index: 2; }
+.tablewin table.grid td.hold input, .tablewin table.grid td input[type=text] { position: static; }
 #linkTable td { padding: 12px 10px; line-height: 1.55; }
 #linkTable td.stack button { display: block; margin: 0 0 6px; }
 #linkTable td .hint { margin: 2px 0 0; }
@@ -188,3 +190,7 @@ th.sortable.sorted-desc::after { content: " BC"; font-size: 0.7em; }
 pre.code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: rgba(127, 127, 127, 0.12); padding: 8px 10px; border-radius: 4px; overflow-x: auto; margin: 4px 0 8px; }
 li.step { margin: 0 0 14px; }
 details.card > summary { cursor: pointer; }
+
+#linkTable td.dirhelp { min-width: 340px; }
+#linkTable .relhelp { margin-top: 8px; font-size: 13px; line-height: 1.5; }
+#linkTable .relhelp div + div { margin-top: 3px; }

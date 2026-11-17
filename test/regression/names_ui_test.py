@@ -321,6 +321,11 @@ with sync_playwright() as p:
     pg.click("#tablesGrid th[data-key=table]"); pg.wait_for_timeout(300)
     tnames = pg.eval_on_selector_all("#tablesGrid tbody tr:not(.reason) td:nth-child(2) > div:first-child", "els => els.map(e => e.textContent)")
     check("the table grid sorts by table name too, out-of-scope rows included", tnames == sorted(tnames, key=lambda x: x.lower()) and len(tnames) == 3, tnames)
+    # ---- sticky headings inside a scrolling window
+    for gid in ("tablesGrid", "fieldsGrid", "descGrid"):
+        got = pg.evaluate("(id) => { const t = document.getElementById(id), w = t.parentElement, th = t.tHead.rows[0].cells[0]; w.scrollTop = 150; "
+                          "return [getComputedStyle(w).overflowY, getComputedStyle(th).position, Math.abs(th.getBoundingClientRect().top - w.getBoundingClientRect().top) < 2]; }", gid)
+        check("%s heading is sticky inside a scrolling window and stays at its top after scrolling" % gid, got == ["auto", "sticky", True], got)
     check("no script errors anywhere in the whole session", not errs, errs)
     br.close()
 shutil.rmtree("data_extract", ignore_errors=True)
