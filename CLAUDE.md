@@ -6,6 +6,10 @@ Read README.md first. These rules apply to every change, every session, and any 
 
 A local, standard-library-only Python web app (`server.py`, plain HTML/CSS/JS, SQLite) that controls the migration of two Airtable bases into Adobe Workfront: Workfront Core (custom fields, custom forms, projects, requests, tasks) and Workfront Planning (record types). Stage 1 ingests the Airtable schema and profiles the data; Stages 2 and 3 are manual recorders for forms and automations. The field name validator (`fieldnames.py`, `fieldnames_io.py`) checks the renamed field and table names against a documented rubric.
 
+## Layout
+
+Every Python module lives in `src/` (run the app with `python src/server.py`, the loader with `python src/loader.py`). The pages (`*.html`, `*.js`, `style.css`), `config.json`, `db/`, `data_extract/`, `sql/`, `docs/` and `test/` stay at the project root. `server.py` finds the project root from its own location, so new modules go in `src/` and tests add `src/` to their import path. Do not add loose `.py` files to the root.
+
 ## Standing rules
 
 - **Standard library only.** No new dependencies, no build step. Playwright is allowed in the optional browser tests only.
@@ -21,6 +25,7 @@ A local, standard-library-only Python web app (`server.py`, plain HTML/CSS/JS, S
 
 - Say **allowlist** and **blocklist**, never whitelist or blacklist.
 - Docs and report text are plain language for a client audience.
+- **Long grids sit in a scrolling window** (`class="tablewin"`, sticky headings). Every window must stay keyboard-focusable (common.js does this): the owner pans and scrolls with the arrow keys, Page Up/Down, Home and End, and that must not be lost. A browser test covers it.
 - Match the existing style of nearby code; keep rules as small, separate, testable functions or data.
 
 ## Testing

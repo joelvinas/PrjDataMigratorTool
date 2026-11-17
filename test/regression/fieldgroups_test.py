@@ -1,6 +1,7 @@
 """Pure-function tests for fieldgroups.py (consolidation rules) and the merged origins in descriptions. Fabricated names only."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import fielddesc as fd, fieldgroups as fg
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

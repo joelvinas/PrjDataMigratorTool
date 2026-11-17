@@ -53,6 +53,7 @@ def main():
     conn.executescript(open(os.path.join(HERE, "migration_017_add_record_id_map.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_019_add_field_writer_decisions.sql"), encoding="utf-8").read())
+    conn.executescript(open(os.path.join(HERE, "migration_020_add_core_parents.sql"), encoding="utf-8").read())
     dropped, kept = [], []
     for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():

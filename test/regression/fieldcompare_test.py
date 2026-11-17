@@ -1,6 +1,7 @@
 """Pure-function tests for fieldcompare.py. Fabricated values only; no server or database."""
 import json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import fieldcompare as fc
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

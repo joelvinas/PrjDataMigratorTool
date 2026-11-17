@@ -134,6 +134,26 @@ class PlanningTransport(object):
             raise HttpError("The option %r is not in the field Planning created (it may not have been ready when the field was sent)." % item["name"])
         return key
 
+    # ---- records (UNVERIFIED route and body names: see recordload.py and docs/LOADER_PLAN.md)
+    def create_records(self, bodies):
+        """Create records in one call; the IDs come back in the order sent (verified by the owner for a JSON array). Each body is {recordTypeId, fields}. Returns the IDs."""
+        if not bodies:
+            return []
+        reply = self.http.request("POST", "/v2/records/bulk", list(bodies))
+        rows = reply
+        if isinstance(reply, dict):
+            rows = reply.get("content") or reply.get("records") or reply.get("data")
+        ids = [str(r.get("id")) for r in rows or [] if isinstance(r, dict) and r.get("id")]
+        if len(ids) != len(bodies):
+            raise HttpError("The create call worked but its reply holds %d usable ID(s) for %d record(s), so they cannot be matched." % (len(ids), len(bodies)))
+        return ids
+
+    def update_record(self, record_id, fields):
+        """Set fields on one record (used for the links second pass)."""
+        if not record_id or not fields:
+            raise ValueError("A record update needs the record's Planning ID and at least one field.")
+        self.http.request("PATCH", "/v2/records/%s" % record_id, {"fields": fields})
+
     # ---- finding what already exists
     def _pages(self, path):
         cursor, n = None, 0

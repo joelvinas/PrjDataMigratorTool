@@ -158,11 +158,60 @@ async function decide(path, body, msgId, okText) {
 }
 
 /* ---------- render: everything is rebuilt from N.R ---------- */
+/* ---------- sortable grids ----------
+   The list is sorted as DATA before it is paged, so a click orders the whole list and not only the page shown, and an open form stays under its own row.
+   Click a heading: ascending, then descending, then back to the natural order. */
+const SORTS = { tablesGrid: null, fieldsGrid: null, descGrid: null };
+const SORT_KEYS = {
+  tablesGrid: { scope: (t) => t.scope || "", table: (t) => t.old, fields: (t) => t.field_count, check: (t) => t.verdict || "", status: (t) => (t.scope === "out" ? "" : t.approved ? "approved" : "pending") },
+  fieldsGrid: { table: (f) => f.table_name, field: (f) => f.original, data: (f) => f.data_type || "", check: (f) => (f.targets[N.target] || {}).verdict || "", status: (f) => (f.targets[N.target] || {}).status || "" },
+  descGrid: { table: (f) => f.table_name, field: (f) => f.original, state: (f) => (f.description && f.description.edited ? "edited by hand" : "generated") },
+};
+function sortedBy(id, list) {
+  const s = SORTS[id];
+  if (!s) return list;
+  const key = SORT_KEYS[id][s.key], num = (v) => typeof v === "number";
+  return list.slice().sort((a, b) => {
+    const x = key(a), y = key(b);
+    const c = num(x) && num(y) ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: "base" });
+    return c * s.dir;
+  });
+}
+function markSorts() {
+  for (const id of Object.keys(SORTS)) {
+    const s = SORTS[id];
+    for (const th of $(id).tHead.rows[0].cells) {
+      if (!th.dataset.key) continue;
+      th.classList.toggle("sorted-asc", !!s && s.key === th.dataset.key && s.dir === 1);
+      th.classList.toggle("sorted-desc", !!s && s.key === th.dataset.key && s.dir === -1);
+      th.setAttribute("aria-sort", s && s.key === th.dataset.key ? (s.dir === 1 ? "ascending" : "descending") : "none");
+    }
+  }
+}
+function wireSorts() {
+  for (const id of Object.keys(SORTS)) {
+    for (const th of $(id).tHead.rows[0].cells) {
+      const key = th.dataset.key;
+      if (!key) continue;
+      th.classList.add("sortable");
+      th.setAttribute("tabindex", "0"); th.setAttribute("role", "button"); th.setAttribute("title", "Click to sort the whole list");
+      const go = () => {
+        const s = SORTS[id];
+        SORTS[id] = !s || s.key !== key ? { key, dir: 1 } : s.dir === 1 ? { key, dir: -1 } : null;
+        N.page = 0; N.descPage = 0;
+        render();
+      };
+      th.addEventListener("click", go);
+      th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+    }
+  }
+}
+
 function render() {
   const R = N.R, on = !!R;
   for (const id of ["settingsCard", "importCard", "tablesCard", "fieldsCard", "descCard", "downloadCard"]) $(id).hidden = !on && id !== "settingsCard" ? true : false;
   if (!on) { $("tablesGrid").tBodies[0].replaceChildren(); $("fieldsBody").hidden = true; $("fieldsLocked").hidden = false; $("dupCard").hidden = true; return; }
-  renderSettings(); renderTables(); renderFields(); renderDuplicates(); renderDescriptions(); renderDownloads();
+  renderSettings(); renderTables(); renderFields(); renderDuplicates(); renderDescriptions(); renderDownloads(); markSorts();
 }
 
 function renderSettings() {
@@ -237,7 +286,7 @@ function renderTables() {
   renderScopeWarnings();
   $("btnApproveUnchanged").disabled = locked; $("btnApproveAutoTables").disabled = locked;
   body.replaceChildren();
-  for (const t of R.tables) {
+  for (const t of sortedBy("tablesGrid", R.tables)) {
     const row = el("tr", { class: t.scope === "out" ? "muted" : "" });
     row.appendChild(scopeCell(t, locked));
     row.appendChild(el("td", {}, el("div", { text: t.old }), el("div", { class: "hint", text: t.table_id })));
@@ -345,7 +394,7 @@ function renderFields() {
   sel.replaceChildren(el("option", { value: "", text: "All tables" }), ...R.tables.filter((x) => x.scope !== "out").map((x) => el("option", { value: x.table_id, text: x.old })));
   sel.value = keep;
   for (const id of ["btnApprovePass", "btnApproveAuto", "btnApproveAllTargets"]) $(id).disabled = locked;
-  const rows = R.fields.filter(fieldMatches);
+  const rows = sortedBy("fieldsGrid", R.fields.filter(fieldMatches));
   const pages = Math.max(1, Math.ceil(rows.length / PER_PAGE));
   N.page = Math.min(N.page, pages - 1);
   $("fieldsCount").textContent = fmt(rows.length) + " of " + fmt(R.fields.length) + " fields shown";
@@ -517,7 +566,7 @@ function renderDescriptions() {
   const sel = $("dTable"), keep = sel.value;
   sel.replaceChildren(el("option", { value: "", text: "All tables" }), ...R.tables.filter((x) => x.scope !== "out").map((x) => el("option", { value: x.table_id, text: x.old })));
   sel.value = keep;
-  const rows = R.fields.filter(descMatches);
+  const rows = sortedBy("descGrid", R.fields.filter(descMatches));
   const pages = Math.max(1, Math.ceil(rows.length / DESC_PER_PAGE));
   N.descPage = Math.min(N.descPage, pages - 1);
   $("descCount").textContent = fmt(rows.length) + " of " + fmt(R.fields.length) + " fields shown";
@@ -584,6 +633,7 @@ const guarded = (fn) => async () => { try { await fn(); } catch (e) { showGlobal
 
 startPage("names", { onReadyChange, afterConnect }, () => {
   initBaseCombo();
+  wireSorts();
   try { $("actor").value = sessionStorage.getItem(ACTOR_KEY) || ""; } catch (e) { /* storage can be blocked */ }
   $("actor").addEventListener("input", () => { try { sessionStorage.setItem(ACTOR_KEY, actorNow()); } catch (e) { /* ignore */ } });
   $("baseId").addEventListener("input", guarded(load));

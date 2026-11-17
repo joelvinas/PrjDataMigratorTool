@@ -307,6 +307,26 @@ with sync_playwright() as p:
         pg.click("text=Download all (zip)")
     check("all the CSVs download as a zip", dl2.value.suggested_filename.endswith(".zip"))
 
+    # ---- sortable grids: the whole list is ordered, an open form stays under its row
+    names = lambda: pg.eval_on_selector_all("#fieldsGrid tbody tr:not(.reason) td:nth-child(2) > div:first-child", "els => els.map(e => e.textContent)")
+    natural = names()
+    pg.click("#fieldsGrid th[data-key=field]"); pg.wait_for_timeout(300)
+    up = names()
+    check("a click on the Field heading sorts the whole list ascending and marks the heading", up == sorted(up, key=lambda x: x.lower()) and sorted(up) == sorted(natural) and "sorted-asc" in (pg.get_attribute("#fieldsGrid th[data-key=field]", "class") or ""), up)
+    pg.click("#fieldsGrid th[data-key=field]"); pg.wait_for_timeout(300)
+    down = names()
+    check("a second click sorts descending", down == sorted(down, key=lambda x: x.lower(), reverse=True) and "sorted-desc" in (pg.get_attribute("#fieldsGrid th[data-key=field]", "class") or ""), down)
+    pg.click("#fieldsGrid th[data-key=field]"); pg.wait_for_timeout(300)
+    check("a third click restores the natural order", names() == natural)
+    pg.click("#tablesGrid th[data-key=table]"); pg.wait_for_timeout(300)
+    tnames = pg.eval_on_selector_all("#tablesGrid tbody tr:not(.reason) td:nth-child(2) > div:first-child", "els => els.map(e => e.textContent)")
+    check("the table grid sorts by table name too, out-of-scope rows included", tnames == sorted(tnames, key=lambda x: x.lower()) and len(tnames) == 3, tnames)
+    check("every scrolling window on the page can take keyboard focus, so the arrow keys pan it", pg.eval_on_selector_all(".tablewin", "els => els.length > 0 && els.every(e => e.getAttribute('tabindex') === '0' && e.getAttribute('role') === 'region')"))
+    # ---- sticky headings inside a scrolling window
+    for gid in ("tablesGrid", "fieldsGrid", "descGrid"):
+        got = pg.evaluate("(id) => { const t = document.getElementById(id), w = t.parentElement, th = t.tHead.rows[0].cells[0]; w.scrollTop = 150; "
+                          "return [getComputedStyle(w).overflowY, getComputedStyle(th).position, Math.abs(th.getBoundingClientRect().top - w.getBoundingClientRect().top) < 2]; }", gid)
+        check("%s heading is sticky inside a scrolling window and stays at its top after scrolling" % gid, got == ["auto", "sticky", True], got)
     check("no script errors anywhere in the whole session", not errs, errs)
     br.close()
 shutil.rmtree("data_extract", ignore_errors=True)

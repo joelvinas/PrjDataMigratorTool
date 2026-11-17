@@ -50,7 +50,7 @@ check("tables.csv: 12 tables, description present", len(tbl)==12 and any(x["tabl
 rep=get("/api/report.html?mode=collapse")
 check("report 3b lists views, types, visible field names", "3b. Tables and views" in rep and "Launch calendar" in rep and "Not reported" in rep and "Signup form" in rep and "Name, Email" in rep)
 check("no token in responses", "patMOCK" not in rep and "patMOCK" not in get("/api/schema"))
-sys.path.insert(0,"."); import server
+sys.path.insert(0,"src"); import server
 calls=[]
 def fake(**kw):
     calls.append(kw.get("query"))

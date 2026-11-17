@@ -42,6 +42,7 @@ import postmantests
 import sandboxplan
 import linkdirections as ld
 import recordmap
+import coretargets
 import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
@@ -55,7 +56,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 # --------------------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # the project root: server.py itself lives in src/
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HOST = "127.0.0.1"  # never anything else
 PORT = int(os.environ.get("PORT", "8765"))
@@ -76,7 +77,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -723,6 +724,40 @@ CREATE TABLE field_writer_events (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 CREATE INDEX idx_field_writer_events_field ON field_writer_events(airtable_field_id, event_id);
+
+-- 19. Where each table's Core objects are created, and the history of that decision (migration 020)
+-- table_core_objects says what a table BECOMES in Core (project, request or task); this says where each new object GOES: the parent's object code and
+-- ID as plain text (Workfront IDs are 32-character hex GUIDs; that check belongs to the page, not the database). A person decides; nothing is automatic.
+-- Codes and IDs only: no record value.
+CREATE TABLE table_core_parents (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    parent_obj_code TEXT,
+    parent_obj_id TEXT,
+    decided_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    CHECK ((parent_obj_code IS NULL) = (parent_obj_id IS NULL)),
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_core_parents_base ON table_core_parents(base_id);
+
+-- Append-only history of both decisions (the object type in table_core_objects, and the parent above), so a changed or cleared decision keeps what it was
+-- (the lesson of migrations 018 and 019).
+CREATE TABLE table_core_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_id TEXT NOT NULL,
+    base_id TEXT NOT NULL,
+    subject TEXT NOT NULL CHECK(subject IN ('object_type', 'parent')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('decide', 'change', 'clear')),
+    old_value TEXT,                              -- NULL when there was none before; for a parent: 'PROJ:<id>'
+    new_value TEXT,                              -- NULL after a clear
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_core_events_table ON table_core_events(table_id, event_id);
 '''
 
 
@@ -5058,6 +5093,66 @@ def api_records_registry(q):
         return _record_map_call(recordmap.summary, conn, base, env, system, ws)
 
 
+def _one(q, name, default=""):
+    return (q.get(name) or [default])[0]
+
+
+def api_records_view(q):
+    """The record map screen: one row per registered record with its new Workfront ID and the passes done. Sorted and paged on the server. IDs only."""
+    base = _names_base(q)
+    env = _one(q, "environment", "dev")
+    with db() as conn:
+        return _record_map_call(lambda: recordmap.records_view(conn, base, env, _one(q, "system", "planning"), _one(q, "workspace_key"), _one(q, "table_id") or None, _one(q, "q") or None,
+                                                              _one(q, "sort", "record_id"), _one(q, "dir") == "desc", _one(q, "limit", "100"), _one(q, "offset", "0")))
+
+
+def api_records_attachments(q):
+    """The attachment map screen: IDs, sizes, status and a short scrubbed error. Never a file name or a link."""
+    base = _names_base(q)
+    env = _one(q, "environment", "production")
+    with db() as conn:
+        return _record_map_call(lambda: recordmap.attachments_view(conn, base, env, _one(q, "status") or None, _one(q, "sort", "row"), _one(q, "dir") == "desc", _one(q, "limit", "100"), _one(q, "offset", "0")))
+
+
+def _target_call(fn_, *a, **k):
+    try:
+        return fn_(*a, **k)
+    except coretargets.TargetError as e:
+        raise AppError(e.message, e.status)
+
+
+def _core_targets_payload(conn, base):
+    return {"base_id": base, "rows": coretargets.rows(conn, base), "object_types": [{"type": t, "code": c} for t, c in sorted(coretargets.OBJECT_CODE.items())],
+            "parent_codes": {t: list(c) for t, c in coretargets.PARENT_CODES.items()}, "parent_optional": coretargets.PARENT_OPTIONAL, "parent_labels": coretargets.PARENT_LABEL,
+            "history": coretargets.history(conn, base, limit=100)}
+
+
+def api_core_targets(q):
+    """Where each Planning-plus-Core table's Core objects go: the object type and the parent (object code and ID), with who, when and why, and the history."""
+    base = _names_base(q)
+    with db() as conn:
+        return _target_call(_core_targets_payload, conn, base)
+
+
+def api_core_object_type(body):
+    """A person decides what a table becomes in Core (project, request, task) or clears the decision."""
+    base = _names_base(body)
+    with db() as conn:
+        res = _target_call(coretargets.set_object_type, conn, base, str(body.get("table_id") or ""), str(body.get("object_type") or ""), body.get("actor"), body.get("reason") or "")
+        return dict(_core_targets_payload(conn, base), result=res)
+
+
+def api_core_parent(body):
+    """A person decides where a table's Core objects go (parent object code and ID, or none for a project), or clears the decision."""
+    base = _names_base(body)
+    with db() as conn:
+        clear = body.get("clear") is True
+        code = None if body.get("none") is True or clear else (str(body.get("parent_code") or "") or None)
+        pid = None if body.get("none") is True or clear else (str(body.get("parent_id") or "") or None)
+        res = _target_call(coretargets.set_parent, conn, base, str(body.get("table_id") or ""), code, pid, body.get("actor"), body.get("reason") or "", clear=clear)
+        return dict(_core_targets_payload(conn, base), result=res)
+
+
 def api_select_values(body):
     """The select-value inventory: for every single or multiple select field of the base (or one table), the values that sit in the saved records
     compared with the options the schema declares. Counts, record IDs and declared option names only; an undeclared value's text is never returned.
@@ -5216,15 +5311,15 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
-          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML), "/postman": ("postman.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML), "/postman": ("postman.html", HTML), "/load": ("load.html", HTML),
           "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
-          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/postman.js": ("postman.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/postman.js": ("postman.js", JS), "/load.js": ("load.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/records/view": api_records_view, "/api/core/targets": api_core_targets, "/api/records/attachments": api_records_attachments, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
@@ -5242,7 +5337,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,

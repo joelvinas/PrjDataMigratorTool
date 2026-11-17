@@ -13,7 +13,7 @@ sch=open("test/sample_schema.json").read(); err=open("test/sample_schema_errors.
 
 st,r=call("GET","/api/status"); check("token configured, not leaked", r["token_configured"] and "patMOCK" not in json.dumps(r))
 st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("nonexistent db offers create", r["exists"] is False)
-st,r=call("POST","/api/db/create",{"path":"t.db"}); check("create db ready", r["ready"] and len(r["created_tables"])==37)
+st,r=call("POST","/api/db/create",{"path":"t.db"}); check("create db ready", r["ready"] and len(r["created_tables"])==39)
 st,r=call("POST","/api/db/connect",{"path":"t.db"}); check("reconnect ready", r["ready"] and r["foreign_keys"])
 # missing table detection
 c=sqlite3.connect("t.db"); c.execute("DROP TABLE form_links"); c.commit(); c.close()
@@ -155,14 +155,14 @@ c=sqlite3.connect("t.db"); card=c.execute("select field_name,cardinality,cardina
 check("1,000 distinct == cap is still exact (not capped); rerun cleared the flag", card==[("Bucket",4,0),("Unique Key",1000,0)], card); c.close()
 # SQL files
 import importlib.util
-sys.path.insert(0,".")   # server.py imports its sibling modules (fieldnames_store)
-spec=importlib.util.spec_from_file_location("server","server.py"); srv=importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)
+sys.path.insert(0,"src")   # server.py imports its sibling modules (fieldnames_store)
+spec=importlib.util.spec_from_file_location("server","src/server.py"); srv=importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)
 check("sql/DatabaseSchemaLibrary.sql == embedded DDL", open("sql/DatabaseSchemaLibrary.sql",encoding="utf-8").read()==srv.DDL)
 orig=open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)),"original_ddl.sql"),encoding="utf-8").read()
 a=sqlite3.connect(":memory:"); a.executescript(orig)
 oldcols={t:[x[1] for x in a.execute('pragma table_info(%s)'%t)] for t in srv.EXPECTED_TABLES}
 changed={t for t in srv.EXPECTED_TABLES if oldcols[t]!=srv.EXPECTED_COLUMNS[t][:len(oldcols[t])] and set(oldcols[t])!=set(srv.EXPECTED_COLUMNS[t])}
-check("only airtable_fields differs and only the tables from migrations 003 to 019 are new", {x for x in srv.EXPECTED_TABLES if oldcols[x] and set(oldcols[x])!=set(srv.EXPECTED_COLUMNS[x])}=={"airtable_fields"} and {x for x in srv.EXPECTED_TABLES if not oldcols[x]}=={"airtable_tables","airtable_views","airtable_attachment_stats","form_specs","form_items","form_logic","form_links","automation_specs","automation_items","automation_logic","automation_field_refs","automation_links","field_names","table_names","name_events","table_scope","table_targets","field_groups","field_group_members","load_id_map","table_core_objects","field_relationships","option_names","option_workfront_ids","source_records","target_mappings","record_pass_markers","attachment_map","link_direction_events","field_writer_decisions","field_writer_events"})
+check("only airtable_fields differs and only the tables from migrations 003 to 020 are new", {x for x in srv.EXPECTED_TABLES if oldcols[x] and set(oldcols[x])!=set(srv.EXPECTED_COLUMNS[x])}=={"airtable_fields"} and {x for x in srv.EXPECTED_TABLES if not oldcols[x]}=={"airtable_tables","airtable_views","airtable_attachment_stats","form_specs","form_items","form_logic","form_links","automation_specs","automation_items","automation_logic","automation_field_refs","automation_links","field_names","table_names","name_events","table_scope","table_targets","field_groups","field_group_members","load_id_map","table_core_objects","field_relationships","option_names","option_workfront_ids","source_records","target_mappings","record_pass_markers","attachment_map","link_direction_events","field_writer_decisions","field_writer_events","table_core_parents","table_core_events"})
 check("only the approved columns were added", set(srv.EXPECTED_COLUMNS["airtable_fields"])-set(oldcols["airtable_fields"])=={"prefers_single_record_link","cardinality_is_capped"}|set(srv.OPTION_COLUMNS) and not set(oldcols["airtable_fields"])-set(srv.EXPECTED_COLUMNS["airtable_fields"]))
 # old database: app refuses, migration fixes it, data survives
 old=sqlite3.connect("old.db"); old.executescript(orig); old.execute("insert into airtable_fields(base_id,table_id,table_name,field_id,field_name,data_type,row_count,null_count,cardinality) values('appOld00001','tblOld','Old','fldOld','F','singleLineText',7,1,3)"); old.commit(); old.close()
@@ -185,7 +185,7 @@ for path,key in PAGES.items():
 for path in ["/style.css","/common.js","/setup.js","/stage1.js","/stage2.js","/stage3.js","/editor-kit.js","/log.js"]:
     st,h,body=raw(path); check("asset %s served"%path, st==200 and len(body)>200, st)
 st,h,body=raw("/index.html"); check("/index.html redirects to the home page (Setup)", st==302 and h.get("Location")=="/", (st,h.get("Location")))
-for path in ["/scripts.js","/server.py","/config.json","/README.md","/../server.py","/%2e%2e/server.py","/stage1/../server.py","/test/mock_airtable.py","/db/migration.db","/stage4","/stage1.html"]:
+for path in ["/scripts.js","/server.py","/src/server.py","/src/loader.py","/config.json","/README.md","/../server.py","/%2e%2e/server.py","/stage1/../server.py","/test/mock_airtable.py","/db/migration.db","/stage4","/stage1.html"]:
     st,h,body=raw(path); check("not served: %s"%path, st==404 and b"def " not in body and b"patMOCK" not in body, st)
 st,h,body=raw("/stage1","POST"); check("POST to a page is rejected", st in (404,415), st)
 # every page loads the shared script first; no page or script builds markup from data or carries a token
@@ -195,7 +195,7 @@ for f in ["common.js","setup.js","stage1.js","stage2.js","stage3.js","editor-kit
     t=open(f,encoding="utf-8").read(); check("%s: no innerHTML use, no document.write and no token text"%f, not re.search(r"\.innerHTML|insertAdjacentHTML|document\.write|outerHTML", t) and "patMOCK" not in t and "Authorization" not in t)
 t=open("stage1.html",encoding="utf-8").read(); check("Stage 1 holds steps 3 to 6 and no step 1 or 2", all('id="step%d"'%i in t for i in (3,4,5,6)) and 'id="step1"' not in t and 'id="step2"' not in t)
 t=open("setup.html",encoding="utf-8").read(); check("Setup holds steps 1 and 2 only", 'id="step1"' in t and 'id="step2"' in t and 'id="step3"' not in t)
-t=open("common.js",encoding="utf-8").read(); check("log is pinned at the bottom of the nav and Stage 4 is a planned slot", "NAV_BOTTOM" in t and '"/log"' in t and "Stage 4: Map and load" in t)
+t=open("common.js",encoding="utf-8").read(); check("log is pinned at the bottom of the nav and Stage 4 is in it", "NAV_BOTTOM" in t and '"/log"' in t and "Stage 4: Map and load" in t)
 import re as _re
-check("APP_VERSION matches EXPECTED_SERVER_VERSION", _re.search(r'APP_VERSION = "([^"]+)"', open("server.py",encoding="utf-8").read()).group(1)==_re.search(r'EXPECTED_SERVER_VERSION = "([^"]+)"', t).group(1))
+check("APP_VERSION matches EXPECTED_SERVER_VERSION", _re.search(r'APP_VERSION = "([^"]+)"', open("src/server.py",encoding="utf-8").read()).group(1)==_re.search(r'EXPECTED_SERVER_VERSION = "([^"]+)"', t).group(1))
 print("ALL PASS" if ok else "SOME FAILED"); sys.exit(0 if ok else 1)

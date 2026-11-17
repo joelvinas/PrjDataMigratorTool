@@ -25,7 +25,7 @@ if not defined PY (
 rem --- first run: create config.json from the example and let the user edit it
 if not exist config.json (
   if not exist config.example.json (
-    echo config.example.json is missing. Keep start.bat in the same folder as server.py.
+    echo config.example.json is missing. Keep start.bat in the project folder, next to config.example.json.
     pause
     exit /b 1
   )
@@ -52,7 +52,7 @@ echo Starting on http://127.0.0.1:%PORT%  (close this window or press Ctrl+C to 
 rem open the browser after a short delay so the server is up first
 start "" cmd /c "ping -n 3 127.0.0.1 >nul & start http://127.0.0.1:%PORT%"
 
-%PY% server.py
+%PY% src\server.py
 echo.
 echo The server has stopped. Scroll up for any error message.
 pause

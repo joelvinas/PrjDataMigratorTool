@@ -1,6 +1,7 @@
 """Tests for emoji handling (emojitext.py) and the remove / replace-with-word option in names, labels, tables and descriptions. Fabricated names only."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import emojitext as em, fielddesc as fd, fieldnames as fn
 from fieldnames import Settings, PASS, AUTO_FIXABLE, NEEDS_HUMAN
 try:

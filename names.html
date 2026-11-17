@@ -72,8 +72,8 @@
     <button id="btnApproveAutoTables" type="button">Approve all auto-fixable names</button>
   </div>
   <div id="tablesMessage" class="msg"></div>
-  <div style="overflow-x:auto"><table class="grid" id="tablesGrid"><thead><tr>
-    <th>Scope</th><th>Table</th><th class="num">Fields</th><th>Check</th><th>Proposed name</th><th>New name</th><th>Status</th><th>Decision</th>
+  <div class="tablewin"><table class="grid" id="tablesGrid"><thead><tr>
+    <th data-key="scope">Scope</th><th data-key="table">Table</th><th class="num" data-key="fields">Fields</th><th data-key="check">Check</th><th>Proposed name</th><th>New name</th><th data-key="status">Status</th><th>Decision</th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 
@@ -101,8 +101,8 @@
     </div>
     <div id="fieldsMessage" class="msg"></div>
     <div id="fieldsCount" class="hint"></div>
-    <div style="overflow-x:auto"><table class="grid" id="fieldsGrid"><thead><tr>
-      <th>Table</th><th>Field</th><th>Data</th><th>Your name</th><th>Proposed repair</th><th>Check</th><th>Status</th><th>Decision</th>
+    <div class="tablewin"><table class="grid" id="fieldsGrid"><thead><tr>
+      <th data-key="table">Table</th><th data-key="field">Field</th><th data-key="data">Data</th><th>Your name</th><th>Proposed repair</th><th data-key="check">Check</th><th data-key="status">Status</th><th>Decision</th>
     </tr></thead><tbody></tbody></table></div>
     <div class="row"><button id="btnPrev" type="button">Previous</button><span id="pageInfo" class="hint"></span><button id="btnNext" type="button">Next</button></div>
   </div>
@@ -147,7 +147,7 @@
     </div>
     <div id="descMessage" class="msg"></div>
     <div id="descCount" class="hint"></div>
-    <div style="overflow-x:auto"><table class="grid" id="descGrid"><thead><tr><th>Table</th><th>Field</th><th>Description</th><th>State</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
+    <div class="tablewin"><table class="grid" id="descGrid"><thead><tr><th data-key="table">Table</th><th data-key="field">Field</th><th>Description</th><th data-key="state">State</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
     <div class="row"><button id="btnDescPrev" type="button">Previous</button><span id="descPageInfo" class="hint"></span><button id="btnDescNext" type="button">Next</button></div>
   </div>
 </section>

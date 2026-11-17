@@ -36,7 +36,7 @@ html=get("/api/report.html?mode=collapse")
 check("report has section 3c with totals and types", "3c. Attachments" in html and "126 files" in html and "jpg" in html)
 # missing-size handling in a table with attachments but no size: Orders? use unit check via server import
 import importlib.util,sys
-sys.path.insert(0,"."); spec=importlib.util.spec_from_file_location("srv","server.py"); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+sys.path.insert(0,"src"); spec=importlib.util.spec_from_file_location("srv","src/server.py"); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 st={}
 for a in [{"id":"a","filename":"x.PNG","type":"image/png","size":5},{"id":"b","filename":"y","type":"application/pdf; x=1"},{"id":"c","filename":"z.zip","size":2*1024**3},{"id":"d","filename":"w.mov","type":"video/quicktime","size":150*1024**2},{"id":"e","filename":"v.txt","size":True}]:
     m._tally_attachment(st,"f",a)

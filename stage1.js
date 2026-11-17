@@ -174,6 +174,37 @@ function linkStatus(f) {
   return "Undecided";
 }
 
+const linkView = { table: "", hideDone: false };
+const bracket = (s) => "[" + s + "]";
+
+/* Plain words for what a direction means, written from the point of view of the row's field. `type` is the direction (chosen or suggested). Returns a list of sentences. */
+function relationText(f, type) {
+  const me = bracket(f.table_name), other = bracket(f.linked_table_name);
+  const mine = me + "." + bracket(f.field_name), theirs = f.partner_field_name ? other + "." + bracket(f.partner_field_name) : null;
+  if (type === "many_to_one") return ["Many references to one record in " + other + " are found in " + mine + ".",
+    "ONE side (parent, loads first): " + other + ". MANY side (child): " + me + ". From " + me + "'s point of view this is many to one."];
+  if (type === "one_to_many") return ["Many references to one record in " + me + " are found in " + (theirs || other) + ".",
+    "ONE side (parent, loads first): " + me + ". MANY side (child): " + other + ". From " + me + "'s point of view this is one to many." + (theirs ? "" : " (There is no paired field, so this is only a guess.)")];
+  if (type === "one_to_one") return ["Each record in " + me + " links to one record in " + other + ", and the reverse. Neither is clearly the parent.", "Choose a tiebreaker: which table loads first."];
+  if (type === "many_to_many") return ["Many records in " + me + " can link to many records in " + other + ", and the reverse. Neither is clearly the parent.", "Choose a tiebreaker: which table loads first."];
+  return ["Choose a direction to see what it means."];
+}
+
+function cardinalityText(f) {
+  if (f.cardinality === null || f.cardinality === undefined || !f.row_count) return "No profile data yet (run profiling in step 5 to see distinct values)";
+  return "Distinct values: " + fmt(f.cardinality) + (f.cardinality_capped ? " or more" : "") + " in " + fmt(f.row_count) + " record(s), " + fmt(f.null_count || 0) + " empty";
+}
+
+function fillLinkTableFilter(r) {
+  const sel = $("linkTableFilter"), keep = linkView.table, seen = new Map();
+  r.pairs.forEach((u) => u.fields.forEach((f) => { seen.set(f.table_id, f.table_name); seen.set(f.linked_table_id, f.linked_table_name); }));
+  clear(sel);
+  sel.appendChild(el("option", { value: "", text: "All tables" }));
+  Array.from(seen.entries()).sort((a, b) => a[1].toLowerCase().localeCompare(b[1].toLowerCase()) || a[0].localeCompare(b[0])).forEach(([id, name]) => sel.appendChild(el("option", { value: id, text: bracket(name) })));
+  sel.value = seen.has(keep) ? keep : "";
+  linkView.table = sel.value;
+}
+
 function renderLinkDirections(r) {
   const sum = $("linkSummary"), tbl = $("linkTable"), body = tbl.querySelector("tbody");
   clear(sum); clear(body);
@@ -190,13 +221,26 @@ function renderLinkDirections(r) {
   sum.appendChild(note(c.undecided ? "warn" : "ok", c.pairs + " link relationship(s) (" + c.two_way + " two-way, " + c.one_way + " one-way): " + c.undecided + " undecided, " + c.confirmed + " confirmed, " + c.automatic + " automatic." +
     (c.ambiguous ? " " + c.ambiguous + " ambiguous pair(s) that the schema cannot orient (one to one or many to many: " + Object.entries(c.ambiguous_by_type || {}).map((kv) => kv[1] + " " + kv[0].replace(/_/g, " ")).join(", ") + "), " + c.ambiguous_undecided + " still need a tiebreaker." : " No pair is ambiguous.") +
     (c.undecided ? " The load order is provisional and the schema build is blocked until every one is decided." : " Every direction is decided; recompute the load order to use them.")));
+  fillLinkTableFilter(r);
+  let shown = 0, total = 0;
   for (const u of r.pairs) {
     for (const f of u.fields) {
+      total++;
+      if (linkView.table && f.table_id !== linkView.table && f.linked_table_id !== linkView.table) continue;     // only fields that belong to, or point at, the chosen table
+      if (linkView.hideDone && f.confirmed) continue;
+      shown++;
       const typeSel = el("select", { "aria-label": "Direction for " + f.field_name }, el("option", { value: "", text: "Choose..." }), LINK_TYPES.map((t) => el("option", { value: t[0], text: t[1] })));
       const tieSel = el("select", { "aria-label": "Tiebreaker for " + f.field_name }, LINK_TIES.map((t) => el("option", { value: t[0], text: t[1] })));
       typeSel.value = f.relationship_type || "";
       tieSel.value = f.tiebreaker || "automatic";
-      const needTie = () => { tieSel.disabled = !(typeSel.value === "one_to_one" || typeSel.value === "many_to_many"); };
+      const help = el("div", { class: "relhelp" });
+      const showHelp = () => {
+        const type = typeSel.value || f.suggested_type;
+        clear(help);
+        help.appendChild(el("div", { class: "hint", text: typeSel.value ? "If you choose this:" : "If you accept the suggestion:" }));
+        relationText(f, type).forEach((t) => help.appendChild(el("div", { text: t })));
+      };
+      const needTie = () => { tieSel.disabled = !(typeSel.value === "one_to_one" || typeSel.value === "many_to_many"); showHelp(); };
       typeSel.addEventListener("change", needTie);
       needTie();
       const save = el("button", { type: "button", text: f.confirmed ? "Change" : "Confirm" });
@@ -210,12 +254,15 @@ function renderLinkDirections(r) {
         clr.addEventListener("click", () => saveLink([{ field_id: f.field_id, relationship_type: "clear" }], "cleared from the page", "Cleared."));
         kids.push(clr);
       }
-      body.appendChild(el("tr", { class: f.confirmed ? "" : "undecided" }, el("td", { text: f.table_name + "." + f.field_name }), el("td", { text: f.linked_table_name }),
-        el("td", { text: f.partner_field_name ? f.linked_table_name + "." + f.partner_field_name : "(one-way: no paired field)" }),
-        el("td", { text: linkLabel(f.suggested_type) }), el("td", {}, typeSel), el("td", {}, tieSel), el("td", { text: linkStatus(f) }), el("td", {}, kids)));
+      body.appendChild(el("tr", { class: f.confirmed ? "" : "undecided" },
+        el("td", { "data-sort": f.table_name + " " + f.field_name }, el("div", {}, "Table ", el("b", { text: bracket(f.table_name) })), el("div", {}, "Field ", el("b", { text: bracket(f.field_name) })), el("div", { class: "hint", text: cardinalityText(f) })),
+        el("td", { "data-sort": f.linked_table_name }, el("b", { text: bracket(f.linked_table_name) })),
+        el("td", { "data-sort": f.partner_field_name ? f.linked_table_name + " " + f.partner_field_name : "" }, f.partner_field_name ? [el("div", {}, "Table ", el("b", { text: bracket(f.linked_table_name) })), el("div", {}, "Field ", el("b", { text: bracket(f.partner_field_name) }))] : el("span", { class: "hint", text: "(one-way: no paired field)" })),
+        el("td", { text: linkLabel(f.suggested_type) }), el("td", { class: "dirhelp" }, typeSel, help), el("td", {}, tieSel), el("td", { text: linkStatus(f) }), el("td", { class: "stack" }, kids)));
     }
   }
   tbl.hidden = false;
+  $("linkShown").textContent = fmt(shown) + " of " + fmt(total) + " link field(s) shown";
   applySort("linkTable");
 }
 
@@ -562,6 +609,8 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
   for (const id of ["linkTable", "regTable", "orderTable"]) sortableTable(id);
+  $("linkTableFilter").addEventListener("change", () => { linkView.table = $("linkTableFilter").value; const d = $("linkTable")._data; if (d) renderLinkDirections(d); });
+  $("linkHideDone").addEventListener("change", () => { linkView.hideDone = $("linkHideDone").checked; const d = $("linkTable")._data; if (d) renderLinkDirections(d); });
   for (const id of ["resultsTable", "exFilesTable", "svTable", "attTypeTable", "attTableTable"]) watchSort(id);
   $("btnRecompute").addEventListener("click", recompute);
   $("btnLinkRefresh").addEventListener("click", guard(() => loadLinkDirections(true)));

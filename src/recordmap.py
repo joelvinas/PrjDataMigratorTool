@@ -228,6 +228,19 @@ def attachment_failed(conn, row_id, message):
         conn.execute("UPDATE attachment_map SET status='failed', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE attachment_row_id=? AND status!='uploaded'", (lr.scrub(message), row_id))
 
 
+def attachment_retry(conn, row_id):
+    """A failed upload (the file was downloaded and its size checked) goes back to 'downloaded' so the next run tries it again. A download that failed in Stage 1
+    has no file and stays failed. Returns True when the row was reset."""
+    r = _att(conn, row_id)
+    if r["status"] != "failed" or r["sha256"] is None or r["downloaded_bytes"] is None:
+        return False
+    if r["api_size_bytes"] is not None and r["api_size_bytes"] != r["downloaded_bytes"]:
+        return False                                                  # the size check failed: this file is not the one Airtable described, so it is never sent
+    with conn:
+        conn.execute("UPDATE attachment_map SET status='downloaded', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE attachment_row_id=?", (row_id,))
+    return True
+
+
 def attachments_with_status(conn, env, status, limit=500):
     """Rows still to do (or failed), oldest first. Each is IDs, sizes and status only."""
     _need(conn)
@@ -257,3 +270,74 @@ def summary(conn, base_id, env=None, system="core", workspace_key=""):
         out["attachments"] = {s: conn.execute("SELECT COUNT(*) FROM attachment_map a JOIN source_records s ON s.source_record_uid=a.source_record_uid WHERE s.base_id=? AND a.environment=? AND a.status=?",
                                               (base_id, _env(env), s)).fetchone()[0] for s in ATTACHMENT_STATUSES}
     return out
+
+
+# ------------------------------------------------------------------ screens: sortable, paged views (IDs, statuses and sizes only)
+RECORD_SORTS = {"uid": "s.source_record_uid", "record_id": "s.record_id", "table": "lower(t.table_name)", "target": "targets", "passes": "passes"}
+ATTACHMENT_SORTS = {"row": "a.attachment_row_id", "record_id": "s.record_id", "field": "a.airtable_field_id", "attachment": "a.airtable_attachment_id", "status": "a.status",
+                    "size": "COALESCE(a.downloaded_bytes, a.api_size_bytes, -1)", "document": "COALESCE(a.core_document_id, '')"}
+MAX_PAGE = 500
+
+
+def _page(limit, offset):
+    try:
+        return max(1, min(int(limit), MAX_PAGE)), max(0, int(offset))
+    except (TypeError, ValueError):
+        raise RecordMapError("The page size and offset must be whole numbers.")
+
+
+def _like(text):
+    return "%" + str(text).replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"      # '!' is the LIKE escape character
+
+
+def records_view(conn, base_id, env, system="planning", workspace_key="", table_id=None, q=None, sort="record_id", desc=False, limit=100, offset=0):
+    """One row per registered record: surrogate ID, table, Airtable record ID, the new Workfront ID(s) and the passes done. Sorted on the server, in a fixed order
+    (the sort column, then the surrogate ID), so the same data gives the same rows."""
+    _need(conn)
+    key, e = _ws(system, workspace_key), _env(env)
+    if sort not in RECORD_SORTS:
+        raise RecordMapError("Sort by one of: %s." % ", ".join(sorted(RECORD_SORTS)))
+    limit, offset = _page(limit, offset)
+    where, args = ["s.base_id=?"], [base_id]
+    if table_id:
+        where.append("s.table_id=?")
+        args.append(table_id)
+    if q:
+        where.append("(s.record_id LIKE ? ESCAPE '!' OR EXISTS (SELECT 1 FROM target_mappings m WHERE m.source_record_uid=s.source_record_uid AND m.system=? AND m.environment=? AND m.workspace_key=? "
+                     "AND m.target_record_id LIKE ? ESCAPE '!'))")
+        args += [_like(q), system, e, key, _like(q)]
+    w = " AND ".join(where)
+    total = conn.execute("SELECT COUNT(*) FROM source_records s WHERE " + w, args).fetchone()[0]
+    sql = ("SELECT s.source_record_uid AS uid, s.table_id, t.table_name, s.record_id, "
+           "(SELECT group_concat(m.target_kind || ':' || m.target_record_id, ', ') FROM (SELECT * FROM target_mappings ORDER BY target_kind, target_record_id) m "
+           " WHERE m.source_record_uid=s.source_record_uid AND m.system=? AND m.environment=? AND m.workspace_key=?) AS targets, "
+           "(SELECT group_concat(p.pass, ', ') FROM (SELECT * FROM record_pass_markers ORDER BY pass) p WHERE p.source_record_uid=s.source_record_uid AND p.environment=? AND p.workspace_key=?) AS passes "
+           "FROM source_records s JOIN airtable_tables t ON t.table_id=s.table_id AND t.base_id=s.base_id WHERE " + w +
+           " ORDER BY %s %s, s.source_record_uid LIMIT ? OFFSET ?" % (RECORD_SORTS[sort], "DESC" if desc else "ASC"))
+    rows = [dict(r) for r in conn.execute(sql, [system, e, key, e, key] + args + [limit, offset])]
+    for r in rows:
+        r["targets"] = r["targets"] or ""
+        r["passes"] = [p for p in (r["passes"] or "").split(", ") if p]
+    return {"rows": rows, "total": total, "limit": limit, "offset": offset}
+
+
+def attachments_view(conn, base_id, env, status=None, sort="row", desc=False, limit=100, offset=0):
+    """The attachment map: IDs, sizes, status and a short scrubbed error. Never a file name or a link."""
+    _need(conn)
+    e = _env(env)
+    if sort not in ATTACHMENT_SORTS:
+        raise RecordMapError("Sort by one of: %s." % ", ".join(sorted(ATTACHMENT_SORTS)))
+    if status and status not in ATTACHMENT_STATUSES:
+        raise RecordMapError("The status must be one of: %s." % ", ".join(ATTACHMENT_STATUSES))
+    limit, offset = _page(limit, offset)
+    where, args = ["s.base_id=?", "a.environment=?"], [base_id, e]
+    if status:
+        where.append("a.status=?")
+        args.append(status)
+    w = " AND ".join(where)
+    base = "FROM attachment_map a JOIN source_records s ON s.source_record_uid=a.source_record_uid WHERE " + w
+    total = conn.execute("SELECT COUNT(*) " + base, args).fetchone()[0]
+    rows = [dict(r) for r in conn.execute(
+        "SELECT a.attachment_row_id AS row_id, s.table_id, s.record_id, a.airtable_field_id AS field_id, a.airtable_attachment_id AS attachment_id, a.status, a.api_size_bytes, a.downloaded_bytes, "
+        "a.sha256, a.core_document_id, a.last_error " + base + " ORDER BY %s %s, a.attachment_row_id LIMIT ? OFFSET ?" % (ATTACHMENT_SORTS[sort], "DESC" if desc else "ASC"), args + [limit, offset])]
+    return {"rows": rows, "total": total, "limit": limit, "offset": offset}

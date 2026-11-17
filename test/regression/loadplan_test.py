@@ -1,6 +1,7 @@
 """Tests for loadplan.py (the load plan) and loadrun.py (the runner, environments and dry run). Fabricated names only; no server, database or network."""
 import copy, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import loadplan as lp, loadrun as lr
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

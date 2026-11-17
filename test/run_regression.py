@@ -14,7 +14,7 @@ TESTS = os.path.join(ROOT, "test", "regression")
 TOKEN = "patMOCK.0000000000000000000000"
 # (name, scripts run in order against ONE server, MOCK_FILES)
 SUITES = [("e2e2", ["e2e2", "report_test"], "0"), ("views", ["views_test"], "0"), ("forms", ["forms_test"], "0"), ("automations", ["automations_test"], "0"), ("extract", ["extract_test"], "0"),
-          ("attach", ["attach_test"], "1"), ("attstats", ["attstats_test"], "1"), ("ui", ["ui_test"], "1"), ("formsui", ["forms_ui_test"], "0"), ("autoui", ["automations_ui_test"], "0"), ("namesui", ["names_ui_test"], "0"), ("names", ["fieldnames_test", "fieldnames_io_test", "fieldnames_store_test", "fielddesc_test", "emoji_test", "fieldcompare_test", "fieldgroups_test", "loadplan_test", "loader_cli_test", "loadconfig_test", "selectvalues_test", "linkdirections_test", "loadstate_test", "recordmap_test", "fieldwriters_test", "planlimits_test", "coretransport_test", "planningtransport_test", "loader_run_test"], "0"), ("namesapi", ["names_api_test", "selectvalues_api_test", "recordmap_api_test", "field_writers_api_test", "postmantests_test"], "0")]
+          ("attach", ["attach_test"], "1"), ("attstats", ["attstats_test"], "1"), ("ui", ["ui_test"], "1"), ("formsui", ["forms_ui_test"], "0"), ("autoui", ["automations_ui_test"], "0"), ("namesui", ["names_ui_test"], "0"), ("names", ["fieldnames_test", "fieldnames_io_test", "fieldnames_store_test", "fielddesc_test", "emoji_test", "fieldcompare_test", "fieldgroups_test", "loadplan_test", "loader_cli_test", "loadconfig_test", "selectvalues_test", "linkdirections_test", "loadstate_test", "recordmap_test", "fieldwriters_test", "planlimits_test", "coretransport_test", "planningtransport_test", "loader_run_test", "recordload_test", "recordload_cli_test", "coretargets_test", "coreobjects_test", "attachments_move_test"], "0"), ("namesapi", ["names_api_test", "selectvalues_api_test", "recordmap_api_test", "coretargets_api_test", "field_writers_api_test", "postmantests_test"], "0")]
 
 
 def wait_port(port, secs=10):
@@ -36,7 +36,7 @@ def run_suite(scripts, mock_files):
         f.write('{"token":"%s","scopes":["data.records:read","schema.bases:read"],"bases":[{"name":"Sample Shop","baseId":"appSampleBase001"}],"db_path":"db/migration.db","requests_per_second":5}' % TOKEN)
     env = dict(os.environ, MOCK_FILES=mock_files, MOCK_PORT="9100", AIRTABLE_API_BASE="http://127.0.0.1:9100", AT_BACKOFF_BASE="0.2")
     procs = [subprocess.Popen([sys.executable, "test/mock_airtable.py"], cwd=proj, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-             subprocess.Popen([sys.executable, "server.py"], cwd=proj, env=env, stdout=open(os.path.join(proj, "server.log"), "w"), stderr=subprocess.STDOUT)]
+             subprocess.Popen([sys.executable, "src/server.py"], cwd=proj, env=env, stdout=open(os.path.join(proj, "server.log"), "w"), stderr=subprocess.STDOUT)]
     results = []
     try:
         if not (wait_port(9100) and wait_port(8765)):
