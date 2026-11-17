@@ -93,12 +93,12 @@ check("a field a recorded automation sets carries the marker in its Planning and
 check("other fields, and the record type, do not", not prows["P-F-fB1"]["description"].startswith("Fusion-driven") and not prows["P-T-tA"]["description"].startswith("Fusion-driven"))
 
 # ---- the guards
-for argv, why in ((["run", "--db", dbp, "--base", "appL"], "run"), (["run", "--db", dbp, "--base", "appL", "--env", "production"], "run in production")):
+for argv, why in ((["run", "--db", dbp, "--base", "appL"], "run"), (["run", "--db", dbp, "--base", "appL", "--core-env", "production"], "run in production")):
     try:
         loader.main(argv); msg = None
     except SystemExit as e:
         msg = str(e.code)
-    check("'%s' is refused: creating is not implemented yet" % why, msg is not None and "not implemented" in msg, msg)
+    check("'%s' without --send sends nothing and says how to preview" % why, msg is not None and "Nothing was sent" in msg and "--send" in msg, msg)
 try:
     loader.main(["plan", "--db", dbp, "--base", "appNOBASE0001", "--out", out]); msg = None
 except SystemExit as e:

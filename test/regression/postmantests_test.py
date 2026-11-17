@@ -50,6 +50,8 @@ B = "http://127.0.0.1:8765"
 def get(p):
     with urllib.request.urlopen(B + p) as r:
         return r.status, r.read(), r.headers
+check("each test records what the owner has already found, and an unrun one says so", [t["result_status"].split(",")[0] for t in T] == ["Verified by the owner", "Verified by the owner", "Partly verified", "Not run", "Verified by the owner"]
+      and "per Workspace" in T[0]["result_note"] and "1,024" in T[2]["result_note"] and "512" in T[2]["result_note"])
 s, d, h = get("/api/postman/guide")
 check("the guide is served without a database or a token", s == 200 and json.loads(d)["tests"][0]["title"] == "Record type name uniqueness")
 s, d, h = get("/api/postman/collection.json")

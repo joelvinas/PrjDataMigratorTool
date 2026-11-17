@@ -22,6 +22,7 @@ from collections import Counter, OrderedDict
 
 import fielddesc as fd
 import planlimits as pl
+import typemap as tm
 import fieldnames as fn
 
 SYSTEMS = ("planning", "core")
@@ -51,10 +52,10 @@ CORE_LINK_FIELDS = [
 
 
 def _item(temp_id, system, kind, name, status, reasons=(), parent=None, table_id=None, field_id=None, label=None, data_type=None, position=None,
-          description=None, source="airtable", group=None):
+          description=None, source="airtable", group=None, spec=None, requires=None, pass_name=None):
     return OrderedDict([("temp_id", temp_id), ("system", system), ("kind", kind), ("parent", parent), ("table_id", table_id), ("field_id", field_id), ("name", name),
                         ("label", label), ("data_type", data_type), ("position", position), ("status", status), ("reasons", list(reasons)), ("description", description),
-                        ("source", source), ("group", group)])
+                        ("source", source), ("group", group), ("spec", spec), ("requires", list(requires or [])), ("pass", pass_name)])
 
 
 def _approved(row, target):
@@ -63,7 +64,7 @@ def _approved(row, target):
 
 
 def _rank(item):
-    return KIND_RANK[item["kind"]]
+    return (1 if item.get("pass") == "links" else 0, KIND_RANK[item["kind"]])      # links are the SECOND PASS: every record type and ordinary field comes first
 
 
 def label_settings(d):
@@ -89,14 +90,18 @@ def option_check(name, status, settings):
     return ("hold" if status in ("ready", "hold") else status), [why]
 
 
-def build_plan(rv, choices=None, include_link_fields=True, link_state=None, record_counts=None):
+def build_plan(rv, choices=None, include_link_fields=True, link_state=None, record_counts=None, field_facts=None):
     """rv: the review payload from fieldnames_store.review(). choices: {field_id: [{id, name}, ...]} select options in Airtable order.
+    field_facts: {field_id: {precision, currency_symbol, linked_table_id, single}} read from the schema; a Planning link whose direction is confirmed is created in the
+    SECOND PASS (status ready, after every record type) only when its facts and its linked table's record type are in the plan; otherwise it stays on hold.
     record_counts: {table_id: profiled record count}, for the 25,000-record and the Core-history checks (None = not checked).
     link_state: {link field_id: True when a person confirmed its direction}; a link field whose direction is not confirmed is BLOCKED (None = not checked).
     Returns {items, summary}. Items are ordered so every parent comes before its children."""
     choices = choices or {}
     lset = label_settings(rv.get("settings"))
     items, out_of_scope = [], 0
+    facts = field_facts or {}
+    in_plan = {t["table_id"] for t in rv["tables"] if t["scope"] != "out"}
     by_table = {}
     for f in rv["fields"]:
         by_table.setdefault(f["table_id"], []).append(f)
@@ -125,6 +130,8 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
                 continue
             typ, target_type = f["data_type"], f.get("target_type")
             hold = "derived" if typ in DERIVED_TYPES else "link" if typ in LINK_TYPES else "attachment" if typ in ATTACHMENT_TYPES else None
+            ff = facts.get(f["field_id"]) or {}
+            second_pass = (hold == "link" and link_state is not None and link_state.get(f["field_id"]) is True and ff.get("linked_table_id") in in_plan)
             for system in SYSTEMS if both else ("planning",):
                 if system == "planning":
                     nm, lb, parent = _approved(f, "planning_name"), None, "P-T-" + tid
@@ -135,9 +142,10 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
                     if nm and not lb:
                         nm = None
                 rs = []
+                is_link2 = second_pass and system == "planning"        # Core has no link field type: a link stays on hold there
                 if not table_ok:
                     rs.append("the table is not ready (see its record type)")
-                if hold:
+                if hold and not is_link2:
                     status = "hold"
                     rs.append(HOLD_REASON[hold])
                     if hold == "link" and link_state is not None and link_state.get(f["field_id"]) is False:
@@ -154,8 +162,10 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
                 if not table_ok and status == "ready":
                     status = "blocked"
                 fid = ("P-F-" if system == "planning" else "C-F-") + f["field_id"]
+                spec = {"airtable_type": typ, "precision": ff.get("precision"), "currency_symbol": ff.get("currency_symbol"), "linked_table_id": ff.get("linked_table_id"), "single": bool(ff.get("single"))} if ff else None
                 items.append(_item(fid, system, "field", nm or f["original"], status, rs, parent=parent, table_id=tid, field_id=f["field_id"], label=lb, data_type=target_type,
-                                   description=(f.get("description") or {}).get("text"), group=("C-T-" + tid if system == "core" else None)))
+                                   description=(f.get("description") or {}).get("text"), group=("C-T-" + tid if system == "core" else None), spec=spec,
+                                   requires=["P-T-" + ff["linked_table_id"]] if is_link2 else None, pass_name="links" if is_link2 else None))
                 if typ in SELECT_TYPES:
                     for pos, ch in enumerate(choices.get(f["field_id"]) or []):
                         ostatus, orx = option_check(ch.get("name"), status, lset)
@@ -171,6 +181,13 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
                                    description=fd.format_lineage("Migration", [(t["old"], nm)], desc)))
                 for pos, o in enumerate(opts):
                     items.append(_item(tmp + "-O-%d" % pos, system, "option", o, "ready" if not rs else "blocked", rs, parent=tmp, table_id=tid, position=pos, source="migration"))
+    chosen = {}
+    for i in items:
+        if i["kind"] == "option" and i["status"] == "ready":
+            chosen.setdefault(i["parent"], []).append(i["name"])          # in Airtable's order; an option on hold is not sent with its field
+    for i in items:
+        if i["kind"] == "field" and tm.kind(i["data_type"]) in tm.SELECT_KINDS:
+            i["spec"] = dict(i["spec"] or {}, options=chosen.get(i["temp_id"], []))
     items.sort(key=_rank)                                   # parents before children; the sort is stable, so the order inside a rank is unchanged
     summ = summarize(items, out_of_scope)
     names = {t["table_id"]: t["old"] for t in rv["tables"]}

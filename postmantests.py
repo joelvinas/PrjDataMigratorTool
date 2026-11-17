@@ -43,7 +43,7 @@ def _step(label, method, path, body=None, save=None, note=None, expect=None, opt
 
 TESTS = [
     {
-        "id": 1, "key": "record-type-name-uniqueness", "title": "Record type name uniqueness",
+        "id": 1, "key": "record-type-name-uniqueness", "result_status": 'Verified by the owner, 17 November 2026', "result_note": 'Record type names are checked per Workspace. Global record types are out of scope: the loader creates none. The schema builder therefore checks each Workspace separately.', "title": "Record type name uniqueness",
         "purpose": "Settles whether the schema builder must check record type names per Workspace or across the organization. The v2 reference documents no name-conflict error for creating a record type, so this test finds out what actually happens.",
         "before": ["You are in a DEV Workspace (workspace_id is set).",
                    "You need a second Workspace. If you do not have a throwaway one, step 1 creates one; set workspace2_id by hand and skip step 1 if you do."],
@@ -69,7 +69,7 @@ TESTS = [
                     ("DELETE", "/v2/record-types/{{rt_a_id}}"), ("DELETE", "/v2/workspaces/{{workspace2_id}}")],
     },
     {
-        "id": 2, "key": "patch-on-fields", "title": "PATCH on fields",
+        "id": 2, "key": "patch-on-fields", "result_status": 'Verified by the owner, 17 November 2026', "result_note": 'A field CAN be changed in place with PATCH.', "title": "PATCH on fields",
         "purpose": "Settles whether a field can be updated in place, so its ID survives later changes (the load ID map is keyed on it). The v2 reference says PATCH uses merge-patch semantics, so only the properties sent should change; this checks it.",
         "before": ["rt_a_id is set (test 1 step 2), or run step 1 here to create one."],
         "steps": [
@@ -91,7 +91,7 @@ TESTS = [
         "cleanup": [("DELETE", "/v2/fields/{{field_id}}"), ("DELETE", "/v2/record-types/{{rt_a_id}}")],
     },
     {
-        "id": 3, "key": "description-on-create", "title": "Description on create",
+        "id": 3, "key": "description-on-create", "result_status": 'Partly verified, 17 November 2026', "result_note": 'The property is named description. The field PATCH documentation gives a limit of 1,024 characters; the loader keeps 512 on purpose while it is being proven. Writing the marker on create has not been run.', "title": "Description on create",
         "purpose": "Settles whether the Fusion-driven marker can be written when a field is created, and records the exact property name and the length limit. The v2 reference lists description (maximum 512 characters) on a field; this confirms it works and is enforced.",
         "before": ["rt_a_id is set, or run step 1 here to create one."],
         "steps": [
@@ -118,7 +118,7 @@ TESTS = [
         "cleanup": [("DELETE", "/v2/record-types/{{rt_a_id}}")],
     },
     {
-        "id": 4, "key": "reference-field-back-reference", "title": "Reference field with back reference",
+        "id": 4, "key": "reference-field-back-reference", "result_status": 'Not run', "result_note": 'It cannot be fully settled without a record type that has about 31 link fields, which is not available. The loader creates each side of a pair as its own reference field with no back reference until this is run.', "title": "Reference field with back reference",
         "purpose": "Settles what the corresponding-field setting (createBackReference) creates on the other record type, and whether it uses one of the 30 reference fields allowed per record type on both sides. This decides how many link fields a hub table can have.",
         "before": ["rt_a_id is set (earlier test), or run step 1 here.", "The field limits in the reference are 30 reference fields per record type."],
         "steps": [
@@ -146,7 +146,7 @@ TESTS = [
         "cleanup": [("DELETE", "/v2/record-types/{{rt_b_id}}"), ("DELETE", "/v2/record-types/{{rt_a_id}}")],
     },
     {
-        "id": 5, "key": "bulk-create-id-order", "title": "Bulk create ID order",
+        "id": 5, "key": "bulk-create-id-order", "result_status": 'Verified by the owner, 17 November 2026', "result_note": 'Bulk-create IDs line up with the order sent (a JSON array). Only recordTypeId is required to create a record.', "title": "Bulk create ID order",
         "purpose": "Settles whether the IDs returned by a bulk create line up with the order the records were sent. The record ID map relies on it: if they do not line up, each record has to be matched by a distinguishing value instead of by position.",
         "before": ["rt_a_id is set (earlier test), or run step 1 here.", "A bulk create takes at most 100 records per call (documented)."],
         "steps": [

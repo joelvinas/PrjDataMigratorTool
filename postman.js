@@ -29,6 +29,7 @@ function testCard(d, t) {
   return el("details", { class: "card", id: "test" + t.id, open: t.id === 1 ? "" : null },
     el("summary", {}, el("h2", { style: "display:inline" }, el("span", { class: "num", text: t.id }), " " + t.title)),
     el("p", {}, el("strong", { text: "Why: " }), t.purpose),
+    t.result_status ? el("div", { class: "note " + (t.result_status.startsWith("Verified") ? "ok" : "info") }, el("strong", { text: t.result_status + ". " }), t.result_note) : null,
     el("p", {}, el("strong", { text: "Before you start" })), el("ul", {}, t.before.map((b) => el("li", { text: b }))),
     el("p", {}, el("strong", { text: "Steps" })), el("ol", {}, t.steps.map((s, i) => stepView(t, s, i + 1))),
     el("p", {}, el("strong", { text: "How to read the result" })),

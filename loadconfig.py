@@ -9,9 +9,14 @@ not per environment:
       "planning": {"base_url": "https://...", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE"}
     }
 
-A system takes a bearer_token or an api_key (use whichever Workfront gave you). The values are secrets: they are never written to the database,
-a log, an error message, a report or the browser. server.py ignores this section (it reads only the keys it knows), so nothing here can reach
-the page. Nothing in the loader uses these yet: creating items in Workfront is not implemented (docs/LOADER_PLAN.md).
+A system takes a bearer_token or an api_key (use whichever Workfront gave you). Planning uses a Bearer token. The values are secrets: they are never written to the
+database, a log, an error message, a report or the browser. server.py ignores this section (it reads only the keys it knows), so nothing here can reach the page.
+
+Other settings live here too, never in code:
+    api_path   the path in front of the API routes. Planning defaults to /maestro/api (the documented pattern); Core has no default because it holds the API version, for
+               example "/attask/api/v21.0", so a Core block without one is refused with a plain message.
+    default_currency, currency_by_symbol   Planning: the ISO currency code to give a currency field (Airtable stores a symbol such as $, which is not a code).
+    The loader's `run` command reads these; the web pages never do.
 """
 import json, os
 
@@ -19,6 +24,8 @@ SYSTEMS = ("core", "planning")
 ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core only (SB01, SB02, Preview, my); Planning uses Workspaces
 SECRET_KEYS = ("bearer_token", "api_key")
 PLACEHOLDERS = ("PASTE", "REPLACE", "XXXX", "YOURCOMPANY")
+PLANNING_DEFAULT_API_PATH = "/maestro/api"      # the documented base pattern https://{customer-domain}/maestro/api
+LOCAL_HOSTS = ("http://127.0.0.1", "http://localhost")      # only a local test server may use plain http
 
 
 class ConfigError(Exception):
@@ -32,10 +39,11 @@ def _real(value):
 
 class SystemCredentials(object):
     """The address and one secret for one system in one environment. The secret is kept out of repr(), str() and as_status()."""
-    __slots__ = ("environment", "system", "base_url", "_secret", "kind", "workspace_id")
+    __slots__ = ("environment", "system", "base_url", "_secret", "kind", "workspace_id", "api_path", "extra")
 
-    def __init__(self, environment, system, base_url, secret, kind, workspace_id=None):
+    def __init__(self, environment, system, base_url, secret, kind, workspace_id=None, api_path=None, extra=None):
         self.environment, self.system, self.base_url, self._secret, self.kind, self.workspace_id = environment, system, base_url, secret, kind, workspace_id
+        self.api_path, self.extra = api_path, extra or {}
 
     def secret(self):
         return self._secret
@@ -74,13 +82,16 @@ def credentials(data, system, environment=None):
     if not isinstance(block, dict):
         return None
     url = str(block.get("base_url") or "").strip().rstrip("/")
-    if not url.lower().startswith("https://") or any(p in url.upper() for p in PLACEHOLDERS):
+    if not (url.lower().startswith("https://") or url.lower().startswith(LOCAL_HOSTS)) or any(p in url.upper() for p in PLACEHOLDERS):
         return None
     ws = str(block.get("workspace_id") or "").strip() if system == "planning" else ""
     ws = None if (not ws or any(p in ws.upper() for p in PLACEHOLDERS)) else ws
+    path = str(block.get("api_path") or "").strip()
+    path = ("/" + path.strip("/")) if path else (PLANNING_DEFAULT_API_PATH if system == "planning" else None)
+    extra = {k: v for k, v in block.items() if k not in SECRET_KEYS + ("base_url", "api_path", "workspace_id") and isinstance(v, (str, int, dict)) and not any(p in str(v).upper() for p in PLACEHOLDERS)}
     for kind in SECRET_KEYS:
         if _real(block.get(kind)):
-            return SystemCredentials(environment, system, url, str(block[kind]).strip(), kind, ws)
+            return SystemCredentials(environment, system, url, str(block[kind]).strip(), kind, ws, path, extra)
     return None
 
 

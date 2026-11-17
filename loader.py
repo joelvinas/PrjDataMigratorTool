@@ -22,6 +22,9 @@ import loadconfig as lc
 import loadplan as lp
 import loadrun as lr
 import loadstate as ls
+import coretransport as ct
+import planningtransport as pt
+import workfronthttp as wh
 
 PLAN_COLUMNS = ["temp_id", "system", "kind", "parent", "group", "table_id", "airtable_field_id", "name", "label", "data_type", "position", "status", "reasons", "source", "description"]
 
@@ -41,7 +44,7 @@ def plan_csv(plan):
                                for i in plan["items"]])
 
 
-def summary_text(plan, base_id, title="Load plan"):
+def summary_text(plan, base_id, title="Load plan", sent=False):
     s = plan["summary"]
     L = ["%s for %s" % (title, base_id), "", "Items: %d" % s["total"]]
     L += ["  %-8s %d" % (k, v) for k, v in sorted(s["by_status"].items())]
@@ -51,7 +54,7 @@ def summary_text(plan, base_id, title="Load plan"):
     if s.get("limit_findings"):
         L += ["", "Workfront Planning limits (documented, not yet tested; a person decides, nothing changes on its own):"] + ["  %s: %s" % (f["scope"], f["detail"]) for f in s["limit_findings"]]
     L += ["", "Tables out of scope (skipped): %d" % s["out_of_scope_tables"], "",
-          "Nothing was sent to Workfront. Creating items is not implemented yet (docs/LOADER_PLAN.md)."]
+          ("This is the plan the run worked from; the counts above say what was sent." if sent else "Nothing was sent to Workfront by this command. Only 'run --send' creates anything (docs/LOADER_PLAN.md).")]
     return "\n".join(L) + "\n"
 
 
@@ -82,7 +85,75 @@ class _Known(lr.MemoryState):
             self.ids[(tid, env_name)] = wid
 
 
-def main(argv=None):
+RUN_COLUMNS = ["temp_id", "system", "environment", "kind", "name", "outcome", "detail"]
+
+
+def _run(a, opener=None):
+    """Create the plan's ready items in Workfront. Sends nothing without --send. Core and Planning are run one after the other, each with its own environment
+    (Core: sandbox1 to production; Planning: the dev or uat Workspace). The state is kept in load_id_map, so a stopped run carries on without duplicates."""
+    if not a.send:
+        sys.exit("Nothing was sent. 'run' creates items in Workfront only when you add --send. Use 'plan' and 'dry-run' to see what it would do first (and docs/LOADER_PLAN.md).")
+    systems = ("core", "planning") if a.only == "both" else (a.only,)
+    try:
+        data = lc.read_config(a.config)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    creds = {s: lc.credentials(data, s, a.core_env if s == "core" else None) for s in systems}
+    missing = [("Core (%s)" % a.core_env) if s == "core" else "Planning" for s in systems if creds[s] is None]
+    if missing:
+        sys.exit("Not configured in %s: %s. Run 'config' to see what is set (yes or no only)." % (a.config, ", ".join(missing)))
+    if "planning" in creds and not creds["planning"].workspace_id:
+        sys.exit("The Planning settings in %s need a workspace_id (the Workspace to load into)." % a.config)
+    stage = {"core": a.core_env, "planning": a.planning_stage}
+    try:
+        envs = {s: lr.resolve_environment(stage[s], a.confirm, dry_run=False, workspace_id=creds[s].workspace_id) for s in systems}
+    except ValueError as e:
+        sys.exit(str(e))
+    secrets = lc.secret_values(data)
+    if not os.path.isfile(a.db):
+        sys.exit("No such database: %s" % a.db)
+    conn = sqlite3.connect(a.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not ls.available(conn):
+            sys.exit("This database does not have the loader's state table in its current form. Apply the migrations (python sql/apply_migrations.py, after a backup) first.")
+        try:
+            inputs = store.loader_inputs(conn, a.base)
+        except store.StoreError as e:
+            sys.exit(e.message)
+        inputs["link_state"] = ld.field_states(conn)
+        plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"),
+                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
+        _write(a.out, "load_plan.csv", plan_csv(plan))
+        rows, lines, results = [], ["Load run for %s" % a.base, ""], {}
+        for s in systems:
+            try:
+                tr = (ct.CoreTransport if s == "core" else pt.PlanningTransport)(wh.Http(creds[s], secrets, opener=opener))
+            except ValueError as e:
+                sys.exit(str(e))
+            state = ls.DbState(conn, a.base, creds[s].workspace_id if s == "planning" else None)
+            stuck = state.pending(envs[s].name)
+            if stuck:
+                lines.append("%s: %d item(s) from an earlier run were started and not finished; they are tried again: %s" % (s.title(), len(stuck), ", ".join(stuck[:10]) + (" ..." if len(stuck) > 10 else "")))
+            res = lr.run_plan([i for i in plan["items"] if i["system"] == s], state, {s: tr}, envs[s], dry_run=False)
+            results[s] = res
+            lines += ["%s in %s%s:" % (s.title(), envs[s].name.upper(), (" (Workspace %s)" % creds[s].workspace_id) if s == "planning" else "")] + ["  %-16s %d" % (k, v) for k, v in sorted(res["counts"].items())] + [""]
+            for r in res["results"]:
+                d = r["detail"]
+                rows.append([r["temp_id"], s, envs[s].name, r["kind"], r["name"], r["outcome"], d if not isinstance(d, dict) else "; ".join("%s=%s" % kv for kv in sorted(d.items()) if kv[1] not in (None, ""))])
+    finally:
+        conn.close()
+    _write(a.out, "load_run.csv", lc.redact(_csv(RUN_COLUMNS, rows), secrets))
+    failed = sum(r["counts"].get("failed", 0) for r in results.values())
+    lines += ["%d item(s) failed. See load_run.csv for each item's outcome and the plain reason." % failed if failed else "No item failed.", "",
+              "Attaching Core fields to a custom form is a manual step. Anything on hold or blocked in the plan was not sent (load_plan.csv gives the reasons)."]
+    text = lc.redact("\n".join(lines), secrets)
+    _write(a.out, "load_run_summary.txt", text + "\n\n" + lc.redact(summary_text(plan, a.base, sent=True), secrets))
+    print(text + "\nReports written to %s" % a.out)
+    return results
+
+
+def main(argv=None, opener=None):
     ap = argparse.ArgumentParser(description="Build the migration load plan and dry-run it (read-only; nothing is sent to Workfront).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     pc = sub.add_parser("config", help="say which Workfront credentials are configured (yes or no only; a value is never shown)")
@@ -93,8 +164,15 @@ def main(argv=None):
         p.add_argument("--base", required=True, help="Airtable base ID")
         p.add_argument("--out", default="out/loader")
         p.add_argument("--no-link-fields", action="store_true", help="leave out the fields that link a Core object to its Planning record")
-        if name != "plan":
+        if name == "dry-run":
             p.add_argument("--env", default="sandbox1", choices=lr.ENVIRONMENTS, help="the environment or stage label (default: sandbox1; dev and uat are the Planning stages)")
+        if name == "run":
+            p.add_argument("--send", action="store_true", help="actually create items in Workfront. Without it nothing is sent")
+            p.add_argument("--config", default="config.json", help="the file that holds the Workfront settings and secrets (default: config.json)")
+            p.add_argument("--only", default="both", choices=("both", "core", "planning"), help="which system to load (default: both)")
+            p.add_argument("--core-env", default="sandbox1", choices=lc.ENVIRONMENTS, help="the Core environment (default: sandbox1)")
+            p.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES, help="the Planning stage, which is a Workspace (default: dev)")
+            p.add_argument("--confirm", default=None, help="the exact phrase a real Core production run needs: %s" % lr.PRODUCTION_PHRASE)
     a = ap.parse_args(argv)
     if a.cmd == "config":
         try:
@@ -106,8 +184,7 @@ def main(argv=None):
         print("\n".join(lines))
         return st
     if a.cmd == "run":
-        sys.exit("Creating items in Workfront is not implemented yet: the request shapes for Workfront Planning and Workfront Core are not verified and no credentials are "
-                 "configured. Use 'plan' and 'dry-run'. See docs/LOADER_PLAN.md.")
+        return _run(a, opener)
     conn = _open(a.db)
     try:
         inputs = store.loader_inputs(conn, a.base)
@@ -119,7 +196,7 @@ def main(argv=None):
         sys.exit(e.message)
     finally:
         conn.close()
-    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"))
+    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
     _write(a.out, "load_plan.csv", plan_csv(plan))
     text = summary_text(plan, a.base)
     if a.cmd == "plan":

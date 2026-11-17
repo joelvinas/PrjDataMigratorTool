@@ -1,6 +1,6 @@
 # Loader plan (Stage 4: Map and load)
 
-Status: **begun.** The load plan, the dry run and the runner's rules are built and tested. Nothing is created in Workfront yet, deliberately: the request shapes are not verified and no credentials are configured (see "What is not verified").
+Status: **begun.** The load plan, the dry run, the runner's rules and both transports (`coretransport.py`, `planningtransport.py`) are built and tested against a fake Workfront; `loader.py run --send` creates record types, fields and select options. It has not been run against a real Workfront: see "Verified by the owner" and "Still unverified" below.
 
 ## What the Loader is
 
@@ -9,7 +9,7 @@ Stage 4 takes the approved names, the scope and target decisions, the consolidat
 | Step | What | Status |
 | --- | --- | --- |
 | 4a | **The load plan and the dry run**: everything that would be created, with temporary IDs and a status; the runner's rules (sandbox by default, idempotent, one failure never stops a run) | **Built** |
-| 4b | **Field creation in the sandbox**: real Planning and Core transports (separate modules, each with its own authentication), the ID map table, the crosswalk written back, every call logged against its temporary ID | Waiting on the request-shape checks below (migrations 010 to 017 are applied) |
+| 4b | **Field creation in the sandbox**: real Planning and Core transports (separate modules, each with its own authentication), the ID map table, every create recorded against its temporary ID | **Built and tested against a fake Workfront; not yet run for real.** Links are the second pass. Attaching Core fields to a form stays manual |
 | 4c | **Record load order and the record ID map**: Airtable record ID to Core object ID and Planning record ID, so links and attachments can be reattached | Registry built (`recordmap.py`, migration 017 applied): surrogate IDs, target mappings, pass markers, attachment map. The record load itself is not built |
 | 4d | **Attachments** as native Core documents (link expiry, download behavior against real Airtable is untested) | Not started |
 | 4e | **The Core to Planning publish pattern**: the write-once Planning ID field, the sync status, idempotent publish, the reconciliation report | Not started; needs sandbox proof first |
@@ -43,6 +43,21 @@ python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env san
 
 - Core custom fields are `PARAM` objects and custom forms are `CTGY` objects; a field is attached to a form by updating the form's `categoryParameters` (objCode `CTGYPA`). ([community thread](https://experienceleaguecommunities.adobe.com/adobe-workfront-general-23/api-call-attach-assign-existing-custom-field-parameter-to-existing-custom-form-category-127216))
 - Planning: field IDs are not shown in the UI, fields cannot easily be found by name, and patching individual select options may be undocumented. The only reply in that thread is from a partner, not Adobe, and says V2 may cover it. ([thread, May to October 2026](https://experienceleaguecommunities.adobe.com/adobe-workfront-23/workfront-planning-fusion-api-limitations-250603))
+
+## Verified by the owner (17 November 2026)
+
+**Core** (sandbox): `POST /param` needs only `name` and `dataType`; the create reply returns the new ID; displayTypes TEXT and TXTA work with any dataType; a RICH field cannot be created through the API (only in the custom form viewer); attaching a PARAM to a form (CTGY) is a **manual step** and is not done by the loader.
+
+**Planning:** only `recordTypeId` is required to create a record (v2 createRecord); record type names are checked per Workspace, and Global record types are out of scope (none are created); a field CAN be changed in place with PATCH; bulk-create IDs line up with the order sent (a JSON array); authentication is a Bearer token and every setting lives in `config.json`; the description property is `description`, whose real limit is 1,024, **kept at 512 on purpose** while the loader is being proven.
+
+## Still unverified (built on an assumption; prove in the first run)
+
+- **Planning field options by type:** numberOptions (precision only when the schema gives it; currency code from `config.json`), dateOptions `{dateFormat: "locale"}` with no time format (so a date-and-time field loses its time setting until checked), userOptions. A new record type may already have a primary field; the loader does not treat it specially.
+- **Select options:** sent with their field in one call (the reference requires a non-empty list); an option's ID is read from the reply's `name`, else its `displayName`; whether options can be added, renamed or reordered later is sandbox item S4.
+- **Links:** each side of a two-way pair is its own reference field with `createBackReference` false. Postman test 4 decides whether a back reference should be used instead, and the 30-field cap interaction cannot be tested without a 31-link table.
+- **Core:** the displayTypes SLCT, MULT and CHCK (mapped, unverified), the POPT properties, the lookup used to adopt an existing field, and how a duplicate name is refused (a 409 or a message that the name exists is treated as a conflict).
+- **Duplicate record type names:** how Planning refuses one is unknown (a 409, `FIELD_DISPLAY_NAME_NOT_UNIQUE` or "already exists" text is treated as a conflict).
+- **Type mapping** (`typemap.py`): the plan's data type text is matched to Planning v2 and Core types by label; an unknown label is refused, never guessed.
 
 ## Facts supplied by the owner (14 November 2026)
 
