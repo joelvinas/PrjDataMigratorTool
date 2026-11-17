@@ -119,7 +119,7 @@ def main(argv=None):
         sys.exit(e.message)
     finally:
         conn.close()
-    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"))
+    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
     _write(a.out, "load_plan.csv", plan_csv(plan))
     text = summary_text(plan, a.base)
     if a.cmd == "plan":

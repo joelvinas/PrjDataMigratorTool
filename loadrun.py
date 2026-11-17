@@ -104,10 +104,10 @@ def is_name_conflict(e):
     return isinstance(e, NameConflict) or "FIELD_DISPLAY_NAME_NOT_UNIQUE" in str(e)
 
 
-def _find_one(tr, item, parent_id):
+def _find_one(tr, args):
     """The ID of the one existing item that matches, else None (none found, more than one, or the lookup failed: never guess)."""
     try:
-        found = tr.find_existing(item, parent_id)
+        found = tr.find_existing(*args)
     except Exception:
         return None
     if isinstance(found, (list, tuple, set)):
@@ -150,17 +150,28 @@ def run_plan(items, state, transports, env, dry_run=True, log=None):
         if tr is None:
             done(item, "no_transport", "no %s transport is configured" % item["system"])
             continue
+        refs, lost = {}, None
+        for need in item.get("requires") or []:                   # a second-pass item (a link) needs OTHER items to exist first
+            got = state.get(need, env.name) or (placeholder.get(need) if dry_run else None)
+            if not got:
+                lost = need
+                break
+            refs[need] = got
+        if lost:
+            done(item, "parent_missing", lost)
+            continue
+        args = (item, parent_id, refs) if refs else (item, parent_id)
         if dry_run:
             placeholder[tid] = "<new %s>" % tid
-            done(item, "would_create", tr.describe(item, parent_id))
+            done(item, "would_create", tr.describe(*args))
             continue
         begin = getattr(state, "begin", None)
         tries = begin(item, env.name) if begin else 1       # a PENDING row is written before the call, so an interrupted run leaves a trace
         try:
-            wid = str(tr.create(item, parent_id))
+            wid = str(tr.create(*args))
         except Exception as e:                              # one failure never stops the run
             if is_name_conflict(e) and tries > 1 and hasattr(tr, "find_existing"):
-                found = _find_one(tr, item, parent_id)      # an earlier, interrupted try may have created it: adopt it, but only if exactly one item matches
+                found = _find_one(tr, args)                 # an earlier, interrupted try may have created it: adopt it, but only if exactly one item matches
                 if found:
                     state.adopt(tid, env.name, found)
                     done(item, "adopted", found)
