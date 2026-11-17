@@ -24,8 +24,10 @@ import loadrun as lr
 import loadstate as ls
 import coretransport as ct
 import planningtransport as pt
+import coreobjects as co
 import recordload as rl
 import recordmap as rm
+import coretargets as tg
 import workfronthttp as wh
 
 PLAN_COLUMNS = ["temp_id", "system", "kind", "parent", "group", "table_id", "airtable_field_id", "name", "label", "data_type", "position", "status", "reasons", "source", "description"]
@@ -224,6 +226,60 @@ def _records(a, opener=None):
     return {"rows": rows, "failures": failures}
 
 
+CORE_OBJECT_COLUMNS = ["table_id", "table_name", "object_code", "pending", "created", "failed", "note"]
+
+
+def _core_objects(a, opener=None):
+    """Create one Core object per registered record, under the parent decided for its table. Without --send it only counts what is waiting. Reports hold table IDs,
+    Airtable record IDs and counts only; an object's name is read from the saved file in memory and sent, never written down."""
+    try:
+        data = lc.read_config(a.config)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    creds = lc.credentials(data, "core", a.core_env)
+    if creds is None:
+        sys.exit("Core (%s) is not configured in %s. Run 'config' to see what is set." % (a.core_env, a.config))
+    try:
+        env = lr.resolve_environment(a.core_env, a.confirm, dry_run=not a.send)
+    except ValueError as e:
+        sys.exit(str(e))
+    secrets = lc.secret_values(data)
+    if not os.path.isfile(a.db):
+        sys.exit("No such database: %s" % a.db)
+    conn = sqlite3.connect(a.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not (rm.available(conn) and tg.available(conn)):
+            sys.exit("This database does not have the record map and the Core decision tables. Apply the migrations (python sql/apply_migrations.py, after a backup) first.")
+        try:
+            tr = ct.CoreTransport(wh.Http(creds, secrets, opener=opener))
+        except ValueError as e:
+            sys.exit(str(e))
+        if a.send:
+            for t in tg.rows(conn, a.base):
+                if t["ready"]:
+                    try:
+                        doc = rl.read_extract(a.extract_dir, a.base, t["table_id"])
+                        rm.register(conn, a.base, t["table_id"], [r.get("id") for r in doc["records"] if isinstance(r, dict)])
+                    except (rl.RecordLoadError, rm.RecordMapError):
+                        pass                                  # the run below reports the table's note
+        res = co.load_core_objects(conn, a.base, a.extract_dir, tr, env.name, dry_run=not a.send)
+    finally:
+        conn.close()
+    rows = [[t["table_id"], t["name"], t["object_code"] or "", t["pending"], t["created"], t["failed"], t["note"] or ""] for t in res["tables"]]
+    fails = [[t["table_id"], rid, why] for t in res["tables"] for rid, why in t["failures"]]
+    _write(a.out, "core_objects.csv", lc.redact(_csv(CORE_OBJECT_COLUMNS, rows), secrets))
+    _write(a.out, "core_objects_failures.csv", lc.redact(_csv(["table_id", "airtable_record_id", "reason"], fails), secrets))
+    lines = ["Core objects for %s in %s%s" % (a.base, env.name.upper(), "" if a.send else ", nothing was sent"), ""]
+    lines += ["  %-40s %-7s %s" % (r[1][:40], r[2] or "-", ("%d created, %d failed" % (r[4], r[5])) if a.send else ("%d waiting" % r[3])) + ("  (%s)" % r[6] if r[6] else "") for r in rows]
+    lines += ["", "%d created, %d failed." % (res["created"], res["failed"]) if a.send else "Records are registered only when you add --send, so a first dry run can show none waiting.",
+              "A table with no decided object type and parent is skipped: decide it on the Stage 4 page. Failed records stay pending and are tried again on the next run."]
+    text = lc.redact(chr(10).join(lines), secrets)
+    _write(a.out, "core_objects_summary.txt", text)
+    print(text + chr(10) + "Reports written to %s" % a.out)
+    return {"rows": rows, "failures": fails}
+
+
 def main(argv=None, opener=None):
     ap = argparse.ArgumentParser(description="Build the migration load plan and dry-run it (read-only; nothing is sent to Workfront).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -254,7 +310,18 @@ def main(argv=None, opener=None):
     pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
     pr.add_argument("--pass", dest="pass_name", default="both", choices=("both", "records", "links"))
     pr.add_argument("--batch", type=int, default=None, help="records per call (default: record_batch_size in config.json, else %d)" % rl.BATCH_DEFAULT)
+    pc2 = sub.add_parser("core-objects", help="create one Core object (project, request or task) per record under the parent decided for its table")
+    pc2.add_argument("--db", required=True)
+    pc2.add_argument("--base", required=True, help="Airtable base ID")
+    pc2.add_argument("--out", default="out/loader")
+    pc2.add_argument("--send", action="store_true", help="actually create objects in Core. Without it nothing is sent")
+    pc2.add_argument("--config", default="config.json")
+    pc2.add_argument("--extract-dir", default="data_extract")
+    pc2.add_argument("--core-env", default="sandbox1", choices=lc.ENVIRONMENTS)
+    pc2.add_argument("--confirm", default=None, help="the exact phrase a real Core production run needs: %s" % lr.PRODUCTION_PHRASE)
     a = ap.parse_args(argv)
+    if a.cmd == "core-objects":
+        return _core_objects(a, opener)
     if a.cmd == "records":
         return _records(a, opener)
     if a.cmd == "config":
