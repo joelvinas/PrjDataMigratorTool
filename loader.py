@@ -24,6 +24,8 @@ import loadrun as lr
 import loadstate as ls
 import coretransport as ct
 import planningtransport as pt
+import recordload as rl
+import recordmap as rm
 import workfronthttp as wh
 
 PLAN_COLUMNS = ["temp_id", "system", "kind", "parent", "group", "table_id", "airtable_field_id", "name", "label", "data_type", "position", "status", "reasons", "source", "description"]
@@ -152,6 +154,75 @@ def _run(a, opener=None):
     print(text + "\nReports written to %s" % a.out)
     return results
 
+RECORD_COLUMNS = ["table_id", "table_name", "pass", "pending", "done", "waiting", "failed", "problems", "note"]
+FAILURE_COLUMNS = ["table_id", "pass", "airtable_record_id", "reason"]
+
+
+def _records(a, opener=None):
+    """Load the saved Airtable records into the Planning record types the field load created: the records pass, then the links pass. Without --send it only counts
+    what is waiting. Record values are read from the saved files in memory and sent; the reports hold table IDs, record IDs and counts only."""
+    try:
+        data = lc.read_config(a.config)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    creds = lc.credentials(data, "planning")
+    if creds is None or not creds.workspace_id:
+        sys.exit("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % a.config)
+    try:
+        env = lr.resolve_environment(a.planning_stage, None, dry_run=not a.send, workspace_id=creds.workspace_id)
+    except ValueError as e:
+        sys.exit(str(e))
+    secrets = lc.secret_values(data)
+    if not os.path.isfile(a.db):
+        sys.exit("No such database: %s" % a.db)
+    conn = sqlite3.connect(a.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not (ls.available(conn) and rm.available(conn)):
+            sys.exit("This database does not have the loader's state tables in their current form. Apply the migrations (python sql/apply_migrations.py, after a backup) first.")
+        try:
+            inputs = store.loader_inputs(conn, a.base)
+        except store.StoreError as e:
+            sys.exit(e.message)
+        inputs["link_state"] = ld.field_states(conn)
+        plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=True, link_state=inputs.get("link_state"),
+                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
+        state = ls.DbState(conn, a.base, creds.workspace_id)
+        tables = rl.table_targets(plan["items"], state, env.name)
+        ws = creds.workspace_id
+        notes = {}
+        if a.send:
+            for tid in sorted(tables):                          # register the record IDs of every loadable table (IDs only are read)
+                try:
+                    doc = rl.read_extract(a.extract_dir, a.base, tid)
+                    rm.register(conn, a.base, tid, [r.get("id") for r in doc["records"] if isinstance(r, dict)])
+                except (rl.RecordLoadError, rm.RecordMapError) as e:
+                    notes[tid] = str(e)
+        tr = pt.PlanningTransport(wh.Http(creds, secrets, opener=opener))
+        batch = int(creds.extra.get("record_batch_size") or rl.BATCH_DEFAULT) if a.batch is None else a.batch
+        rows, failures, lines = [], [], ["Record load for %s in %s (Workspace %s)%s" % (a.base, env.name.upper(), ws, "" if a.send else ", nothing was sent"), ""]
+        passes = ("records", "links") if a.pass_name == "both" else (a.pass_name,)
+        for p in passes:
+            fn = rl.load_records if p == "records" else rl.load_links
+            res = fn(conn, a.base, tables, a.extract_dir, tr, env.name, ws, batch=batch, dry_run=not a.send)
+            for t in res["tables"]:
+                done = t.get("created", t.get("updated", 0))
+                rows.append([t["table_id"], t["name"], p, t["pending"], done, t.get("waiting", 0), t["failed"], t.get("problems", 0), t["note"] or notes.get(t["table_id"], "")])
+                failures += [[t["table_id"], p, rid, why] for rid, why in t["failures"]]
+            n_done, n_wait = sum(r[4] for r in rows if r[2] == p), sum(r[3] for r in rows if r[2] == p)
+            lines.append("%s pass: %s, %d failed." % (p.title(), ("%d record(s) done, %d still waiting" % (n_done, sum(r[5] for r in rows if r[2] == p))) if a.send else ("%d record(s) registered and waiting" % n_wait),
+                                                     sum(r[6] for r in rows if r[2] == p)))
+        if not a.send:
+            lines.append("Records are registered from the saved files only when you add --send, so a first dry run can show none waiting.")
+    finally:
+        conn.close()
+    _write(a.out, "record_load.csv", lc.redact(_csv(RECORD_COLUMNS, rows), secrets))
+    _write(a.out, "record_load_failures.csv", lc.redact(_csv(FAILURE_COLUMNS, failures), secrets))
+    text = lc.redact(chr(10).join(lines + ["", "Failed records stay pending and are tried again on the next run. Reports hold table IDs, Airtable record IDs and counts only."]), secrets)
+    _write(a.out, "record_load_summary.txt", text)
+    print(text + chr(10) + "Reports written to %s" % a.out)
+    return {"rows": rows, "failures": failures}
+
 
 def main(argv=None, opener=None):
     ap = argparse.ArgumentParser(description="Build the migration load plan and dry-run it (read-only; nothing is sent to Workfront).")
@@ -173,7 +244,19 @@ def main(argv=None, opener=None):
             p.add_argument("--core-env", default="sandbox1", choices=lc.ENVIRONMENTS, help="the Core environment (default: sandbox1)")
             p.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES, help="the Planning stage, which is a Workspace (default: dev)")
             p.add_argument("--confirm", default=None, help="the exact phrase a real Core production run needs: %s" % lr.PRODUCTION_PHRASE)
+    pr = sub.add_parser("records", help="load the saved Airtable records into the Planning record types (records pass, then links pass)")
+    pr.add_argument("--db", required=True)
+    pr.add_argument("--base", required=True, help="Airtable base ID")
+    pr.add_argument("--out", default="out/loader")
+    pr.add_argument("--send", action="store_true", help="actually create records in Workfront. Without it nothing is sent")
+    pr.add_argument("--config", default="config.json")
+    pr.add_argument("--extract-dir", default="data_extract", help="where the saved record files are (default: data_extract)")
+    pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
+    pr.add_argument("--pass", dest="pass_name", default="both", choices=("both", "records", "links"))
+    pr.add_argument("--batch", type=int, default=None, help="records per call (default: record_batch_size in config.json, else %d)" % rl.BATCH_DEFAULT)
     a = ap.parse_args(argv)
+    if a.cmd == "records":
+        return _records(a, opener)
     if a.cmd == "config":
         try:
             st = lc.status(lc.read_config(a.config))
