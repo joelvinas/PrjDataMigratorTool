@@ -47,8 +47,9 @@ check("record types use the approved table names and are ready", rows["P-T-tA"][
 check("only the Planning plus Core table has a Core form, on hold", "C-T-tA" in rows and "C-T-tB" not in rows and rows["C-T-tA"]["status"] == "hold")
 check("a plain field is ready in Planning, and in Core for the Core table only", rows["P-F-fA1"]["status"] == "ready" and rows["C-F-fA1"]["status"] == "ready" and not any(k.startswith("C-F-fB") for k in rows)
       and rows["P-F-fB1"]["data_type"] == "Text")
-check("the formula and the link are on hold with their reasons", rows["P-F-fA3"]["status"] == "hold" and "derived" in rows["P-F-fA3"]["reasons"]
-      and rows["P-F-fA4"]["status"] == "hold" and "second pass" in rows["P-F-fA4"]["reasons"])
+check("the formula is on hold with its reason", rows["P-F-fA3"]["status"] == "hold" and "derived" in rows["P-F-fA3"]["reasons"])
+check("the link is blocked while its direction is not confirmed (Stage 1, step 4), and still names the second pass", rows["P-F-fA4"]["status"] == "blocked"
+      and "second pass" in rows["P-F-fA4"]["reasons"] and "not confirmed" in rows["P-F-fA4"]["reasons"])
 check("select options come from the schema in Airtable order, with positions", [(rows[k]["name"], rows[k]["position"]) for k in ("P-O-fA2-selA", "P-O-fA2-selB", "P-O-fA2-selC")] == [("Open", "0"), ("Café Closed", "1"), ("Done", "2")])
 check("the migration's own Core-link fields are in the plan for the Core table", rows["S-P-tA-core-object-id"]["source"] == "migration" and rows["S-C-tA-sync-status"]["status"] == "ready")
 check("the plan is ordered parents first in the file", list(rows).index("P-T-tA") < list(rows).index("P-F-fA1") < list(rows).index("P-O-fA2-selA"))
@@ -67,6 +68,29 @@ check("the dry-run summary names the environment", open(os.path.join(out, "load_
 loader.main(["dry-run", "--db", dbp, "--base", "appL", "--out", out, "--env", "production"])
 check("a production DRY run is allowed (it changes nothing) and is labelled", open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read().startswith("Dry run in PRODUCTION"))
 check("the database is still untouched after the dry runs", hashlib.sha256(open(dbp, "rb").read()).hexdigest() == h0)
+
+# ---- a dry run reads what the database already holds (state in load_id_map)
+w = sqlite3.connect(dbp)
+w.execute("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, name, workfront_id, status, attempts) VALUES ('C-T-tA','sandbox1',NULL,'','core','form','appL','tA','Orders','wfForm1','created',1)")
+w.execute("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, airtable_field_id, name, status, attempts) VALUES ('C-F-fA1','sandbox1',NULL,'','core','field','appL','tA','fA1','Order Name','pending',1)")
+w.execute("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, name, workfront_id, status, attempts) VALUES ('P-T-tA','sandbox1','wsDev','wsDev','planning','record_type','appL','tA','Orders','wfRec1','created',1)")
+w.commit(); w.close()
+res = loader.main(["dry-run", "--db", dbp, "--base", "appL", "--out", out])
+summ = open(os.path.join(out, "load_dry_run_summary.txt"), encoding="utf-8-sig").read()
+check("a dry run skips what the database already holds as created, and says so", {r["temp_id"]: r["outcome"] for r in res["results"]}.get("P-T-tA") == "already_created" and res["counts"].get("already_created") == 1, res["counts"])
+check("a dry run says which items an earlier run started and never finished", "1 item(s) were started by an earlier run and never finished" in summ and "C-F-fA1" in summ, summ[:400])
+
+# ---- the Fusion-driven marker reaches the load plan (Planning and Core descriptions alike)
+w = sqlite3.connect(dbp)
+sp = w.execute("INSERT INTO automation_specs(automation_id, version_no, automation_name, base_id, target_scenario_name, spec_json) VALUES ('aOrd', 1, 'Order sync', 'appL', 'Order sync', '{}')").lastrowid
+w.execute("INSERT INTO automation_items(spec_id, item_id, item_order, path, item_kind) VALUES (?, 's1', 1, '1', 'step')", (sp,))
+w.execute("INSERT INTO automation_field_refs(spec_id, item_id, ref_order, field_id, role) VALUES (?, 's1', 0, 'fA1', 'set')", (sp,))
+w.commit(); w.close()
+loader.main(["plan", "--db", dbp, "--base", "appL", "--out", out])
+prows = {r["temp_id"]: r for r in csv.DictReader(io.StringIO(open(os.path.join(out, "load_plan.csv"), encoding="utf-8-sig").read()))}
+mk = 'Fusion-driven: written by scenario "Order sync". Source: Airtable.'
+check("a field a recorded automation sets carries the marker in its Planning and Core descriptions", prows["P-F-fA1"]["description"].startswith(mk) and prows["C-F-fA1"]["description"].startswith(mk), (prows["P-F-fA1"]["description"], prows["C-F-fA1"]["description"]))
+check("other fields, and the record type, do not", not prows["P-F-fB1"]["description"].startswith("Fusion-driven") and not prows["P-T-tA"]["description"].startswith("Fusion-driven"))
 
 # ---- the guards
 for argv, why in ((["run", "--db", dbp, "--base", "appL"], "run"), (["run", "--db", dbp, "--base", "appL", "--env", "production"], "run in production")):

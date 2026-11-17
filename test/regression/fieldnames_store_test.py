@@ -234,6 +234,33 @@ rows = {r["field_id"]: r for r in csv.DictReader(io.StringIO(files["names_report
 check("the report has the description, where it came from and its problems", rows["f1"]["description"].endswith("Orders.Done.") and rows["f1"]["description_source"] == "saved"
       and rows["f3"]["description_source"] == "generated" and rows["f3"]["description"] == "Source: Airtable. Origins: Orders.Notes!." and rows["f3"]["description_problems"] == "")
 
+# ---- the Fusion-driven marker: first in the description of a field a recorded automation sets, never stored
+D = lambda f: {x["field_id"]: x for x in st.review(c, B)["fields"]}[f]["description"]
+check("with no recorded automation no field carries a marker", not D("f1")["fusion"] and not D("f1")["text"].startswith("Fusion-driven"))
+sid = c.execute("insert into automation_specs(automation_id, version_no, automation_name, base_id, target_scenario_name, spec_json) values ('aSync', 1, 'Order sync', ?, 'Order sync', '{}')", (B,)).lastrowid
+c.execute("insert into automation_items(spec_id, item_id, item_order, path, item_kind) values (?, 's1', 1, '1', 'step')", (sid,))
+c.execute("insert into automation_field_refs(spec_id, item_id, ref_order, field_id, role) values (?, 's1', 0, 'f1', 'set')", (sid,))
+c.execute("insert into automation_field_refs(spec_id, item_id, ref_order, field_id, role) values (?, 's1', 1, 'f3', 'read')", (sid,)); c.commit()
+mk = 'Fusion-driven: written by scenario "Order sync".'
+check("a field an automation sets gets the marker first, in the generated text and the text used", D("f1")["generated"].startswith(mk + " Source: Airtable.") and D("f1")["text"].startswith(mk) and D("f1")["fusion"])
+check("a field the automation only reads gets none", not D("f3")["fusion"] and D("f3")["text"] == "Source: Airtable. Origins: Orders.Notes!.")
+check("a hand edit is shown with the marker in front, kept without it, and still counts as edited", D("f1")["saved"] == "Source: Airtable. Origins: Orders.Amount; Orders.Done." and D("f1")["text"] == mk + " " + D("f1")["saved"] and D("f1")["edited"])
+check("the marker does not trip the lineage check", D("f1")["problems"] == [], D("f1")["problems"])
+shown = D("f1")["text"]
+r = st.save_descriptions(c, B, "JV", [{"field_id": "f1", "text": shown}])
+check("saving the text exactly as shown stores it without the marker (and changes nothing here)", r["saved"] == 0 and c.execute("select description from field_names where airtable_field_id='f1'").fetchone()[0] == "Source: Airtable. Origins: Orders.Amount; Orders.Done.")
+st.save_descriptions(c, B, "JV", [{"field_id": "f1", "text": "Fusion-driven: written by scenario \"Hand made\". Source: Airtable. Origins: Orders.Amount; Orders.Total."}])
+check("a hand-typed marker cannot replace the real one: the stored text is marker-free and the shown marker is the recorded scenario", c.execute("select description from field_names where airtable_field_id='f1'").fetchone()[0] == "Source: Airtable. Origins: Orders.Amount; Orders.Total."
+      and D("f1")["text"].startswith(mk) and "Hand made" not in D("f1")["text"])
+st.save_descriptions(c, B, "JV", [{"field_id": "f3", "text": mk + " Source: Airtable. Origins: Orders.Notes!; Orders.Done."}])
+check("a marker typed on a field no automation sets is not kept", D("f3")["text"] == "Source: Airtable. Origins: Orders.Notes!; Orders.Done." and not D("f3")["fusion"])
+st.save_descriptions(c, B, "JV", [{"field_id": "f1", "text": ""}, {"field_id": "f3", "text": ""}])
+rows = {r["field_id"]: r for r in csv.DictReader(io.StringIO(st.report_files(c, B)["names_report.csv"]))}
+check("the report carries the marker for a Fusion-driven field and not for the rest", rows["f1"]["description"].startswith(mk) and not rows["f3"]["description"].startswith("Fusion-driven"))
+c2 = c.execute("insert into automation_specs(automation_id, version_no, automation_name, base_id, target_scenario_name, spec_json) values ('aSync', 2, 'Order sync', ?, 'Order sync', '{}')", (B,)).lastrowid; c.commit()
+check("only the latest saved version counts: a version that no longer sets the field removes its marker", not D("f1")["fusion"] and not D("f1")["text"].startswith("Fusion-driven"))
+c.execute("delete from automation_field_refs"); c.execute("delete from automation_items"); c.execute("delete from automation_specs"); c.commit()   # the later checks are about groups, not markers
+
 # ---- consolidation groups (migration 009, proposed): several fields of one table become one
 c.executescript("DROP TABLE field_group_members; DROP TABLE field_groups;")      # the tables are in the schema now; drop them to test the not-applied path
 rv0 = st.review(c, B)

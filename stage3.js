@@ -569,16 +569,124 @@ async function runUsage() {
   setMsg("usageSummary", r.total ? r.total + " usage row(s): " + fields.size + " field(s) across " + autos.size + " automation(s)." + (r.truncated ? " Showing the first 2,000; the .csv has all of them." : "") : "No recorded automation matches. Record and save one above.", r.total ? "" : "warn");
 }
 
+/* ---------- field-writer matrix ---------- */
+const W = { data: null };
+const WRITER_CATEGORY = { formula_only: "Formula only", automation_only: "Automation only", mixed: "Automation and form", user_plain: "Plain data", system: "Filled by Airtable" };
+
+function writerVisible(e) {
+  const cat = $("wrCat").value, q = $("wrQ").value.trim().toLowerCase();
+  if (cat === "needs" ? !e.needs_decision : (cat && e.category !== cat)) return false;
+  if ($("wrFusion").checked && !e.fusion) return false;
+  return !q || [e.table_name, e.table_id, e.field_name, e.field_id].some((x) => String(x).toLowerCase().includes(q));
+}
+
+function writerDecisionCell(e, d) {
+  const opts = d.decisions[e.base_category];
+  if (!opts) return "";
+  if (!d.decisions_available) return e.needs_decision ? "Not decided (decisions need migration 019)" : "";
+  const sel = el("select", { "aria-label": "Decision for " + e.field_name }, el("option", { value: "", text: "Choose..." }), opts.map((o) => el("option", { value: o, text: d.decision_labels[o] || o })));
+  sel.value = e.decision ? e.decision.decision : "";
+  const save = el("button", { type: "button", text: e.decision ? "Change" : "Decide" });
+  save.addEventListener("click", () => {
+    if (!sel.value) { setMsg("writersMessage", "Choose a decision for " + e.table_name + "." + e.field_name + " first.", "err"); return; }
+    saveWriterDecision(e.field_id, sel.value, "Saved.");
+  });
+  const kids = [sel, save];
+  if (e.decision) {
+    const clr = el("button", { type: "button", text: "Clear" });
+    clr.addEventListener("click", () => saveWriterDecision(e.field_id, "clear", "Cleared."));
+    kids.push(clr);
+    kids.push(el("div", { class: "hint", text: "Decided by " + e.decision.decided_by + (e.decision.decided_at ? " on " + String(e.decision.decided_at).slice(0, 10) : "") }));
+  }
+  return el("div", {}, kids);
+}
+
+async function saveWriterDecision(fieldId, decision, done) {
+  const actor = $("wrActor").value.trim();
+  if (!actor) { setMsg("writersMessage", "Enter your initials before making a decision.", "err"); return; }
+  try {
+    W.data = await api("POST", "/api/field-writers/decide", { base_id: currentBase(), actor, items: [{ field_id: fieldId, decision }], reason: "set from the page" });
+    renderWriters();
+    setMsg("writersMessage", done, "ok");
+  } catch (e) { setMsg("writersMessage", e.message, "err"); }
+}
+
+function renderWriters() {
+  const d = W.data, tb = $("writersTable").querySelector("tbody");
+  clear(tb);
+  if (!d) { $("writersScroll").hidden = true; return; }
+  const rows = d.entries.filter(writerVisible);
+  for (const e of rows) {
+    const decision = writerDecisionCell(e, d);
+    tb.appendChild(el("tr", { class: e.needs_decision ? "undecided" : "" }, el("td", { text: e.table_name }), el("td", { text: e.table_id }), el("td", { text: e.field_name }), el("td", { text: e.field_id }), el("td", { text: e.data_type }),
+      el("td", { text: e.writers.form.join(", ") }), el("td", { text: e.writers.automation.map((a) => a.automation_name).join(", ") }),
+      el("td", { text: e.scenarios.join(", ") || (e.fusion ? "(not named yet)" : "") }), el("td", { text: WRITER_CATEGORY[e.category] || e.category }),
+      el("td", { class: "settings", text: e.marker || "" }), el("td", {}, decision), el("td", { text: e.anomalies.join("; ") })));
+  }
+  $("writersScroll").hidden = rows.length === 0;
+  applySort("writersTable");
+  const s = d.summary, c = s.categories;
+  setMsg("writersSummary", s.fields + " field(s): " + s.fusion_fields + " written by a Fusion scenario (marker needed), " + s.needs_decision + " still need a decision, " + c.formula_only + " formula-only, " + c.automation_only + " automation-only, " + c.mixed + " automation and form, " + c.user_plain + " plain data, " + c.system + " filled by Airtable." +
+    (s.unnamed_scenarios ? " " + s.unnamed_scenarios + " Fusion-written field(s) have no scenario name yet (set it in the automation above)." : "") + (s.anomalies ? " " + s.anomalies + " with a note to check." : "") +
+    (d.truncated ? " Showing the first 5,000; the .csv has all of them." : "") + " Showing " + rows.length + ".", s.needs_decision || s.anomalies ? "warn" : "ok");
+}
+
+async function loadWriters() {
+  const base = currentBase();
+  $("lnkWritersCsv").href = "/api/export/field_writers.csv?base_id=" + encodeURIComponent(base);
+  if (!base) { W.data = null; renderWriters(); setMsg("writersSummary", "Choose a base above first.", "warn"); return; }
+  W.data = await api("GET", "/api/field-writers?base_id=" + encodeURIComponent(base));
+  renderWriters();
+}
+
+const FINDING_LABEL = { missing_marker: "Marker missing", unexpected_marker: "Marker with no automation", unknown_marked_field: "Marked field not in the schema", scenario_mismatch: "Marker names another scenario", not_pulled: "Not in the file" };
+const V = { csv: "" };
+
+async function readFileBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function validateWriters() {
+  const base = currentBase(), f = $("wrPullFile").files[0], tb = $("wrValTable").querySelector("tbody");
+  clear(tb); $("wrValScroll").hidden = true; $("btnWrFindingsCsv").hidden = true;
+  if (!base) { setMsg("wrValSummary", "Choose a base above first.", "err"); return; }
+  if (!f) { setMsg("wrValSummary", "Choose a file of pulled descriptions first.", "err"); return; }
+  setMsg("wrValSummary", "Checking...", "");
+  const r = await api("POST", "/api/field-writers/validate", { base_id: base, csv_base64: await readFileBase64(f) });
+  V.csv = r.csv;
+  for (const x of r.findings) {
+    tb.appendChild(el("tr", { class: x.kind === "not_pulled" ? "" : "undecided" }, el("td", { text: x.system }), el("td", { text: FINDING_LABEL[x.kind] || x.kind }), el("td", { text: x.table_name || "" }),
+      el("td", { text: x.field_name || "" }), el("td", { text: x.field_id }), el("td", { text: x.detail })));
+  }
+  applySort("wrValTable");
+  $("wrValScroll").hidden = r.findings.length === 0;
+  $("btnWrFindingsCsv").hidden = r.total_findings === 0;
+  const c = r.counts, bad = r.total_findings - (c.not_pulled || 0);
+  setMsg("wrValSummary", (r.ok ? "Agrees with the matrix in both directions" : bad + " problem(s) found") + " for " + r.systems.join(" and ") + ": " + r.systems.map((s) => r.checked[s] + " of " + r.expected[s] + " expected " + s + " field(s) in the file").join("; ") + ". " +
+    r.rows_read + " row(s) read" + (r.unresolved_rows ? ", " + r.unresolved_rows + " with a Workfront ID that matches no field (not guessed)" : "") + (r.duplicate_rows ? ", " + r.duplicate_rows + " repeated (the first was used)" : "") +
+    (c.not_pulled ? "; " + c.not_pulled + " field(s) not in the file." : ".") + (r.truncated ? " Showing the first 2,000; the .csv has all of them." : ""), r.ok ? "ok" : "err");
+}
+
+function downloadFindings() {
+  const blob = new Blob(["\ufeff" + V.csv], { type: "text/csv;charset=utf-8" });
+  const a = el("a", { href: URL.createObjectURL(blob), download: "field_writer_findings.csv" });
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
 /* ---------- page wiring ---------- */
 function onReadyChange() {
   const on = state.ready;
-  for (const id of ["btnSave", "btnUsage", "btnNew"]) $(id).disabled = !on;
+  for (const id of ["btnSave", "btnUsage", "btnNew", "btnWriters", "btnWrValidate"]) $(id).disabled = !on;
   if (!on) $("btnOpen").disabled = true;
 }
 async function afterConnect() {
   await loadKnownBases();
   await loadSaved();
   await runUsage();
+  await loadWriters().catch(() => {});
 }
 const guarded = (fn) => async () => { try { await fn(); } catch (e) { showGlobalError(e.message); } };
 
@@ -597,6 +705,14 @@ startPage("stage3", { onReadyChange, afterConnect }, () => {
   $("repTarget").addEventListener("change", syncReportControls);
   $("btnRepPreview").addEventListener("click", previewRep);
   $("btnUsage").addEventListener("click", guarded(runUsage));
+  sortableTable("writersTable");
+  watchSort("usageTable");
+  $("btnWriters").addEventListener("click", guarded(loadWriters));
+  sortableTable("wrValTable");
+  $("btnWrValidate").addEventListener("click", guarded(validateWriters));
+  $("btnWrFindingsCsv").addEventListener("click", downloadFindings);
+  for (const id of ["wrCat", "wrFusion"]) $(id).addEventListener("change", renderWriters);
+  $("wrQ").addEventListener("input", renderWriters);
   $("useQ").addEventListener("keydown", (ev) => { if (ev.key === "Enter") guarded(runUsage)(); });
   window.addEventListener("beforeunload", (ev) => { if (S.dirty) { ev.preventDefault(); ev.returnValue = ""; } });
 });

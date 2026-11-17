@@ -428,6 +428,7 @@ CREATE TABLE load_id_map (
     temp_id TEXT NOT NULL,            -- for example P-T-tblXXXX, P-F-fldXXXX, C-F-fldXXXX, P-O-fldXXXX-selXXXX
     environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
     workspace_id TEXT,                -- the Planning Workspace these IDs belong to (NULL for Core)
+    workspace_key TEXT NOT NULL DEFAULT '' CHECK(workspace_key = COALESCE(workspace_id, '')),   -- part of the key: the Workspace ID, or '' for Core (migration 016)
     system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
     kind TEXT NOT NULL CHECK(kind IN ('record_type', 'form', 'field', 'option')),
     base_id TEXT NOT NULL,
@@ -442,7 +443,7 @@ CREATE TABLE load_id_map (
     last_error TEXT,                  -- a short message with any credential removed
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (temp_id, environment)
+    PRIMARY KEY (temp_id, environment, workspace_key)
 );
 CREATE INDEX idx_load_id_map_base ON load_id_map(base_id, environment);
 CREATE INDEX idx_load_id_map_field ON load_id_map(airtable_field_id);
@@ -482,6 +483,12 @@ CREATE TABLE field_relationships (
     reason TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    suggested_type TEXT CHECK(suggested_type IN ('one_to_many', 'many_to_one', 'one_to_one', 'many_to_many')),   -- what the tool proposed from the schema (migration 015)
+    relationship_type TEXT CHECK(relationship_type IN ('one_to_many', 'many_to_one', 'one_to_one', 'many_to_many')),   -- what a person chose; NULL until they do
+    tiebreaker TEXT CHECK(tiebreaker IN ('this_first', 'other_first', 'automatic')),   -- one_to_one / many_to_many only: which table loads first ('automatic' = the load order decides)
+    confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0, 1)),   -- 1 = a person confirmed the direction (approved_by and approved_at say who and when)
+    derived INTEGER NOT NULL DEFAULT 0 CHECK(derived IN (0, 1)),       -- 1 = an automatic pair the confirmed order already settles (the tool, not a person)
+    auto_set INTEGER NOT NULL DEFAULT 0 CHECK(auto_set IN (0, 1)),     -- 1 = set because its partner was chosen (shown as auto-set)
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id),
     FOREIGN KEY (from_table_id) REFERENCES airtable_tables(table_id),
     FOREIGN KEY (to_table_id) REFERENCES airtable_tables(table_id)
@@ -522,3 +529,113 @@ CREATE TABLE option_workfront_ids (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 CREATE INDEX idx_option_workfront_ids_wf ON option_workfront_ids(system, workfront_option_id);
+
+-- 16. The record ID map (migration 017)
+-- Every Airtable record gets ONE surrogate ID (an integer assigned in sorted order, so runs are repeatable: no random UUID), and everything
+-- else points to it. Holds IDs, statuses, file sizes and hashes ONLY: no record value, no file name, no link.
+-- 1. The registry: one row per Airtable record, the three IDs stored once.
+CREATE TABLE source_records (
+    source_record_uid INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    record_id TEXT NOT NULL,                  -- the Airtable record ID (recXXXX)
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (base_id, table_id, record_id),    -- the same record can never be registered twice
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_source_records_table ON source_records(base_id, table_id);
+
+-- 2. Target mappings: one row per target record. Consolidation (several source records into one target) and fan-out (one source into several
+-- targets) are just more rows against the same surrogate. workspace_key is the Planning Workspace ID, or '' for Core.
+CREATE TABLE target_mappings (
+    mapping_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_record_uid INTEGER NOT NULL,
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_key TEXT NOT NULL DEFAULT '',
+    target_kind TEXT NOT NULL,                -- for example 'record' (Planning) or 'project', 'request', 'task' (Core)
+    target_record_id TEXT NOT NULL,           -- the new Workfront ID
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source_record_uid, system, environment, workspace_key, target_record_id),
+    FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
+);
+CREATE INDEX idx_target_mappings_target ON target_mappings(system, environment, target_record_id);
+
+-- 3. Pass-completed markers: a restart reads these to know what is done and never repeats it. One row per record, pass and stage.
+CREATE TABLE record_pass_markers (
+    source_record_uid INTEGER NOT NULL,
+    pass TEXT NOT NULL CHECK(pass IN ('records', 'links', 'attachments', 'core_backfill')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_key TEXT NOT NULL DEFAULT '',
+    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_record_uid, pass, environment, workspace_key),
+    FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
+);
+
+-- 4. Attachment rows: each Airtable attachment ID paired with the Core document ID, so a rerun does not upload a file twice. Airtable returns no
+-- checksum, so the hash is of the file the tool downloaded (it proves the transfer and upload, not a match with the source); the API-reported size
+-- is the second check. No file name and no link is stored (links expire and are not secret-free).
+CREATE TABLE attachment_map (
+    attachment_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_record_uid INTEGER NOT NULL,
+    airtable_field_id TEXT NOT NULL,
+    airtable_attachment_id TEXT NOT NULL,     -- attXXXX
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    core_document_id TEXT,                    -- NULL until the upload returns
+    api_size_bytes INTEGER,                   -- the size Airtable reported
+    downloaded_bytes INTEGER,                 -- the size of the file as downloaded
+    sha256 TEXT,                              -- hash of the downloaded file
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'downloaded', 'uploaded', 'failed')),
+    last_error TEXT,                          -- a short message with any credential removed
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source_record_uid, airtable_field_id, airtable_attachment_id, environment),
+    FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
+);
+
+-- 17. The history of link direction decisions (migration 018)
+-- field_relationships keeps only the latest decision, so every confirm, change, clear and auto-set is also appended here: who, when, why and the old
+-- and new choice. Append-only. Field IDs and choices only: no record value.
+CREATE TABLE link_direction_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    airtable_field_id TEXT NOT NULL,              -- the link field the event is about
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('confirm', 'change', 'clear', 'auto_set')),   -- auto_set = the partner of a field a person chose on
+    old_relationship_type TEXT,                   -- NULL when there was no decision before
+    old_tiebreaker TEXT,
+    new_relationship_type TEXT,                   -- NULL after a clear
+    new_tiebreaker TEXT,
+    actor TEXT NOT NULL,                          -- initials or a short name (the app has no logins)
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_link_direction_events_field ON link_direction_events(airtable_field_id, event_id);
+
+-- 18. Field-writer decisions and their history (migration 019)
+-- The matrix of who fills each field is computed each time; what a person DECIDES about a formula-only or automation-only field is kept here (who,
+-- when, why), with an append-only history. Field IDs and choices only: no record value.
+CREATE TABLE field_writer_decisions (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('recompute', 'park', 'fusion_owned', 'go_stale', 'users_also_edit')),
+    decided_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_writer_decisions_base ON field_writer_decisions(base_id);
+
+-- Append-only history, so a changed or cleared decision does not lose what it was (the lesson of migration 018).
+CREATE TABLE field_writer_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    airtable_field_id TEXT NOT NULL,
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('decide', 'change', 'clear')),
+    old_decision TEXT,                           -- NULL when there was none before
+    new_decision TEXT,                           -- NULL after a clear
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_writer_events_field ON field_writer_events(airtable_field_id, event_id);

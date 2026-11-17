@@ -17,9 +17,11 @@ import argparse, csv, io, os, pathlib, sqlite3, sys
 
 import fieldnames_io as fio
 import fieldnames_store as store
+import linkdirections as ld
 import loadconfig as lc
 import loadplan as lp
 import loadrun as lr
+import loadstate as ls
 
 PLAN_COLUMNS = ["temp_id", "system", "kind", "parent", "group", "table_id", "airtable_field_id", "name", "label", "data_type", "position", "status", "reasons", "source", "description"]
 
@@ -46,6 +48,8 @@ def summary_text(plan, base_id, title="Load plan"):
     L += ["", "By system, kind and status:"] + ["  %s: %d" % (k, v) for k, v in s["by_system_kind_status"].items()]
     if s["reasons"]:
         L += ["", "Why items are not ready (count of items):"] + ["  %d x %s" % (v, k) for k, v in s["reasons"].items()]
+    if s.get("limit_findings"):
+        L += ["", "Workfront Planning limits (documented, not yet tested; a person decides, nothing changes on its own):"] + ["  %s: %s" % (f["scope"], f["detail"]) for f in s["limit_findings"]]
     L += ["", "Tables out of scope (skipped): %d" % s["out_of_scope_tables"], "",
           "Nothing was sent to Workfront. Creating items is not implemented yet (docs/LOADER_PLAN.md)."]
     return "\n".join(L) + "\n"
@@ -70,6 +74,14 @@ def _write(out, name, text):
         f.write(text)
 
 
+class _Known(lr.MemoryState):
+    """What the database already holds as created, for a dry run (nothing is written)."""
+    def __init__(self, env_name, created):
+        lr.MemoryState.__init__(self)
+        for tid, wid in sorted(created.items()):
+            self.ids[(tid, env_name)] = wid
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build the migration load plan and dry-run it (read-only; nothing is sent to Workfront).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -82,7 +94,7 @@ def main(argv=None):
         p.add_argument("--out", default="out/loader")
         p.add_argument("--no-link-fields", action="store_true", help="leave out the fields that link a Core object to its Planning record")
         if name != "plan":
-            p.add_argument("--env", default="sandbox1", choices=lr.CORE_ENVIRONMENTS, help="the Core environment (default: sandbox1)")
+            p.add_argument("--env", default="sandbox1", choices=lr.ENVIRONMENTS, help="the environment or stage label (default: sandbox1; dev and uat are the Planning stages)")
     a = ap.parse_args(argv)
     if a.cmd == "config":
         try:
@@ -99,11 +111,15 @@ def main(argv=None):
     conn = _open(a.db)
     try:
         inputs = store.loader_inputs(conn, a.base)
+        inputs["link_state"] = ld.field_states(conn)
+        saved = ls.DbState(conn, a.base) if ls.available(conn) else None     # read only here: a dry run only LOOKS at what is already created
+        pending = saved.pending(a.env) if (saved is not None and a.cmd != "plan") else []
+        done_ids = {} if saved is None or a.cmd == "plan" else {r[0]: r[1] for r in conn.execute("SELECT temp_id, workfront_id FROM load_id_map WHERE environment=? AND base_id=? AND status='created'", (a.env, a.base))}
     except store.StoreError as e:
         sys.exit(e.message)
     finally:
         conn.close()
-    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields)
+    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"))
     _write(a.out, "load_plan.csv", plan_csv(plan))
     text = summary_text(plan, a.base)
     if a.cmd == "plan":
@@ -111,9 +127,11 @@ def main(argv=None):
         print(text + "Reports written to %s" % a.out)
         return plan
     env = lr.resolve_environment(a.env, None, dry_run=True)
-    res = lr.run_plan(plan["items"], lr.MemoryState(), {"planning": lr.DryRunTransport("planning"), "core": lr.DryRunTransport("core")}, env, dry_run=True)
+    res = lr.run_plan(plan["items"], _Known(env.name, done_ids), {"planning": lr.DryRunTransport("planning"), "core": lr.DryRunTransport("core")}, env, dry_run=True)
     _write(a.out, "load_dry_run.csv", dry_run_csv(res))
     lines = ["Dry run in %s (nothing was sent)" % env.name.upper(), ""] + ["  %-16s %d" % (k, v) for k, v in sorted(res["counts"].items())]
+    if pending:
+        lines += ["", "%d item(s) were started by an earlier run and never finished; a real run will try them again: %s" % (len(pending), ", ".join(pending[:10]) + (" ..." if len(pending) > 10 else ""))]
     _write(a.out, "load_dry_run_summary.txt", "\n".join(lines) + "\n\n" + text)
     print("\n".join(lines) + "\n\nReports written to %s" % a.out)
     return res

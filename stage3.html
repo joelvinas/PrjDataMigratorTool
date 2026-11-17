@@ -130,7 +130,49 @@
   <div id="usageSummary" class="msg"></div>
   <div class="scroll" id="usageScroll" hidden>
     <table class="grid compact" id="usageTable">
-      <thead><tr><th>Field</th><th>Table</th><th>Automation</th><th class="num">Ver.</th><th>Role</th><th>Step</th><th>Detail</th><th>Workfront DEV</th><th>Workfront PROD</th></tr></thead>
+      <thead data-sort="text"><tr><th>Field</th><th data-sort="text">Table</th><th data-sort="text">Automation</th><th class="num" data-sort="num">Ver.</th><th data-sort="text">Role</th><th data-sort="text">Step</th><th>Detail</th><th>Workfront DEV</th><th>Workfront PROD</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- E: field-writer matrix -->
+<section class="card" id="writersCard">
+  <h2><span class="num">E</span> Who fills each field?</h2>
+  <p class="hint">For each field of the base chosen above: who fills its values day to day. It is built from the latest saved version of each automation and form recorded here, and from the field's own type. A person typing into a field cannot be read from those records, so it is only ever shown as possible. A field carries the <strong>Fusion-driven</strong> marker if, and only if, a recorded automation <em>sets</em> it (a field only read or tested in a condition does not); Fusion is the only automation engine in the target. The outcome says what still needs a decision: a formula, lookup or rollup is recomputed in the target or parked; a field only an automation fills becomes Fusion-owned, goes stale, or is also edited by people. The page shows field and automation names only, no record values.</p>
+  <div class="row">
+    <label for="wrCat">Outcome</label>
+    <select id="wrCat"><option value="">All</option><option value="needs">Needs a decision</option><option value="formula_only">Formula only</option><option value="automation_only">Automation only</option><option value="mixed">Automation and form</option><option value="user_plain">Plain data</option><option value="system">Filled by Airtable</option></select>
+    <label><input id="wrFusion" type="checkbox"> Only fields a Fusion scenario writes</label>
+    <input id="wrQ" type="text" placeholder="Search table, field or ID" autocomplete="off">
+    <button id="btnWriters" type="button">Build the matrix</button>
+    <a id="lnkWritersCsv" class="btnlink" href="#">Download .csv</a>
+  </div>
+  <div class="row">
+    <label for="wrActor">Your initials</label>
+    <input id="wrActor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+    <span class="hint">needed to record a decision (who, when and why are kept)</span>
+  </div>
+  <div id="writersSummary" class="msg"></div>
+  <div id="writersMessage" class="msg"></div>
+  <div class="scroll" id="writersScroll" hidden>
+    <table class="grid compact" id="writersTable">
+      <thead><tr><th data-sort="text">Table</th><th data-sort="text">Table ID</th><th data-sort="text">Field</th><th data-sort="text">Field ID</th><th data-sort="text">Type</th><th data-sort="text">Form</th><th data-sort="text">Set by automation</th><th data-sort="text">Fusion scenario</th><th data-sort="text">Outcome</th><th>Marker</th><th>Decision</th><th>Notes</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <h3>Check the descriptions pulled from Workfront</h3>
+  <p class="hint">Compares the matrix with the field descriptions as they stand in Workfront Core and Workfront Planning, in both directions, so the two cannot drift apart: every field a recorded automation sets must carry the <strong>Fusion-driven</strong> marker, and every marked field must trace back to a recorded automation. Upload a <code>.csv</code> (or <code>.json</code>) with the columns <code>system</code> (<code>core</code> or <code>planning</code>), <code>description</code>, and either <code>field_id</code> (the Airtable field ID) or <code>workfront_id</code> (matched through the load ID map). Only the systems in the file are checked. Nothing is stored and no description is shown back: the page lists field names, IDs and one sentence per finding. A field missing from the file is counted as not pulled, not as a failure.</p>
+  <div class="row">
+    <input id="wrPullFile" type="file" accept=".csv,.json,text/csv,application/json" aria-label="File of pulled descriptions">
+    <button id="btnWrValidate" type="button">Check the descriptions</button>
+    <button id="btnWrFindingsCsv" type="button" hidden>Download findings .csv</button>
+  </div>
+  <div id="wrValSummary" class="msg"></div>
+  <div class="scroll" id="wrValScroll" hidden>
+    <table class="grid compact" id="wrValTable">
+      <thead><tr><th data-sort="text">System</th><th data-sort="text">Finding</th><th data-sort="text">Table</th><th data-sort="text">Field</th><th data-sort="text">Field ID</th><th>What is wrong</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>

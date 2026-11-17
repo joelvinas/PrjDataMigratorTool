@@ -65,7 +65,7 @@ async function loadSchema() {
 function fillScopeSelectors() {
   const sb = $("scopeBase"), st = $("scopeTable"), rb = $("resBase"), rt = $("resTable"), cb = $("csvBase");
   const eb = $("exBase");
-  const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [st.value, rt.value];
+  const keepB = [sb.value, rb.value, cb.value, eb.value], keepT = [Array.from(st.selectedOptions).map((o) => o.value), rt.value];
   for (const n of [sb, rb, cb, eb]) { clear(n); if (n !== sb) n.appendChild(el("option", { value: "", text: "All bases" })); }
   for (const n of [st, rt]) { clear(n); if (n === rt) n.appendChild(el("option", { value: "", text: "All tables" })); }
   refreshBaseChoices();
@@ -77,13 +77,13 @@ function fillScopeSelectors() {
       for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: baseLabel(b.base_id) + " / " + t.table_name }));
     }
   }
-  sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; st.value = keepT[0]; rt.value = keepT[1];
+  sb.value = keepB[0]; rb.value = keepB[1]; cb.value = keepB[2]; eb.value = keepB[3]; Array.from(st.options).forEach((o) => { o.selected = keepT[0].includes(o.value); }); rt.value = keepT[1];
   updateScopeVisibility();
 }
 function updateScopeVisibility() {
   const s = $("scope").value;
   $("scopeBase").hidden = s !== "base";
-  $("scopeTable").hidden = s !== "table";
+  $("rowScopeTable").hidden = s !== "tables";
 }
 
 /* ---------- step 4: dependency graph ---------- */
@@ -92,6 +92,7 @@ function note(kind, title, items) {
 }
 
 const MODE_HELP = {
+  confirmed: "Confirmed link directions: each link pair follows the direction a person confirmed above. A pair that is still undecided keeps its literal edges, so the order is provisional until every pair is decided. Automatic pairs never bind the order: they are settled by the other decisions, or flagged when the tool had to choose.",
   literal: "Literal: every link field counts as a dependency, exactly as Airtable defines it. Airtable creates a link on both tables for each relationship, so linked tables usually depend on each other and end up in cycles that load together, with a second pass to fill in the links. Pick this to see the worst case or to check the other mode against it.",
   collapse: "Resolve two-way link pairs: for each pair of linked fields that point at each other, if exactly one side is set to allow a single linked record, that table is the child and only its field is a dependency; the other side is just the reverse view. Many-to-many pairs, and pairs with no hint, stay as cycles. Pick this for the load plan: it gives the fewest cycles that are still correct.",
 };
@@ -116,7 +117,7 @@ function graphSvgText() {
 }
 function graphFileName(ext) {
   const d = new Date(), p = (n) => String(n).padStart(2, "0");
-  return "DependencyGraph_" + ($("depMode").value === "literal" ? "Literal" : "Resolve") + "_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + "." + ext;
+  return "DependencyGraph_" + ({ literal: "Literal", collapse: "Resolve", confirmed: "Confirmed" }[$("depMode").value] || "Order") + "_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + "." + ext;
 }
 function saveBlob(blob, name) {
   const a = document.createElement("a");
@@ -155,6 +156,93 @@ async function recompute() {
   } catch (e) { setMsg("depMessage", e.message, "err"); }
 }
 
+/* ---------- link directions ---------- */
+const LINK_TYPES = [["one_to_many", "One to many: this table loads first"], ["many_to_one", "Many to one: the other table loads first"], ["one_to_one", "One to one"], ["many_to_many", "Many to many"]];
+const LINK_TIES = [["automatic", "Automatic (the load order decides)"], ["this_first", "This table first"], ["other_first", "The other table first"]];
+const linkLabel = (v) => (LINK_TYPES.find((t) => t[0] === v) || [0, v || ""])[1].split(":")[0];
+
+async function loadLinkDirections(sync) {
+  let r;
+  try { r = sync ? await api("POST", "/api/links/directions/sync", {}) : await api("GET", "/api/links/directions"); }
+  catch (e) { setMsg("linkMessage", e.message, "err"); return; }
+  renderLinkDirections(r);
+}
+
+function linkStatus(f) {
+  if (f.confirmed && f.auto_set) return "Auto-set from its pair" + (f.decided_by ? " (" + f.decided_by + ")" : "");
+  if (f.confirmed) return "Confirmed by " + (f.decided_by || "?") + (f.decided_at ? " on " + f.decided_at.slice(0, 10) : "");
+  return "Undecided";
+}
+
+function renderLinkDirections(r) {
+  const sum = $("linkSummary"), tbl = $("linkTable"), body = tbl.querySelector("tbody");
+  clear(sum); clear(body);
+  tbl._data = r;
+  if (!r.available) { sum.appendChild(note("info", r.message || "Link directions are not available on this database.")); tbl.hidden = true; return; }
+  const c = r.counts;
+  if (!c.pairs) { sum.appendChild(note("info", "No link pairs between in-scope tables yet. Ingest the schema, then click \"Detect link pairs\".")); tbl.hidden = true; return; }
+  const caps = $("linkCaps"); clear(caps);
+  const hot = (r.connection_counts || []).filter((x) => x.status !== "ok");
+  const top = (r.connection_counts || []).slice(0, 3).map((x) => x.table_name + " " + x.links);
+  caps.appendChild(note(hot.some((x) => x.status === "over") ? "err" : hot.length ? "warn" : "info",
+    "Connection fields per table (Planning allows " + r.connection_cap + " per record type): " + (hot.length ? hot.map((x) => x.table_name + " has " + x.links + (x.status === "over" ? ", over the cap" : ", close to the cap")).join("; ") : "none is near the cap" + (top.length ? " (most: " + top.join(", ") + ")" : "")) +
+    ". Each side of a two-way pair counts on its own table. Whether a back reference also uses an extra slot is unknown and cannot be tested without a table of about 31 links, so none is assumed."));
+  sum.appendChild(note(c.undecided ? "warn" : "ok", c.pairs + " link relationship(s) (" + c.two_way + " two-way, " + c.one_way + " one-way): " + c.undecided + " undecided, " + c.confirmed + " confirmed, " + c.automatic + " automatic." +
+    (c.ambiguous ? " " + c.ambiguous + " ambiguous pair(s) that the schema cannot orient (one to one or many to many: " + Object.entries(c.ambiguous_by_type || {}).map((kv) => kv[1] + " " + kv[0].replace(/_/g, " ")).join(", ") + "), " + c.ambiguous_undecided + " still need a tiebreaker." : " No pair is ambiguous.") +
+    (c.undecided ? " The load order is provisional and the schema build is blocked until every one is decided." : " Every direction is decided; recompute the load order to use them.")));
+  for (const u of r.pairs) {
+    for (const f of u.fields) {
+      const typeSel = el("select", { "aria-label": "Direction for " + f.field_name }, el("option", { value: "", text: "Choose..." }), LINK_TYPES.map((t) => el("option", { value: t[0], text: t[1] })));
+      const tieSel = el("select", { "aria-label": "Tiebreaker for " + f.field_name }, LINK_TIES.map((t) => el("option", { value: t[0], text: t[1] })));
+      typeSel.value = f.relationship_type || "";
+      tieSel.value = f.tiebreaker || "automatic";
+      const needTie = () => { tieSel.disabled = !(typeSel.value === "one_to_one" || typeSel.value === "many_to_many"); };
+      typeSel.addEventListener("change", needTie);
+      needTie();
+      const save = el("button", { type: "button", text: f.confirmed ? "Change" : "Confirm" });
+      save.addEventListener("click", () => {
+        if (!typeSel.value) { setMsg("linkMessage", "Choose a direction for " + f.table_name + "." + f.field_name + " first.", "err"); return; }
+        saveLink([{ field_id: f.field_id, relationship_type: typeSel.value, tiebreaker: tieSel.disabled ? null : tieSel.value }], "set from the page", "Saved.");
+      });
+      const kids = [save];
+      if (f.confirmed) {
+        const clr = el("button", { type: "button", text: "Clear" });
+        clr.addEventListener("click", () => saveLink([{ field_id: f.field_id, relationship_type: "clear" }], "cleared from the page", "Cleared."));
+        kids.push(clr);
+      }
+      body.appendChild(el("tr", { class: f.confirmed ? "" : "undecided" }, el("td", { text: f.table_name + "." + f.field_name }), el("td", { text: f.linked_table_name }),
+        el("td", { text: f.partner_field_name ? f.linked_table_name + "." + f.partner_field_name : "(one-way: no paired field)" }),
+        el("td", { text: linkLabel(f.suggested_type) }), el("td", {}, typeSel), el("td", {}, tieSel), el("td", { text: linkStatus(f) }), el("td", {}, kids)));
+    }
+  }
+  tbl.hidden = false;
+  applySort("linkTable");
+}
+
+async function saveLink(items, reason, done) {
+  const actor = $("linkActor").value.trim();
+  if (!actor) { setMsg("linkMessage", "Enter your initials before making a decision.", "err"); return; }
+  try {
+    const r = await api("POST", "/api/links/directions/decide", { actor, items, reason });
+    renderLinkDirections(r);
+    setMsg("linkMessage", done + " Recompute the load order to apply it.", "ok");
+    await loadDepgraph();
+  } catch (e) { setMsg("linkMessage", e.message, "err"); }
+}
+
+async function acceptSuggestions() {
+  const r0 = $("linkTable")._data;
+  if (!r0 || !r0.pairs) return;
+  const items = [];
+  for (const u of r0.pairs) {
+    if (u.status !== "undecided") continue;
+    const pick = u.fields.find((x) => x.suggested_type === "many_to_one") || u.fields.find((x) => x.suggested_type === "one_to_many");
+    if (pick) items.push({ field_id: pick.field_id, relationship_type: pick.suggested_type });
+  }
+  if (!items.length) { setMsg("linkMessage", "Nothing to confirm: every remaining pair is one to one or many to many and needs your tiebreaker.", "warn"); return; }
+  await saveLink(items, "suggestion accepted from the page", items.length + " suggestion(s) confirmed.");
+}
+
 async function loadDepgraph() {
   const g = await api("GET", "/api/depgraph?mode=" + encodeURIComponent($("depMode").value));
   const notes = $("depNotes");
@@ -173,7 +261,13 @@ async function loadDepgraph() {
     if (g.mode === "literal") notes.appendChild(note("warn", g.inverse_pairs.length + " two-way link pair(s) found (a link field and its inverse). Literal mode counts each pair as a 2-table cycle. If these are just Airtable's automatic inverse fields, switch to \"Resolve two-way link pairs\".", lines));
     else notes.appendChild(note("info", g.inverse_pairs.length + " two-way link pair(s). Where exactly one side is a single-record link, that side's table is ordered as the child. The rest add no ordering; populate their links in a second pass, after both tables' records exist.", lines));
   }
+  const dr = g.directions || {};
+  if (dr.available && dr.undecided) notes.appendChild(note("warn", "This load order is provisional: " + dr.undecided + " of " + dr.pairs + " link pair(s) have no confirmed direction (see Link directions above). The schema build stays blocked until each is decided."));
+  if ((dr.automatic_chosen || []).length) notes.appendChild(note("warn", "Automatic pairs where nothing else settles the order: the tool picked one (the table that sorts first loads first). Confirm or change each.", dr.automatic_chosen.map((a) => a.table + " (" + a.fields.join(" / ") + ")")));
+  if ((dr.automatic_loops || []).length) notes.appendChild(note("err", "Automatic pairs that form a loop no decided direction breaks: a person must choose a direction on one of them", dr.automatic_loops.map((a) => a.fields.join(" / "))));
   if (g.self_links.length) notes.appendChild(note("info", "Self-links (ignored for ordering)", g.self_links.map((s) => s.table_name + "." + s.field_name)));
+  if (g.out_of_scope_tables) notes.appendChild(note("info", g.out_of_scope_tables + " table(s) marked out of scope take no part in this order (scope is decided on the Field names page)."));
+  if ((g.out_of_scope_links || []).length) notes.appendChild(note("warn", "Links to tables that are out of scope: a person decides whether to bring the table in or drop the field", g.out_of_scope_links.map((o) => o.table_name + "." + o.field_name + " → " + o.linked_table_name)));
   if (g.unresolved_links.length) notes.appendChild(note("warn", "Links to tables that are not in the database (ingest the other base?)", g.unresolved_links.map((u) => u.table_name + "." + u.field_name + " → " + u.linked_table_id)));
 
   const selfTables = new Set(g.self_links.map((s) => s.table_id));
@@ -185,6 +279,7 @@ async function loadDepgraph() {
       el("td", { class: "num", text: m.dependency_depth }), el("td", { text: m.parent_table_ids.map((p) => names[p] || p).join(", ") }), el("td", { text: flags })));
   });
   t.hidden = g.stored_matrix.length === 0;
+  applySort("orderTable");
   drawGraph(g, selfTables);
 }
 
@@ -290,7 +385,9 @@ async function startProfile() {
   setMsg("profMessage", "Starting...", "");
   try {
     const scope = $("scope").value;
-    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_id: $("scopeTable").value, cap: $("cap").value, save_records: $("saveRecords").checked, download_attachments: $("saveRecords").checked && $("downloadFiles").checked });
+    const tableIds = Array.from($("scopeTable").selectedOptions).map((o) => o.value);
+    if (scope === "tables" && !tableIds.length) throw new Error("Choose at least one table (hold Ctrl or Shift to choose several).");
+    await api("POST", "/api/profile/start", { scope, base_id: $("scopeBase").value, table_ids: tableIds, cap: $("cap").value, save_records: $("saveRecords").checked, download_attachments: $("saveRecords").checked && $("downloadFiles").checked });
     setMsg("profMessage", "", "");
     await loadProfileStatus(false);
   } catch (e) { setMsg("profMessage", e.message, "err"); }
@@ -368,7 +465,7 @@ async function loadExtractFiles() {
     const bad = f.check.startsWith("differs");
     body.appendChild(el("tr", {}, el("td", { text: f.base_id + " / " + f.table_name }), el("td", { class: "num", text: fmt(f.record_count) }), el("td", { class: "num", text: fmt(f.fields) }),
       el("td", { class: "num", text: fmtBytes(f.bytes) }),
-      el("td", { class: "num", text: f.attachments ? fmt(f.attachments.files) + " (" + fmtBytes(f.attachments.bytes) + ")" + (f.attachments.failed ? ", " + f.attachments.failed + " failed" : "") : "" }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }),
+      el("td", { class: "num", text: f.attachments ? fmt(f.attachments.files) + " (" + fmtBytes(f.attachments.bytes) + ")" + (f.attachments.failed ? ", " + f.attachments.failed + " failed" : "") : "" }), el("td", { text: f.captured_at.replace("T", " ").replace("Z", "") }), el("td", {}, ageTag(f.captured_at)),
       el("td", {}, el("span", { class: "tag " + (bad ? "cap" : f.check === "matches profile" ? "done" : ""), text: f.check })), el("td", {}, el("code", { text: f.sha256.slice(0, 12) }))));
   });
   t.hidden = d.files.length === 0;
@@ -386,6 +483,42 @@ async function loadAttachmentStats() {
   fill("attTypeTable", d.by_type.map((r) => [el("td", { text: r.extension }), el("td", { class: "num", text: fmt(r.files) }), el("td", { class: "num", text: fmtBytes(r.bytes) }), el("td", { class: "num", text: fmtBytes(r.max_bytes) })]));
   fill("attTableTable", d.by_table.map((r) => [el("td", { text: r.base_id + " / " + r.table_name }), el("td", { class: "num", text: fmt(r.files) }), el("td", { class: "num", text: fmtBytes(r.bytes) }), el("td", { class: "num", text: fmtBytes(r.max_bytes) })]));
   $("lnkAttCsv").href = "/api/export/attachment_stats.csv" + q;
+}
+
+async function checkSelectValues() {
+  const base = $("resBase").value;
+  const t = $("svTable"), body = t.querySelector("tbody"), sk = $("svSkipped");
+  clear(body); clear(sk); t.hidden = true;
+  if (!base) { setMsg("svSummary", "Choose a base in step 5 (Results) first.", "err"); return; }
+  const d = await api("POST", "/api/select-values", { base_id: base });
+  d.tables.forEach((tb) => tb.fields.forEach((f) => {
+    const ex = f.unmatched.map((u) => u.label + ": " + u.records + " record(s) " + u.examples.join(", ") + (u.near_match_option ? " (near match: " + u.near_match_option + ")" : "")).join("; ");
+    body.appendChild(el("tr", {}, el("td", {}, tb.table_name, ageTag(tb.captured_at)), el("td", { text: f.field_name }), el("td", { class: "num", text: fmt(f.declared_options) }), el("td", { class: "num", text: fmt(f.records_total) }), el("td", { class: "num", text: fmt(f.records_total - f.records_with_value) }), el("td", { class: "num", text: fmt(f.observed_values) }),
+      el("td", { class: "num" }, f.unmatched_values ? el("span", { class: "tag cap", text: fmt(f.unmatched_values) }) : "0"), el("td", { class: "num", text: fmt(f.unmatched_records) }), el("td", { class: "num", text: fmt(f.near_matches) }),
+      el("td", { text: f.unused_options.join(", ") }), el("td", { text: ex })));
+  }));
+  t.hidden = d.totals.fields === 0;
+  const T = d.totals;
+  setMsg("svSummary", T.fields + " select field(s) checked: " + T.fields_with_unmatched + " hold values that are not declared options (" + fmt(T.unmatched_values) + " value(s) in " + fmt(T.unmatched_records) + " record(s); " + fmt(T.near_matches) + " near match(es))." +
+    (T.tables_not_checked ? " " + T.tables_not_checked + " table(s) not checked (no usable saved file)." : ""), T.fields_with_unmatched ? "err" : "");
+  d.not_checked.forEach((n) => sk.appendChild(el("p", { class: "hint", text: "Not checked: " + n.table_name + ". " + n.reason })));
+  d.tables.forEach((tb) => tb.notes.forEach((n) => sk.appendChild(el("p", { class: "hint", text: tb.table_name + ": " + n }))));
+}
+
+async function registerRecords() {
+  const base = $("resBase").value;
+  const t = $("regTable"), body = t.querySelector("tbody"), sk = $("regSkipped");
+  clear(body); clear(sk); t.hidden = true;
+  if (!base) { setMsg("regSummary", "Choose a base in step 5 (Results) first.", "err"); return; }
+  setMsg("regSummary", "Working...", "");
+  const d = await api("POST", "/api/records/register", { base_id: base });
+  d.tables.forEach((r) => body.appendChild(el("tr", {}, el("td", { "data-sort": r.table_name }, r.table_name, ageTag(r.captured_at)), el("td", { text: r.table_id }), el("td", { class: "num", "data-sort": r.total, text: fmt(r.total) }), el("td", { class: "num", text: fmt(r.new) }),
+    el("td", { class: "num", text: fmt(r.already) }), el("td", { class: "num", text: fmt(r.skipped_invalid) }))));
+  t.hidden = d.tables.length === 0;
+  applySort("regTable");
+  setMsg("regSummary", d.tables.length + " table(s) registered: " + fmt(d.totals.new) + " new record(s), " + fmt(d.totals.already) + " already registered. " + fmt(d.registered_total) + " record(s) registered for this base in all." +
+    (d.not_registered.length ? " " + d.not_registered.length + " table(s) not registered (no usable saved file)." : ""), d.not_registered.length ? "warn" : "ok");
+  d.not_registered.forEach((n) => sk.appendChild(el("p", { class: "hint", text: "Not registered: " + n.table_name + ". " + n.reason })));
 }
 
 async function loadResults() {
@@ -414,7 +547,7 @@ function onReadyChange() {
 }
 
 async function afterConnect() {
-  await Promise.all([loadSchema(), loadDepgraph(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
+  await Promise.all([loadSchema(), loadLinkDirections(false), loadDepgraph(), loadRunbook(), loadProfileStatus(true), loadExtractFiles(), loadAttachmentStats()]);
 }
 
 startPage("stage1", { onReadyChange, afterConnect }, () => {
@@ -428,7 +561,11 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   });
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
+  for (const id of ["linkTable", "regTable", "orderTable"]) sortableTable(id);
+  for (const id of ["resultsTable", "exFilesTable", "svTable", "attTypeTable", "attTableTable"]) watchSort(id);
   $("btnRecompute").addEventListener("click", recompute);
+  $("btnLinkRefresh").addEventListener("click", guard(() => loadLinkDirections(true)));
+  $("btnLinkAccept").addEventListener("click", guard(acceptSuggestions));
   $("depMode").addEventListener("change", () => { syncReportLinks(); loadDepgraph().catch((e) => showGlobalError(e.message)); });
   $("btnReportPreview").addEventListener("click", previewReport);
   for (const id of ["lnkMhtml", "lnkHtml"]) $(id).addEventListener("click", () => setMsg("reportMessage", "Report downloaded.", "ok"));
@@ -452,6 +589,8 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   $("saveRecords").addEventListener("change", syncSave);
   $("downloadFiles").addEventListener("change", syncSave);
   $("btnResults").addEventListener("click", guard(loadResults));
+  $("btnSelectValues").addEventListener("click", guard(checkSelectValues));
+  $("btnRegister").addEventListener("click", guard(registerRecords));
   initBaseCombo();
   $("resBase").addEventListener("change", syncReportLinks);
   $("csvBase").addEventListener("change", syncReportLinks);

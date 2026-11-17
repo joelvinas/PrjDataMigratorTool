@@ -125,6 +125,13 @@ s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNb0000000001",
 check("a table can be taken out of scope with a reason; it is skipped and its links are flagged", s_ == 200 and r["review"]["scope_counts"]["out"] == 1
       and {(w["field_id"], w["kind"]) for w in r["review"]["scope_warnings"]} == {("fldN06", "link"), ("fldN07", "link")}, r.get("error") or r["review"]["scope_counts"])
 check("the out table has no fields in the review and no name decision", all(f["table_id"] != "tblNb0000000001" for f in r["review"]["fields"]))
+gs_, g = post("/api/depgraph/recompute", {"mode": "literal"})
+gm = [m for m in g["matrix"] if m["base_id"] == BASE]
+check("load order: an out-of-scope table takes no part in the order", gs_ == 200 and "tblNb0000000001" not in {m["table_id"] for m in gm} and {"tblNa0000000001", "tblNc0000000001"} <= {m["table_id"] for m in gm}, [m["table_id"] for m in gm])
+check("load order: a link to an out-of-scope table is listed for a person, not ordered or called unresolved",
+      [(o["field_id"], o["linked_table_name"]) for o in g["out_of_scope_links"] if o["table_id"] == "tblNa0000000001"] == [("fldN06", "PO#s")] and not [u for u in g["unresolved_links"] if u["table_name"] == "Orders"]
+      and not any(e["parent"] == "tblNb0000000001" for e in g["edges"]) and g["out_of_scope_tables"] >= 1, g["out_of_scope_links"])
+check("load order: the link field is classified, with a second pass of False", any(l["field_id"] == "fldN06" and l["treatment"] == "Links to an out-of-scope table" and not l["second_pass"] for l in g["link_fields"]))
 s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNb0000000001", "decision": "clear"}])); check("clearing returns it to undecided", s_ == 200 and r["review"]["scope_counts"]["out"] == 0 and not r["review"]["scope_warnings"])
 s_, r = post("/api/names/tables/scope", A(items=[{"table_id": "tblNa0000000001", "decision": "in", "target": "planning_and_core", "reason": "has attachments"}]))
 check("a table can be in scope and land in Planning plus Core", s_ == 200 and {t["table_id"]: t for t in r["review"]["tables"]}["tblNa0000000001"]["target"] == "planning_and_core"
@@ -210,6 +217,20 @@ s_, d, h = raw("GET", "/api/names/report?base_id=" + BASE + "&file=names_report.
 s_, e = post("/api/names/groups/dissolve", A(group_id=gl[0]["group_id"], reason="")); check("dissolving needs a reason", s_ == 400)
 s_, e = post("/api/names/groups/dissolve", A(group_id=99999, reason="x")); check("dissolving an unknown group is a 404", s_ == 404)
 s_, r = post("/api/names/groups/dissolve", A(group_id=gl[0]["group_id"], reason="different data after all")); check("a group can be dissolved", s_ == 200 and r["review"]["groups"] == [] and {f["field_id"]: f for f in r["review"]["fields"]}["fldN05"]["consolidated"] is None, r.get("error"))
+
+# ---- link directions
+s, ld0 = get("/api/links/directions")
+check("link directions: the schema's one-way link is listed and undecided, and blocks the schema build", s == 200 and ld0["available"] and ld0["counts"]["undecided"] == 1 and ld0["schema_build_blocked"], ld0)
+s, ld1 = post("/api/links/directions/sync", {})
+f0 = ld1["pairs"][0]["fields"][0]
+check("detecting writes only a proposal: the suggestion, nothing confirmed", s == 200 and f0["suggested_type"] in ("many_to_one", "many_to_many") and not f0["confirmed"], f0)
+check("a decision without who is refused", post("/api/links/directions/decide", {"items": [{"field_id": f0["field_id"], "relationship_type": "many_to_one"}]})[0] == 400)
+s, ld2 = post("/api/links/directions/decide", {"actor": "JV", "reason": "fabricated test", "items": [{"field_id": f0["field_id"], "relationship_type": "many_to_one"}]})
+check("a confirmed decision is stored with who and unblocks the schema build", s == 200 and ld2["counts"]["undecided"] == 0 and not ld2["schema_build_blocked"] and ld2["pairs"][0]["fields"][0]["decided_by"] == "JV", ld2)
+s, g1 = get("/api/depgraph?mode=confirmed")
+check("the confirmed load order reports the decision count and is no longer provisional", s == 200 and g1["directions"]["decided"] == 1 and not g1["provisional"], g1.get("directions"))
+s, g2 = post("/api/depgraph/recompute", {"mode": "confirmed"})
+check("recompute accepts the confirmed mode", s == 200 and g2["mode"] == "confirmed" and g2["tables"] >= 1)
 
 # ---- audit trail and safety
 c = sqlite3.connect("names_api.db"); c.row_factory = sqlite3.Row

@@ -23,6 +23,14 @@ cust=[t for b in json.loads(get("/api/schema"))["bases"] for t in b["tables"] if
 post("/api/profile/start",{"scope":"table","table_id":cust,"cap":1000}); j=wait()
 check("toggle off: job says not saving, nothing on disk", j["save_records"] is False and not os.path.exists(D) and j["tables"][0]["saved"] is False, j["save_records"])
 check("toggle off: files list is empty", json.loads(get("/api/extract/files"))["files"]==[])
+# 1b. several tables chosen at once
+alltbl=[t["table_id"] for b in json.loads(get("/api/schema"))["bases"] for t in b["tables"]]
+two=alltbl[:2]
+post("/api/profile/start",{"scope":"tables","table_ids":two,"cap":1000}); j=wait()
+check("scope 'tables': exactly the chosen tables are profiled", sorted(t["table_id"] for t in j["tables"])==sorted(two) and j["status"]=="done", [t["table_id"] for t in j["tables"]])
+check("scope 'tables': an empty choice is refused", post("/api/profile/start",{"scope":"tables","table_ids":[]}).get("error"))
+check("scope 'tables': an unknown table is refused", "not in the database" in (post("/api/profile/start",{"scope":"tables","table_ids":[two[0],"tblNope"]}).get("error") or ""))
+check("scope 'tables': a missing list is refused", post("/api/profile/start",{"scope":"tables"}).get("error"))
 # 2. toggle ON, one table
 post("/api/profile/start",{"scope":"table","table_id":cust,"cap":1000,"save_records":True}); j=wait()
 t=j["tables"][0]

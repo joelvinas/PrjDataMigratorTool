@@ -16,6 +16,7 @@ The server binds to 127.0.0.1 only. It owns every database and Airtable call.
 The Airtable token is read from config.json and is never stored, logged, or
 sent to the browser.
 """
+import base64
 import csv
 import hashlib
 import io
@@ -36,6 +37,12 @@ import traceback
 import urllib.error
 import urllib.request
 import fieldcompare as names_compare
+import fieldwriters
+import postmantests
+import sandboxplan
+import linkdirections as ld
+import recordmap
+import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
 from contextlib import contextmanager
@@ -505,6 +512,7 @@ CREATE TABLE load_id_map (
     temp_id TEXT NOT NULL,            -- for example P-T-tblXXXX, P-F-fldXXXX, C-F-fldXXXX, P-O-fldXXXX-selXXXX
     environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
     workspace_id TEXT,                -- the Planning Workspace these IDs belong to (NULL for Core)
+    workspace_key TEXT NOT NULL DEFAULT '' CHECK(workspace_key = COALESCE(workspace_id, '')),   -- part of the key: the Workspace ID, or '' for Core (migration 016)
     system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
     kind TEXT NOT NULL CHECK(kind IN ('record_type', 'form', 'field', 'option')),
     base_id TEXT NOT NULL,
@@ -519,7 +527,7 @@ CREATE TABLE load_id_map (
     last_error TEXT,                  -- a short message with any credential removed
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (temp_id, environment)
+    PRIMARY KEY (temp_id, environment, workspace_key)
 );
 CREATE INDEX idx_load_id_map_base ON load_id_map(base_id, environment);
 CREATE INDEX idx_load_id_map_field ON load_id_map(airtable_field_id);
@@ -559,6 +567,12 @@ CREATE TABLE field_relationships (
     reason TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    suggested_type TEXT CHECK(suggested_type IN ('one_to_many', 'many_to_one', 'one_to_one', 'many_to_many')),   -- what the tool proposed from the schema (migration 015)
+    relationship_type TEXT CHECK(relationship_type IN ('one_to_many', 'many_to_one', 'one_to_one', 'many_to_many')),   -- what a person chose; NULL until they do
+    tiebreaker TEXT CHECK(tiebreaker IN ('this_first', 'other_first', 'automatic')),   -- one_to_one / many_to_many only: which table loads first ('automatic' = the load order decides)
+    confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0, 1)),   -- 1 = a person confirmed the direction (approved_by and approved_at say who and when)
+    derived INTEGER NOT NULL DEFAULT 0 CHECK(derived IN (0, 1)),       -- 1 = an automatic pair the confirmed order already settles (the tool, not a person)
+    auto_set INTEGER NOT NULL DEFAULT 0 CHECK(auto_set IN (0, 1)),     -- 1 = set because its partner was chosen (shown as auto-set)
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id),
     FOREIGN KEY (from_table_id) REFERENCES airtable_tables(table_id),
     FOREIGN KEY (to_table_id) REFERENCES airtable_tables(table_id)
@@ -599,6 +613,116 @@ CREATE TABLE option_workfront_ids (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 CREATE INDEX idx_option_workfront_ids_wf ON option_workfront_ids(system, workfront_option_id);
+
+-- 16. The record ID map (migration 017)
+-- Every Airtable record gets ONE surrogate ID (an integer assigned in sorted order, so runs are repeatable: no random UUID), and everything
+-- else points to it. Holds IDs, statuses, file sizes and hashes ONLY: no record value, no file name, no link.
+-- 1. The registry: one row per Airtable record, the three IDs stored once.
+CREATE TABLE source_records (
+    source_record_uid INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    record_id TEXT NOT NULL,                  -- the Airtable record ID (recXXXX)
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (base_id, table_id, record_id),    -- the same record can never be registered twice
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_source_records_table ON source_records(base_id, table_id);
+
+-- 2. Target mappings: one row per target record. Consolidation (several source records into one target) and fan-out (one source into several
+-- targets) are just more rows against the same surrogate. workspace_key is the Planning Workspace ID, or '' for Core.
+CREATE TABLE target_mappings (
+    mapping_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_record_uid INTEGER NOT NULL,
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_key TEXT NOT NULL DEFAULT '',
+    target_kind TEXT NOT NULL,                -- for example 'record' (Planning) or 'project', 'request', 'task' (Core)
+    target_record_id TEXT NOT NULL,           -- the new Workfront ID
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source_record_uid, system, environment, workspace_key, target_record_id),
+    FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
+);
+CREATE INDEX idx_target_mappings_target ON target_mappings(system, environment, target_record_id);
+
+-- 3. Pass-completed markers: a restart reads these to know what is done and never repeats it. One row per record, pass and stage.
+CREATE TABLE record_pass_markers (
+    source_record_uid INTEGER NOT NULL,
+    pass TEXT NOT NULL CHECK(pass IN ('records', 'links', 'attachments', 'core_backfill')),
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    workspace_key TEXT NOT NULL DEFAULT '',
+    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_record_uid, pass, environment, workspace_key),
+    FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
+);
+
+-- 4. Attachment rows: each Airtable attachment ID paired with the Core document ID, so a rerun does not upload a file twice. Airtable returns no
+-- checksum, so the hash is of the file the tool downloaded (it proves the transfer and upload, not a match with the source); the API-reported size
+-- is the second check. No file name and no link is stored (links expire and are not secret-free).
+CREATE TABLE attachment_map (
+    attachment_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_record_uid INTEGER NOT NULL,
+    airtable_field_id TEXT NOT NULL,
+    airtable_attachment_id TEXT NOT NULL,     -- attXXXX
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production', 'dev', 'uat')),
+    core_document_id TEXT,                    -- NULL until the upload returns
+    api_size_bytes INTEGER,                   -- the size Airtable reported
+    downloaded_bytes INTEGER,                 -- the size of the file as downloaded
+    sha256 TEXT,                              -- hash of the downloaded file
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'downloaded', 'uploaded', 'failed')),
+    last_error TEXT,                          -- a short message with any credential removed
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source_record_uid, airtable_field_id, airtable_attachment_id, environment),
+    FOREIGN KEY (source_record_uid) REFERENCES source_records(source_record_uid)
+);
+
+-- 17. The history of link direction decisions (migration 018)
+-- field_relationships keeps only the latest decision, so every confirm, change, clear and auto-set is also appended here: who, when, why and the old
+-- and new choice. Append-only. Field IDs and choices only: no record value.
+CREATE TABLE link_direction_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    airtable_field_id TEXT NOT NULL,              -- the link field the event is about
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('confirm', 'change', 'clear', 'auto_set')),   -- auto_set = the partner of a field a person chose on
+    old_relationship_type TEXT,                   -- NULL when there was no decision before
+    old_tiebreaker TEXT,
+    new_relationship_type TEXT,                   -- NULL after a clear
+    new_tiebreaker TEXT,
+    actor TEXT NOT NULL,                          -- initials or a short name (the app has no logins)
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_link_direction_events_field ON link_direction_events(airtable_field_id, event_id);
+
+-- 18. Field-writer decisions and their history (migration 019)
+-- The matrix of who fills each field is computed each time; what a person DECIDES about a formula-only or automation-only field is kept here (who,
+-- when, why), with an append-only history. Field IDs and choices only: no record value.
+CREATE TABLE field_writer_decisions (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('recompute', 'park', 'fusion_owned', 'go_stale', 'users_also_edit')),
+    decided_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_writer_decisions_base ON field_writer_decisions(base_id);
+
+-- Append-only history, so a changed or cleared decision does not lose what it was (the lesson of migration 018).
+CREATE TABLE field_writer_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    airtable_field_id TEXT NOT NULL,
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('decide', 'change', 'clear')),
+    old_decision TEXT,                           -- NULL when there was none before
+    new_decision TEXT,                           -- NULL after a clear
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+CREATE INDEX idx_field_writer_events_field ON field_writer_events(airtable_field_id, event_id);
 '''
 
 
@@ -1500,17 +1624,24 @@ def _tarjan(nodes, adj):
     return sccs
 
 
-def compute_graph(conn, mode="literal"):
+def compute_graph(conn, mode="literal", detail=None):
     """Pure computation from airtable_fields. Writes nothing.
     mode 'literal': every link field is an edge (child -> parent), as specified.
+    mode 'confirmed': each link pair (or one-way link) follows the direction a person confirmed (see linkdirections.py). A pair still
+        undecided keeps its literal edges, so the order is provisional until every pair is decided. Automatic pairs are non-binding edges.
     mode 'collapse': two-way link pairs (a link field and its inverse) are resolved with Airtable's
         prefersSingleRecordLink hint. If exactly one side is a single-record link, that side's table is the
         child and only that field is an ordering edge. If both or neither side is (many-to-many, or the hint
         was not reported), the direction is unknown, so both fields stay as edges and the two tables form a
         cycle that loads together, with the links set in a second pass."""
-    if mode not in ("literal", "collapse"):
+    if mode not in ("literal", "collapse", "confirmed"):
         raise AppError("Unknown dependency mode.")
     rows = [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"]]
+    # Scope is a human decision: a table marked OUT is not part of the migration, so it takes no part in the order. A table with no decision is
+    # undecided, not out, and stays in. A link TO an out-of-scope table has nowhere to point: it is listed for a person to decide, not ordered.
+    out_ids = {r["table_id"] for r in conn.execute("SELECT table_id FROM table_scope WHERE decision='out'")}
+    out_names = {r["table_id"]: r["table_name"] for r in rows if r["table_id"] in out_ids}
+    rows = [r for r in rows if r["table_id"] not in out_ids]
     tables, base_of = {}, {}
     for r in rows:
         tables[r["table_id"]] = r["table_name"]
@@ -1544,10 +1675,17 @@ def compute_graph(conn, mode="literal"):
                               "parent_table": tables[child["linked_table_id"]] if child else None}
     pairs = sorted(pair_list.values(), key=lambda p: (p["table_a"].lower(), p["table_b"].lower(), p["field_a"].lower()))
 
-    self_links, unresolved, edges = [], [], {}
+    stored = ld.read_stored(conn)
+    units = [u for u in ld.build_units(rows, stored) if all(f["linked_table_id"] in tables for f in u["fields"])]
+    decided_fields = {f["field_id"] for u in units if u["decision"] for f in u["fields"]} if mode == "confirmed" else set()
+    self_links, unresolved, edges, out_links = [], [], {}, []
     for a in links:
         if a["linked_table_id"] == a["table_id"]:
             self_links.append({"table_id": a["table_id"], "table_name": a["table_name"], "field_name": a["field_name"]})
+            continue
+        if a["linked_table_id"] in out_ids:
+            out_links.append({"table_id": a["table_id"], "table_name": a["table_name"], "field_id": a["field_id"], "field_name": a["field_name"],
+                              "linked_table_id": a["linked_table_id"], "linked_table_name": out_names.get(a["linked_table_id"], a["linked_table_id"])})
             continue
         if a["linked_table_id"] not in tables:
             unresolved.append({"table_name": a["table_name"], "field_name": a["field_name"],
@@ -1555,10 +1693,45 @@ def compute_graph(conn, mode="literal"):
             continue
         if mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
             continue   # reverse side of a pair whose direction is set by the other field
+        if a["field_id"] in decided_fields:
+            continue   # a person decided this pair: its edge is added from the decision below
         edges.setdefault((a["table_id"], a["linked_table_id"]), []).append(a["field_name"])
 
     def skey(tid):
         return (tables[tid].lower(), tid)
+
+    auto_status, direction_edges = {}, {}      # field_id -> 'derived' | 'chosen' | 'loop' ; field_id -> the edge it set
+    auto_added, auto_loops = [], []
+    if mode == "confirmed":
+        automatic = []
+        for u in sorted(units, key=lambda u: u["key"]):
+            d = u["decision"]
+            if not d:
+                continue
+            fld = next(f for f in u["fields"] if f["field_id"] == d["field_id"])
+            if isinstance(d["ordering"], tuple):
+                child, parent = d["ordering"]
+                edges.setdefault((child, parent), []).append(fld["field_name"])
+                direction_edges[fld["field_id"]] = (child, parent)
+            elif d["ordering"] == "automatic":
+                automatic.append((u["key"], d["table_id"], d["other_table_id"]))
+        settled, added, loops = ld.settle_automatic(set(edges), automatic, skey)
+        unit_of = {u["key"]: u for u in units}
+        for key, (child, parent) in sorted(added.items()):
+            u = unit_of[key]
+            names = sorted(f["field_name"] for f in u["fields"] if f["table_id"] in (child, parent))
+            edges.setdefault((child, parent), []).extend(names)
+            auto_added.append({"table": tables[parent] + " loads before " + tables[child], "fields": [f["table_name"] + "." + f["field_name"] for f in u["fields"]]})
+        for key in loops:
+            auto_loops.append({"fields": [f["table_name"] + "." + f["field_name"] for f in unit_of[key]["fields"]]})
+        for key, u in unit_of.items():
+            st = "derived" if key in settled else "chosen" if key in added else "loop" if key in loops else None
+            for f in u["fields"]:
+                if st:
+                    auto_status[f["field_id"]] = st
+        derived_keys = set(settled)
+    else:
+        derived_keys = set()
 
     nodes = sorted(tables, key=skey)
     adj = {n: [] for n in nodes}
@@ -1617,14 +1790,29 @@ def compute_graph(conn, mode="literal"):
                  for (c, p), f in sorted(edges.items(), key=lambda kv: (skey(kv[0][0]), skey(kv[0][1])))]
     # How every link field is treated, for the report: does it order the load, or wait for a second pass?
     link_fields = []
+    unit_state = {f["field_id"]: u["decision"] is not None for u in units for f in u["fields"]}
+    undecided = sum(1 for u in units if u["decision"] is None)
     for a in sorted(links, key=lambda r: (r["table_name"].lower(), r["field_name"].lower(), r["field_id"])):
         tgt = a["linked_table_id"]
         if tgt == a["table_id"]:
             cls, second, why = ("Self-link", True,
                                 "Links to its own table. Load the table's records first, then set these links.")
+        elif tgt in out_ids:
+            cls, second, why = ("Links to an out-of-scope table", False,
+                                "The linked table is marked out of scope, so this link has nowhere to point. A person decides: bring the table in, or drop the field.")
         elif tgt not in tables:
             cls, second, why = ("Unresolved", True,
                                 "The linked table is not in the database. Ingest its base, then recompute.")
+        elif a["field_id"] in decided_fields and a["field_id"] not in direction_edges:
+            st = auto_status.get(a["field_id"])
+            if st == "derived":
+                cls, second, why = ("Automatic: already ordered", False, "The pair is set to automatic, and the other confirmed directions already settle which table loads first. Adds no ordering.")
+            elif st == "chosen":
+                cls, second, why = ("Automatic: order chosen, review", False, "The pair is set to automatic and nothing else settles it, so the tool picked an order (the table that sorts first loads first). A person should confirm it.")
+            elif st == "loop":
+                cls, second, why = ("Automatic: loop, needs a person", True, "Automatic pairs form a loop that no decided direction breaks. A person must pick a direction on one of them.")
+            else:
+                cls, second, why = ("Inverse of a decided pair", False, "Reverse side of a two-way link whose direction a person confirmed on the other field. Adds no ordering.")
         elif mode == "collapse" and a["field_id"] in paired and pair_other[a["field_id"]] in oriented:
             cls, second, why = ("Inverse of an ordered pair", False,
                                 "Reverse side of a two-way link whose direction is set by the other field. "
@@ -1636,12 +1824,18 @@ def compute_graph(conn, mode="literal"):
         else:
             cls, second, why = ("Orders the load", False,
                                 "The linked (parent) table must be loaded before this table.")
-        link_fields.append({"base_id": a["base_id"], "table_id": a["table_id"], "table_name": a["table_name"],
+        link_fields.append({"direction_decided": unit_state.get(a["field_id"]), "base_id": a["base_id"], "table_id": a["table_id"], "table_name": a["table_name"],
                             "field_id": a["field_id"], "field_name": a["field_name"], "linked_table_id": tgt,
                             "linked_table_name": tables.get(tgt, tgt), "treatment": cls, "second_pass": second,
                             "explanation": why})
+    if detail is not None:
+        detail.update({"derived_keys": derived_keys, "units": units})
     return {"mode": mode, "matrix": matrix, "edges": edge_list, "cycles": cycles, "self_links": self_links,
-            "unresolved_links": unresolved, "inverse_pairs": pairs, "link_fields": link_fields}
+            "unresolved_links": unresolved, "out_of_scope_links": sorted(out_links, key=lambda o: (o["table_name"].lower(), o["field_name"].lower(), o["field_id"])),
+            "out_of_scope_tables": len(out_ids), "inverse_pairs": pairs, "link_fields": link_fields,
+            "directions": {"pairs": len(units), "undecided": undecided, "decided": len(units) - undecided, "available": ld.has_direction_columns(conn),
+                           "automatic_chosen": auto_added, "automatic_loops": auto_loops},
+            "provisional": undecided > 0}
 
 
 def _cycle_message(cyc, mode):
@@ -1655,7 +1849,10 @@ def api_depgraph_recompute(body):
     mode = (body or {}).get("mode", "literal")
     try:
         with db() as conn:
-            g = compute_graph(conn, mode)
+            detail = {}
+            g = compute_graph(conn, mode, detail)
+            if mode == "confirmed":
+                ld.mark_derived(conn, detail["derived_keys"], detail["units"])
             with conn:
                 conn.execute("DELETE FROM dependency_matrix")
                 conn.executemany(
@@ -1702,6 +1899,60 @@ def api_depgraph_view(q):
     g["matrix_in_sync"] = fresh == saved
     del g["matrix"]
     return g
+
+
+def _link_direction_rows(conn):
+    """Non-stale schema rows of the tables that are not out of scope: what the link direction screen and the load order are built from."""
+    out_ids = {r["table_id"] for r in conn.execute("SELECT table_id FROM table_scope WHERE decision='out'")}
+    return [r for r in conn.execute("SELECT f.*, %s AS stale FROM airtable_fields f" % STALE_SQL) if not r["stale"] and r["table_id"] not in out_ids]
+
+
+def _direction_payload(conn):
+    if not ld.has_direction_columns(conn):
+        return {"available": False, "pairs": [], "counts": {}, "schema_build_blocked": False,
+                "message": "Link directions need migrations 015 to 017 on this database."}
+    rows = _link_direction_rows(conn)
+    tables = {r["table_id"] for r in rows}
+    units = [u for u in ld.build_units(rows, ld.read_stored(conn)) if all(f["linked_table_id"] in tables for f in u["fields"])]
+    for u in units:
+        u["status"] = "undecided" if not u["decision"] else ("automatic" if u["decision"]["ordering"] == "automatic" else "confirmed")
+        u["decision"] = None if not u["decision"] else {k: u["decision"][k] for k in ("field_id", "relationship_type", "tiebreaker")}
+    undecided = sum(1 for u in units if u["status"] == "undecided")
+    amb = ld.ambiguous([dict(u, decision=u["decision"]) for u in units])
+    counts = {"ambiguous": amb["total"], "ambiguous_undecided": amb["undecided"], "ambiguous_by_type": amb["by_type"], "pairs": len(units), "undecided": undecided, "confirmed": sum(1 for u in units if u["status"] == "confirmed"),
+              "automatic": sum(1 for u in units if u["status"] == "automatic"),
+              "two_way": sum(1 for u in units if len(u["fields"]) == 2), "one_way": sum(1 for u in units if len(u["fields"]) == 1)}
+    return {"available": True, "pairs": units, "counts": counts, "schema_build_blocked": undecided > 0, "type_labels": ld.TYPE_LABEL, "connection_counts": ld.connection_counts(rows), "connection_cap": ld.CAP}
+
+
+def _direction_call(fn_, *a):
+    try:
+        return fn_(*a)
+    except ld.DirectionError as e:
+        raise AppError(e.message, e.status)
+
+
+def api_link_directions(q):
+    with db() as conn:
+        return _direction_payload(conn)
+
+
+def api_link_directions_sync(body):
+    """Write the tool's PROPOSALS (one row per link field, with its pair and suggested direction). Decides nothing."""
+    with db() as conn:
+        r = _direction_call(ld.sync, conn, _link_direction_rows(conn))
+        return dict(_direction_payload(conn), synced=r)
+
+
+def api_link_directions_decide(body):
+    """A person's choice on one link field (its partner is set to match). relationship_type 'clear' returns the pair to undecided."""
+    with db() as conn:
+        _direction_call(ld.sync, conn, _link_direction_rows(conn))
+        done = [_direction_call(ld.decide, conn, body.get("actor"), str(it.get("field_id") or ""), it.get("relationship_type"), it.get("tiebreaker"), body.get("reason") or "")
+                for it in (body.get("items") or [])]
+        if not done:
+            raise AppError("Nothing to save.")
+        return dict(_direction_payload(conn), saved=len(done))
 
 
 # --------------------------------------------------------------------------
@@ -1775,6 +2026,16 @@ def api_profile_start(body):
         tables = [t for t in tables if t["base_id"] == body.get("base_id")]
     elif scope == "table":
         tables = [t for t in tables if t["table_id"] == body.get("table_id")]
+    elif scope == "tables":
+        ids = body.get("table_ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(x, str) for x in ids):
+            raise AppError("Choose at least one table to profile.")
+        known = {t["table_id"] for t in tables}
+        missing = sorted(set(ids) - known)
+        if missing:
+            raise AppError("%d of the chosen tables are not in the database. Ingest the schema again (step 3) or refresh the list." % len(missing))
+        want = set(ids)
+        tables = [t for t in tables if t["table_id"] in want]
     elif scope != "all":
         raise AppError("Unknown profiling scope.")
     if not tables:
@@ -2733,6 +2994,20 @@ def build_report(mode):
         if mode == "literal":
             h.append("<p class=\"meta\">In Literal mode each pair counts as a two-table cycle. Regenerate with "
                      "\"Resolve two-way link pairs\" to order them using the single-link hint.</p>")
+    dr = g.get("directions") or {}
+    if dr.get("available") and dr.get("undecided"):
+        h.append("<div class=\"box warn\"><strong>This load order is provisional:</strong> %d of %d link relationship(s) have no confirmed direction, so their links are "
+                 "still counted both ways. Confirm each in Stage 1, step 4 (Link directions); the schema build stays blocked until then.</div>" % (dr["undecided"], dr["pairs"]))
+    if dr.get("automatic_chosen"):
+        h.append("<div class=\"box warn\"><strong>Automatic pairs the tool had to order:</strong> nothing else settles these, so the table that sorts first was "
+                 "loaded first. A person should confirm each.<ul>%s</ul></div>" % "".join("<li>%s</li>" % esc(x["table"]) for x in dr["automatic_chosen"]))
+    if dr.get("automatic_loops"):
+        h.append("<div class=\"box warn\"><strong>Automatic pairs that form a loop:</strong> a person must choose a direction on one of them.<ul>%s</ul></div>" % "".join(
+            "<li>%s</li>" % esc(" / ".join(x["fields"])) for x in dr["automatic_loops"]))
+    if g.get("out_of_scope_links"):
+        h.append("<div class=\"box warn\"><strong>Links to out-of-scope tables:</strong> these fields link to tables marked out of scope, so the link has "
+                 "nowhere to point. A person decides: bring the table in, or drop the field.<ul>%s</ul></div>" % "".join(
+                     "<li>%s.%s links to %s</li>" % (esc(o["table_name"]), esc(o["field_name"]), esc(o["linked_table_name"])) for o in g["out_of_scope_links"]))
     if g["unresolved_links"]:
         h.append("<div class=\"box warn\"><strong>Unresolved links:</strong> these fields link to tables that are not "
                  "in the database (ingest the other base, then recompute).<ul>%s</ul></div>" % "".join(
@@ -4609,6 +4884,231 @@ def api_names_fields_unabandon(body):
 COMPARE_MAX_BYTES = 300 * 1024 * 1024        # a saved record file is loaded whole, so refuse an absurdly large one
 
 
+def _load_extract_doc(base, tid, tname):
+    """The saved record file of one table, read whole into memory (the caller reduces it to counts and discards it). Plain-language errors."""
+    path = _extract_path(base, tid)
+    if not os.path.isfile(path):
+        raise AppError("There is no saved record file for the table \"%s\". Run profiling for that table with \"Also save every record to JSON files\" ticked "
+                       "(Stage 1, step 5), then try again." % tname, 404)
+    if os.path.getsize(path) > COMPARE_MAX_BYTES:
+        raise AppError("The saved record file for \"%s\" is too large to read here." % tname)
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        raise AppError("The saved record file for \"%s\" could not be read. Save it again by profiling the table." % tname)
+    if not (isinstance(doc, dict) and doc.get("format") == "airtable-table-extract/1" and doc.get("table_id") == tid and isinstance(doc.get("records"), list)):
+        raise AppError("The saved record file for \"%s\" is not in the expected format. Save it again by profiling the table." % tname)
+    return doc
+
+
+def field_writer_matrix(conn, base_id, with_decisions=True):
+    entries = fieldwriters.build_matrix(*fieldwriters.load_inputs(conn, base_id))
+    return fieldwriters.apply_decisions(entries, fieldwriters.read_decisions(conn, base_id)) if with_decisions else entries
+
+
+def _field_writers_payload(conn, base):
+    entries = field_writer_matrix(conn, base)
+    cap = 5000
+    return {"base_id": base, "entries": entries[:cap], "truncated": len(entries) > cap, "summary": fieldwriters.summary(entries), "decisions": {k: list(v) for k, v in fieldwriters.DECISIONS.items()},
+            "decision_labels": fieldwriters.DECISION_LABEL, "marker_prefix": fieldwriters.MARKER_PREFIX, "decisions_available": fieldwriters.available(conn)}
+
+
+def api_field_writers(q):
+    """The field-writer matrix: who fills each field (user, form, automation, formula) and which fields carry the Fusion-driven marker. Metadata only."""
+    base = _names_base(q)
+    with db() as conn:
+        return _field_writers_payload(conn, base)
+
+
+VALIDATE_MAX_BYTES = 8 * 1024 * 1024
+WRITER_FINDING_COLUMNS = ["system", "kind", "table_name", "field_name", "field_id", "detail"]
+
+
+def api_field_writers_validate(body):
+    """Check the field-writer matrix against descriptions pulled from Workfront Core and Planning (an uploaded CSV or JSON), in both directions. Nothing is
+    stored and no description is sent back: the answer is counts and findings (field names and IDs and a plain sentence each)."""
+    base = _names_base(body)
+    raw = body.get("csv_base64")
+    try:
+        text = base64.b64decode(raw, validate=True).decode("utf-8-sig") if raw is not None else str(body.get("text") or "")
+    except (ValueError, UnicodeDecodeError):
+        raise AppError("The file could not be read as UTF-8 text.")
+    if len(text.encode("utf-8")) > VALIDATE_MAX_BYTES:
+        raise AppError("The file is too large (the limit is 8 MB).")
+    try:
+        rows = fieldwriters.parse_pull(text)
+    except fieldwriters.PullError as e:
+        raise AppError(str(e))
+    with db() as conn:
+        entries = field_writer_matrix(conn, base)
+        live, core_tables = names_store.expected_fields(conn, base)
+        owner = {e["field_id"]: e["table_id"] for e in entries}
+        cands = {}
+        for r in conn.execute("SELECT system, workfront_id, airtable_field_id FROM load_id_map WHERE base_id=? AND status='created' AND workfront_id IS NOT NULL AND airtable_field_id IS NOT NULL "
+                              "ORDER BY system, workfront_id, airtable_field_id", (base,)):
+            cands.setdefault((r["system"], r["workfront_id"]), set()).add(r["airtable_field_id"])
+    id_map = {k: next(iter(v)) for k, v in cands.items() if len(v) == 1}          # an ID that maps to two fields is ambiguous: not guessed
+    live &= set(owner)
+    expected = {"planning": live, "core": {fid for fid in live if owner[fid] in core_tables}}
+    pulled, stats = fieldwriters.build_pulled(rows, id_map)
+    res = fieldwriters.validate(entries, pulled, expected)
+    out_rows = [[names_store.fio._safe(x) for x in (f["system"], f["kind"], f["table_name"] or "", f["field_name"] or "", f["field_id"], f["detail"])] for f in res["findings"]]
+    cap = 2000
+    return {"base_id": base, "ok": res["ok"], "counts": res["counts"], "systems": res["systems"], "findings": res["findings"][:cap], "truncated": len(res["findings"]) > cap,
+            "total_findings": len(res["findings"]), "rows_read": stats["rows"], "unresolved_rows": stats["unresolved"], "duplicate_rows": stats["duplicates"],
+            "checked": {s: len(pulled.get(s, {})) for s in res["systems"]}, "expected": {s: len(expected[s]) for s in res["systems"]},
+            "csv": _csv_bytes(WRITER_FINDING_COLUMNS, out_rows).decode("utf-8"), "marker_prefix": fieldwriters.MARKER_PREFIX}
+
+
+def api_postman_guide(_q=None):
+    """The Postman test guide: five DEV-Workspace tests to run by hand. Static text; no database, no token and no call to Workfront."""
+    return postmantests.guide()
+
+
+def api_sandbox_plan(_q=None):
+    return sandboxplan.plan()
+
+
+def api_postman_collection(_q=None):
+    """The same requests as a Postman collection (v2.1) with variables and NO authorization: the person adds their own in Postman."""
+    body = json.dumps(postmantests.collection(), indent=2, sort_keys=False).encode("utf-8")
+    return (body, "application/json; charset=utf-8", {"Content-Disposition": 'attachment; filename="workfront_planning_v2_design_tests.postman_collection.json"'})
+
+
+def api_field_writers_decide(body):
+    """A person's decision about a formula-only or automation-only field (recompute | park; fusion_owned | go_stale | users_also_edit; or clear). Who, when and why are kept."""
+    base = _names_base(body)
+    items = body.get("items") or []
+    if not items:
+        raise AppError("Nothing to save.")
+    with db() as conn:
+        raw = {e["field_id"]: e for e in field_writer_matrix(conn, base, with_decisions=False)}
+        results = []
+        for it in items:
+            e = raw.get(str(it.get("field_id") or ""))
+            if e is None:
+                raise AppError("That field is not in this base, or its table is out of scope.", 404)
+            try:
+                results.append(fieldwriters.decide(conn, body.get("actor"), base, e, it.get("decision"), body.get("reason") or ""))
+            except fieldwriters.WriterError as err:
+                raise AppError(err.message, err.status)
+        return dict(_field_writers_payload(conn, base), saved=results)
+
+
+WRITER_COLUMNS = ["table_name", "table_id", "field_name", "field_id", "data_type", "category", "fusion_driven", "forms", "automations", "scenarios", "marker", "decision", "decided_by", "notes"]
+
+
+def api_export_field_writers(q):
+    base = _names_base(q)
+    with db() as conn:
+        entries = field_writer_matrix(conn, base)
+    rows = [[e["table_name"], e["table_id"], e["field_name"], e["field_id"], e["data_type"], e["category"], "yes" if e["fusion"] else "no", "; ".join(e["writers"]["form"]),
+             "; ".join(a["automation_name"] for a in e["writers"]["automation"]), "; ".join(e["scenarios"]), e["marker"] or "",
+             (e["decision"] or {}).get("decision", ""), (e["decision"] or {}).get("decided_by", ""), "; ".join(e["anomalies"])] for e in entries]
+    return (_csv_bytes(WRITER_COLUMNS, rows), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="field_writers_%s.csv"' % _stamp()})
+
+
+def _record_map_call(fn_, *a):
+    try:
+        return fn_(*a)
+    except recordmap.RecordMapError as e:
+        raise AppError(e.message, e.status)
+
+
+def api_records_register(body):
+    """Register the Airtable record IDs found in the saved record files (record IDs only: no value is read into the database). Tables out of scope are
+    skipped; a table with no usable saved file is listed as not registered. Safe to repeat: a registered record keeps its surrogate ID. Tables are taken
+    in table ID order and records in record ID order, so the numbers are the same for the same files."""
+    base = _names_base(body)
+    only = [str(t) for t in (body.get("table_ids") or [])] or None
+    with db() as conn:
+        if not recordmap.available(conn):
+            _record_map_call(recordmap._need, conn)
+        tabs = [dict(r) for r in conn.execute("SELECT table_id, table_name FROM airtable_tables WHERE base_id=? ORDER BY table_id", (base,))]
+        scope = {r["table_id"]: r["decision"] for r in conn.execute("SELECT table_id, decision FROM table_scope WHERE base_id=?", (base,))}
+        if only:
+            unknown = sorted(set(only) - {t["table_id"] for t in tabs})
+            if unknown:
+                raise AppError("Some of those tables are not in the database for this base.", 404)
+        done, skipped = [], []
+        for t in tabs:
+            if (only and t["table_id"] not in only) or (not only and scope.get(t["table_id"]) == "out"):
+                continue
+            try:
+                doc = _load_extract_doc(base, t["table_id"], t["table_name"])
+            except AppError as e:
+                skipped.append({"table_id": t["table_id"], "table_name": t["table_name"], "reason": str(e)})
+                continue
+            ids = [r.get("id") for r in doc["records"] if isinstance(r, dict)]
+            res = _record_map_call(recordmap.register, conn, base, t["table_id"], ids)
+            done.append(dict(res, table_id=t["table_id"], table_name=t["table_name"], captured_at=doc.get("captured_at")))
+        summary = _record_map_call(recordmap.summary, conn, base)
+    return {"base_id": base, "tables": done, "not_registered": skipped, "registered_total": summary["registered"],
+            "totals": {"new": sum(d["new"] for d in done), "already": sum(d["already"] for d in done), "skipped_invalid": sum(d["skipped_invalid"] for d in done)}}
+
+
+def api_records_registry(q):
+    """Counts only. With an environment: how many records have each pass done, how many targets, and the attachment statuses."""
+    base = _names_base(q)
+    env = (q.get("environment") or [None])[0] or None
+    system = (q.get("system") or ["core"])[0]
+    ws = (q.get("workspace_key") or [""])[0]
+    with db() as conn:
+        return _record_map_call(recordmap.summary, conn, base, env, system, ws)
+
+
+def api_select_values(body):
+    """The select-value inventory: for every single or multiple select field of the base (or one table), the values that sit in the saved records
+    compared with the options the schema declares. Counts, record IDs and declared option names only; an undeclared value's text is never returned.
+    A table with no saved record file is listed as not checked, never guessed."""
+    base = _names_base(body)
+    only = str(body.get("table_id") or "") or None
+    with db() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT f.table_id, f.table_name, f.field_id, f.field_name, f.data_type, f.choices_json, %s AS stale FROM airtable_fields f WHERE f.base_id=? "
+            "ORDER BY lower(f.table_name), f.table_id, f.field_id" % STALE_SQL, (base,))]
+        scope = {r["table_id"]: r["decision"] for r in conn.execute("SELECT table_id, decision FROM table_scope WHERE base_id=?", (base,))}
+    rows = [r for r in rows if not r["stale"] and (only is None or r["table_id"] == only)]
+    if only and not rows:
+        raise AppError("That table is not in this base.", 404)
+    tables = {}
+    for r in rows:
+        t = tables.setdefault(r["table_id"], {"table_id": r["table_id"], "table_name": r["table_name"], "fields": []})
+        t["fields"].append(r)
+    out, skipped = [], []
+    for t in tables.values():
+        if scope.get(t["table_id"]) == "out" and only is None:
+            continue                                            # out-of-scope tables are not checked (scope is a human decision)
+        sel = [f for f in t["fields"] if f["data_type"] in selectvalues.SELECT_TYPES]
+        if not sel:
+            continue
+        choices = {}
+        for f in sel:
+            try:
+                choices[f["field_id"]] = json.loads(f["choices_json"]) if f["choices_json"] else []
+            except ValueError:
+                choices[f["field_id"]] = []
+        try:
+            doc = _load_extract_doc(base, t["table_id"], t["table_name"])
+        except AppError as e:
+            skipped.append({"table_id": t["table_id"], "table_name": t["table_name"], "reason": str(e)})
+            continue
+        in_file = {f.get("field_id") for f in doc.get("fields") or [] if isinstance(f, dict)}
+        fields = [{"field_id": f["field_id"], "field_name": f["field_name"], "data_type": f["data_type"]} for f in sel if not in_file or f["field_id"] in in_file]
+        notes = ["\"%s\" is not in the saved file (added after it was captured), so it is not checked." % f["field_name"] for f in sel
+                 if in_file and f["field_id"] not in in_file]
+        res = selectvalues.table_report([r for r in doc["records"] if isinstance(r, dict)], fields, choices)
+        out.append({"table_id": t["table_id"], "table_name": t["table_name"], "captured_at": doc.get("captured_at"), "record_count": len(doc["records"]),
+                    "scope": scope.get(t["table_id"]) or "undecided", "notes": notes, "fields": res})
+    totals = {"fields": sum(len(t["fields"]) for t in out), "fields_with_unmatched": sum(1 for t in out for f in t["fields"] if f["unmatched_values"]),
+              "unmatched_values": sum(f["unmatched_values"] for t in out for f in t["fields"]),
+              "unmatched_records": sum(f["unmatched_records"] for t in out for f in t["fields"]),
+              "near_matches": sum(f["near_matches"] for t in out for f in t["fields"]),
+              "tables_not_checked": len(skipped)}
+    return {"base_id": base, "tables": out, "not_checked": skipped, "totals": totals}
+
+
 def api_names_compare(body):
     """Compare the values of 2 to 8 fields of one table (duplicate-group members) from the saved record file. Returns counts and record IDs only:
     the file is read into memory, compared and discarded; no value reaches the response, the database or a log."""
@@ -4629,19 +5129,7 @@ def api_names_compare(body):
         raise AppError("Only fields of the same table can be compared.")
     tid = tables.pop()
     tname = rows[ids[0]]["table_name"]
-    path = _extract_path(base, tid)
-    if not os.path.isfile(path):
-        raise AppError("There is no saved record file for the table \"%s\". Run profiling for that table with \"Also save every record to JSON files\" ticked "
-                       "(Stage 1, step 5), then compare again." % tname, 404)
-    if os.path.getsize(path) > COMPARE_MAX_BYTES:
-        raise AppError("The saved record file for \"%s\" is too large to compare here." % tname)
-    try:
-        with open(path, encoding="utf-8") as f:
-            doc = json.load(f)
-    except (OSError, ValueError):
-        raise AppError("The saved record file for \"%s\" could not be read. Save it again by profiling the table." % tname)
-    if not (isinstance(doc, dict) and doc.get("format") == "airtable-table-extract/1" and doc.get("table_id") == tid and isinstance(doc.get("records"), list)):
-        raise AppError("The saved record file for \"%s\" is not in the expected format. Save it again by profiling the table." % tname)
+    doc = _load_extract_doc(base, tid, tname)
     in_file = {f.get("field_id") for f in doc.get("fields") or [] if isinstance(f, dict)}
     fields = [{"field_id": i, "field_name": rows[i]["field_name"], "data_type": rows[i]["data_type"]} for i in ids]
     res = names_compare.compare_group([r for r in doc["records"] if isinstance(r, dict)], fields)
@@ -4728,15 +5216,15 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file next to server.py. Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("setup.html", HTML), "/setup": ("setup.html", HTML),
-          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML),
+          "/stage1": ("stage1.html", HTML), "/stage2": ("stage2.html", HTML), "/stage3": ("stage3.html", HTML), "/names": ("names.html", HTML), "/postman": ("postman.html", HTML),
           "/log": ("log.html", HTML),
           "/style.css": ("style.css", "text/css; charset=utf-8"),
           "/common.js": ("common.js", JS), "/setup.js": ("setup.js", JS),
-          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
+          "/stage1.js": ("stage1.js", JS), "/stage2.js": ("stage2.js", JS), "/stage3.js": ("stage3.js", JS), "/names.js": ("names.js", JS), "/postman.js": ("postman.js", JS), "/editor-kit.js": ("editor-kit.js", JS), "/log.js": ("log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
@@ -4754,7 +5242,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute,
+               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
@@ -4763,7 +5251,7 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
                "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,
                "/api/names/fields/abandon": api_names_fields_abandon, "/api/names/fields/unabandon": api_names_fields_unabandon,
-               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare,
+               "/api/names/import": api_names_import, "/api/names/compare": api_names_compare, "/api/select-values": api_select_values,
                "/api/names/groups/create": api_names_groups_create, "/api/names/groups/dissolve": api_names_groups_dissolve}
 
 

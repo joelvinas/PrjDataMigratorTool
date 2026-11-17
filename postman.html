@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Postman tests - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="postman">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<main>
+<section class="card" id="introCard">
+  <h2>Postman tests for the Workfront Planning API</h2>
+  <p class="hint">Five short tests to run <strong>yourself in Postman</strong>, in a <strong>DEV Workspace only</strong>, with throwaway records. Each one settles a design decision the migration cannot settle from the documentation alone. This page only shows you what to send and how to read the answer: it never calls Workfront and never sees a token. You add your own authorization in Postman; the saved v2 reference does not say how Planning authenticates, so confirm that in Adobe Developer Console or the Workfront documentation.</p>
+  <p class="hint">Requests go to <code id="baseUrl">https://{customer-domain}/maestro/api</code> plus the path shown. The paths, property names and limits come from the saved Planning API v2 reference; where the reference is silent the test is how you find out.</p>
+  <div id="orderNote" class="note info"></div>
+  <ul id="rules"></ul>
+  <div class="row">
+    <a id="lnkCollection" class="btnlink primary" href="/api/postman/collection.json">Download the Postman collection (.json)</a>
+    <span class="hint">Every step and cleanup request, with variables, ready to import (Import, then choose the file). It holds no authorization.</span>
+  </div>
+  <h3>Variables</h3>
+  <p class="hint">Set these once as collection variables in Postman. The steps that create something save its ID into the matching variable for the next step.</p>
+  <div class="scroll"><table class="grid compact" id="varTable">
+    <thead><tr><th>Variable</th><th>What it is</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+<div id="tests"></div>
+<section class="card" id="sandboxCard">
+  <h2>Sandbox test plan</h2>
+  <p class="hint" id="sandboxNote"></p>
+  <div id="sandbox"></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/postman.js"></script>
+</body>
+</html>

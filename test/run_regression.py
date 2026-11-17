@@ -14,7 +14,7 @@ TESTS = os.path.join(ROOT, "test", "regression")
 TOKEN = "patMOCK.0000000000000000000000"
 # (name, scripts run in order against ONE server, MOCK_FILES)
 SUITES = [("e2e2", ["e2e2", "report_test"], "0"), ("views", ["views_test"], "0"), ("forms", ["forms_test"], "0"), ("automations", ["automations_test"], "0"), ("extract", ["extract_test"], "0"),
-          ("attach", ["attach_test"], "1"), ("attstats", ["attstats_test"], "1"), ("ui", ["ui_test"], "1"), ("formsui", ["forms_ui_test"], "0"), ("autoui", ["automations_ui_test"], "0"), ("namesui", ["names_ui_test"], "0"), ("names", ["fieldnames_test", "fieldnames_io_test", "fieldnames_store_test", "fielddesc_test", "emoji_test", "fieldcompare_test", "fieldgroups_test", "loadplan_test", "loader_cli_test", "loadconfig_test"], "0"), ("namesapi", ["names_api_test"], "0")]
+          ("attach", ["attach_test"], "1"), ("attstats", ["attstats_test"], "1"), ("ui", ["ui_test"], "1"), ("formsui", ["forms_ui_test"], "0"), ("autoui", ["automations_ui_test"], "0"), ("namesui", ["names_ui_test"], "0"), ("names", ["fieldnames_test", "fieldnames_io_test", "fieldnames_store_test", "fielddesc_test", "emoji_test", "fieldcompare_test", "fieldgroups_test", "loadplan_test", "loader_cli_test", "loadconfig_test", "selectvalues_test", "linkdirections_test", "loadstate_test", "recordmap_test", "fieldwriters_test", "planlimits_test"], "0"), ("namesapi", ["names_api_test", "selectvalues_api_test", "recordmap_api_test", "field_writers_api_test", "postmantests_test"], "0")]
 
 
 def wait_port(port, secs=10):
@@ -49,7 +49,7 @@ def run_suite(scripts, mock_files):
             fails = [l for l in lines if l.startswith("FAIL")]
             passes = sum(1 for l in lines if l.startswith("PASS"))
             bad = len(fails) + (1 if (p.returncode != 0 and not skipped and not fails) else 0)
-            results.append((name, passes, bad, "SKIPPED: " + [l for l in lines if l.startswith("SKIP")][0][5:] if skipped else "\n".join(fails[:6]) or (lines[-1] if bad else "")))
+            results.append((name, passes, bad, "SKIPPED: " + [l for l in lines if l.startswith("SKIP")][0][5:] if skipped else "\n".join(fails[:6]) or (chr(10).join([l for l in lines if l.strip()][-6:]) if bad else "")))
     finally:
         for pr in procs:
             pr.terminate()
@@ -63,6 +63,12 @@ def run_suite(scripts, mock_files):
 
 
 def main():
+    busy = [port for port in (8765, 9100) if wait_port(port, 0.5)]
+    if busy:
+        # Something is already listening (usually your own running app). The suites would then drive THAT server, with your real token and
+        # database, instead of a throwaway copy against the mock. Refuse rather than risk it.
+        print("REFUSED: port(s) %s already in use. Stop the running app (and any mock) first; the suites must run against their own copy." % ", ".join(map(str, busy)))
+        sys.exit(2)
     want = set(sys.argv[1:])
     total_bad = 0
     for key, scripts, mf in SUITES:

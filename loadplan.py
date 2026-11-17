@@ -21,6 +21,7 @@ Temporary IDs:  P-T-<table>  Planning record type      P-F-<field>  Planning fie
 from collections import Counter, OrderedDict
 
 import fielddesc as fd
+import planlimits as pl
 import fieldnames as fn
 
 SYSTEMS = ("planning", "core")
@@ -35,6 +36,8 @@ HOLD_REASON = {
     "link": "a link to another table: relationships are created in a second pass, and which side of a two-way pair becomes the real relationship is not decided",
     "attachment": "attachments move as Core documents on the new objects, which is not decided or built yet",
 }
+
+LINK_UNDECIDED = "the direction of this link is not confirmed (Stage 1, step 4, link directions): the schema cannot be built until a person decides"
 
 # Fields the migration itself adds so a Core object and its Planning record can find each other (from the Migration Design). The names are
 # checked against the same naming rules as every other name.
@@ -86,8 +89,10 @@ def option_check(name, status, settings):
     return ("hold" if status in ("ready", "hold") else status), [why]
 
 
-def build_plan(rv, choices=None, include_link_fields=True):
+def build_plan(rv, choices=None, include_link_fields=True, link_state=None, record_counts=None):
     """rv: the review payload from fieldnames_store.review(). choices: {field_id: [{id, name}, ...]} select options in Airtable order.
+    record_counts: {table_id: profiled record count}, for the 25,000-record and the Core-history checks (None = not checked).
+    link_state: {link field_id: True when a person confirmed its direction}; a link field whose direction is not confirmed is BLOCKED (None = not checked).
     Returns {items, summary}. Items are ordered so every parent comes before its children."""
     choices = choices or {}
     lset = label_settings(rv.get("settings"))
@@ -135,6 +140,9 @@ def build_plan(rv, choices=None, include_link_fields=True):
                 if hold:
                     status = "hold"
                     rs.append(HOLD_REASON[hold])
+                    if hold == "link" and link_state is not None and link_state.get(f["field_id"]) is False:
+                        status = "blocked"
+                        rs.append(LINK_UNDECIDED)
                 else:
                     status = "ready"
                     if not nm:
@@ -164,7 +172,15 @@ def build_plan(rv, choices=None, include_link_fields=True):
                 for pos, o in enumerate(opts):
                     items.append(_item(tmp + "-O-%d" % pos, system, "option", o, "ready" if not rs else "blocked", rs, parent=tmp, table_id=tid, position=pos, source="migration"))
     items.sort(key=_rank)                                   # parents before children; the sort is stable, so the order inside a rank is unchanged
-    return {"items": items, "summary": summarize(items, out_of_scope)}
+    summ = summarize(items, out_of_scope)
+    names = {t["table_id"]: t["old"] for t in rv["tables"]}
+    found = pl.check(items, {f["field_id"]: f["data_type"] for f in rv["fields"]})
+    if record_counts is not None:
+        found += pl.check_record_counts({t: n for t, n in record_counts.items() if t in names and any(t == i["table_id"] and i["kind"] == "record_type" and i["system"] == "planning" and i["status"] != "blocked" for i in items)}, names)
+        found += pl.check_core_history({t["table_id"]: record_counts.get(t["table_id"], 0) for t in rv["tables"] if t.get("target") == "planning_and_core" and t["scope"] != "out"}, names)
+    found.sort(key=lambda f: (f["limit"], str(f["scope"]).lower(), f["detail"]))
+    summ["limit_findings"] = found
+    return {"items": items, "summary": summ}
 
 
 def summarize(items, out_of_scope=0):
