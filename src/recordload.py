@@ -16,8 +16,9 @@ Rules kept here (CLAUDE.md):
     here, that batch is sent again on the next run and its records exist twice. The batch size is small (settings: record_batch_size) to keep that window short.
   * Nothing is sent without the caller's explicit step, and a dry run only counts.
 
-UNVERIFIED (to be proven in the first DEV run; marked in docs/LOADER_PLAN.md): the record route and body (`recordTypeId` plus a `fields` map keyed by field ID), the bulk
-route, the value formats Planning accepts (dates as ISO text, percentages as Airtable's fraction, a link as a list of record IDs) and the reply shape.
+VERIFIED (Postman test 5, 17 November 2026): the bulk route is per record type and the body is [{"data": {fieldId: value}}] (see planningtransport.py). UNVERIFIED (to be
+proven in the first DEV run; marked in docs/LOADER_PLAN.md): the value formats Planning accepts (dates as ISO text, percentages as Airtable's fraction, a link as a list of
+record IDs) and the link update route.
 """
 import json
 import os
@@ -218,11 +219,14 @@ def _send_batch(tr, sendable, row):
     if not sendable:
         return
     try:
-        ids = tr.create_records([b for _u, _r, b in sendable])
-        if len(ids) != len(sendable):
-            raise ValueError("the reply holds %d ID(s) for %d record(s), so they cannot be matched" % (len(ids), len(sendable)))
-        for (uid, _rid, _b), new in zip(sendable, ids):
-            yield uid, str(new)
+        got = tr.create_records([b for _u, _r, b in sendable])
+        if len(got) != len(sendable):
+            raise ValueError("the reply holds %d result(s) for %d record(s), so they cannot be matched" % (len(got), len(sendable)))
+        bad = [g for g in got if g.get("error")]
+        if bad:
+            raise ValueError(bad[0]["error"])
+        for (uid, _rid, _b), g in zip(sendable, got):
+            yield uid, str(g["id"])
         return
     except Exception as e:
         batch_error = lr.scrub(e)
@@ -232,10 +236,10 @@ def _send_batch(tr, sendable, row):
         return
     for uid, rid, body in sendable:
         try:
-            ids = tr.create_records([body])
-            if len(ids) != 1:
-                raise ValueError("the reply holds no usable ID")
-            yield uid, str(ids[0])
+            got = tr.create_records([body])
+            if len(got) != 1 or got[0].get("error"):
+                raise ValueError((got[0].get("error") if len(got) == 1 else None) or "the reply holds no usable result")
+            yield uid, str(got[0]["id"])
         except Exception as e:
             row["failed"] += 1
             row["failures"].append((rid, lr.scrub(e)))

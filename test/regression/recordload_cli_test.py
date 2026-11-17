@@ -69,13 +69,13 @@ class Fake(object):
         if u.endswith("/record-types"): return Resp(201, {"id": "RT%d" % self.n, "displayName": name})
         if u.endswith("/fields"):
             return Resp(201, {"id": "FLD%d" % self.n, "displayName": name, "options": [{"displayName": o["displayName"], "name": "k%d" % i} for i, o in enumerate(body.get("options") or [])]})
-        if u.endswith("/v2/records/bulk"):
+        if u.endswith("/records/bulk"):
             if self.fail_title and any(self.fail_title in json.dumps(b) for b in body):
                 raise urllib.error.HTTPError(u, 500, "x", {}, io.BytesIO(("{\"error\":\"boom Authorization: Bearer abc.def.ghi token=%s\"}" % PLAN_TOKEN).encode()))
             out = []
-            for _ in body:
-                self.r += 1; out.append({"id": "REC%03d" % self.r})
-            return Resp(200, out)
+            for i, _ in enumerate(body):
+                self.r += 1; out.append({"requestIndex": i, "id": "REC%03d" % self.r})
+            return Resp(201, {"status": "ok", "total": len(out), "results": out})
         if "/v2/records/" in u and req.get_method() == "PATCH": return Resp(200, {})
         return Resp(404, b"no such route")
     def of(self, tail): return [x for x in self.reqs if x[1].endswith(tail) or tail in x[1]]
@@ -95,9 +95,9 @@ res, out = records(db1, fk)
 check("without --send nothing is sent and the summary says so", fk.reqs == [] and "nothing was sent" in open(os.path.join(out, "record_load_summary.txt"), encoding="utf-8").read())
 fk = Fake()
 res, out = records(db1, fk, "--send")
-bulk = fk.of("/v2/records/bulk")
+bulk = fk.of("/records/bulk")
 check("the records pass sends batches of the configured size, 2 at a time, in table ID order", [len(b[3]) for b in bulk] == [2, 1, 2], [len(b[3]) for b in bulk])
-check("each call carries the Bearer token and no link field", all(b[2].get("Authorization") == "Bearer " + PLAN_TOKEN for b in bulk) and all(len(rec["fields"]) <= 3 for b in bulk for rec in b[3]))
+check("each call carries the Bearer token and no link field", all(b[2].get("Authorization") == "Bearer " + PLAN_TOKEN for b in bulk) and all(len(rec["data"]) <= 3 for b in bulk for rec in b[3]))
 check("the links pass sets the customer on the two orders that have one, and nothing on the third", len(fk.of("PATCH") + [x for x in fk.reqs if x[0] == "PATCH"]) >= 2 and len([x for x in fk.reqs if x[0] == "PATCH"]) == 2, [x[:2] for x in fk.reqs if x[0] == "PATCH"])
 rep = open(os.path.join(out, "record_load.csv"), encoding="utf-8-sig").read()
 check("the report holds table IDs and counts only", "tA" in rep and "tB" in rep and "Order one" not in rep and "Acme" not in rep)
@@ -109,7 +109,7 @@ check("every record is mapped and marked; no record value is in the database", c
 conn.close()
 fk = Fake()
 records(db1, fk, "--send")
-check("a rerun sends nothing: no record is created twice", fk.of("/v2/records/bulk") == [] and [x for x in fk.reqs if x[0] == "PATCH"] == [])
+check("a rerun sends nothing: no record is created twice", fk.of("/records/bulk") == [] and [x for x in fk.reqs if x[0] == "PATCH"] == [])
 
 # ---- a failure
 db2 = prepare("two")
@@ -119,7 +119,7 @@ fails = open(os.path.join(out, "record_load_failures.csv"), encoding="utf-8-sig"
 check("a failing record is listed by Airtable ID with a scrubbed reason; the others load", "recA2" in fails and PLAN_TOKEN not in fails and "abc.def.ghi" not in fails and len(res["failures"]) == 1, fails)
 fk = Fake()
 res, out = records(db2, fk, "--send", "--pass", "records")
-check("the next run sends only the record that failed", sum(len(b[3]) for b in fk.of("/v2/records/bulk")) == 1)
+check("the next run sends only the record that failed", sum(len(b[3]) for b in fk.of("/records/bulk")) == 1)
 
 # ---- guards
 check("a missing database is refused", "No such database" in (refused(["records", "--db", os.path.join(tmp, "nope.db"), "--base", "appL", "--config", cfgp, "--send"], opener=Fake()) or ""))

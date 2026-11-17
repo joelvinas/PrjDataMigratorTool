@@ -68,7 +68,7 @@ class FakeTr(object):
             raise RuntimeError("Planning refused the call, token=abc123secretvalue")
         out = []
         for _ in bodies:
-            self.n += 1; out.append("PR%03d" % self.n)
+            self.n += 1; out.append({"id": "PR%03d" % self.n})
         return out
     def update_record(self, rid, fields): self.updates.append((rid, fields))
 
@@ -144,15 +144,32 @@ creds = lc.credentials({"workfront": {"planning": {"base_url": "https://acme.my.
 def real(replies):
     h = wh.Http(creds, opener=Opener(replies), sleep=lambda s: None)
     return pt.PlanningTransport(h), h.opener
-tp, op = real([Resp(200, [{"id": "A"}, {"id": "B"}])])
-check("the transport posts the whole batch as a JSON array and returns the IDs in the order sent", tp.create_records([{"recordTypeId": "R", "fields": {}}, {"recordTypeId": "R", "fields": {}}]) == ["A", "B"]
-      and op.reqs[0].full_url.endswith("/v2/records/bulk") and op.reqs[0].get_method() == "POST" and isinstance(json.loads(op.reqs[0].data), list) and op.reqs[0].get_header("Authorization") == "Bearer " + SECRET)
-tp, _ = real([Resp(200, {"content": [{"id": "A"}]})])
+RES = lambda *rows: {"status": "ok", "total": len(rows), "results": list(rows)}
+tp, op = real([Resp(201, RES({"requestIndex": 0, "id": "A"}, {"requestIndex": 1, "id": "B"}))])
+got = tp.create_records([{"recordTypeId": "R", "fields": {"F1": "x"}}, {"recordTypeId": "R", "fields": {"F1": "y"}}])
+check("the transport posts to the record type's bulk route as a JSON array of {data} and returns each ID", got == [{"id": "A"}, {"id": "B"}]
+      and op.reqs[0].full_url.endswith("/v2/record-types/R/records/bulk") and op.reqs[0].get_method() == "POST"
+      and json.loads(op.reqs[0].data) == [{"data": {"F1": "x"}}, {"data": {"F1": "y"}}] and op.reqs[0].get_header("Authorization") == "Bearer " + SECRET, got)
+tp, op = real([Resp(201, RES({"requestIndex": 1, "id": "B"}, {"requestIndex": 0, "id": "A"}))])
+check("results are matched by requestIndex, not by position in the reply", tp.create_records([{"recordTypeId": "R", "fields": {}}, {"recordTypeId": "R", "fields": {}}]) == [{"id": "A"}, {"id": "B"}])
+tp, op = real([Resp(201, RES({"requestIndex": 0, "id": "A"})), Resp(201, RES({"requestIndex": 0, "id": "B"}))])
+got = tp.create_records([{"recordTypeId": "R2", "fields": {}}, {"recordTypeId": "R1", "fields": {}}])
+check("a batch is grouped by record type: one call each, in record type ID order, answers returned in the order given", got == [{"id": "B"}, {"id": "A"}]
+      and [r.full_url.split("/v2/")[1] for r in op.reqs] == ["record-types/R1/records/bulk", "record-types/R2/records/bulk"], [r.full_url for r in op.reqs])
+tp, _ = real([Resp(207, {"status": "partial", "total": 3, "succeeded": 2, "failed": 1, "results": [{"requestIndex": 0, "id": "A"},
+      {"requestIndex": 1, "id": "X", "status": "error", "error": {"code": "FORBIDDEN", "message": "The provided key does not match any fields: SECRET-VALUE"}}, {"requestIndex": 2, "id": "C"}]})])
+got = tp.create_records([{"recordTypeId": "R", "fields": {}}] * 3)
+check("a 207 result with an error is a failure even though it carries an id; only its code is kept, never the message text", got[0] == {"id": "A"} and got[2] == {"id": "C"}
+      and got[1] == {"error": "Planning refused this record (FORBIDDEN)"} and "SECRET-VALUE" not in json.dumps(got), got)
+tp, _ = real([Resp(201, RES({"requestIndex": 0, "id": "A"}))])
+got = tp.create_records([{"recordTypeId": "R", "fields": {}}, {"recordTypeId": "R", "fields": {}}])
+check("a record with no result in the reply is an error, never assumed created", got[0] == {"id": "A"} and "no result" in got[1]["error"], got)
+tp, _ = real([Resp(201, {"status": "ok"})])
 try:
-    tp.create_records([{"recordTypeId": "R", "fields": {}}, {"recordTypeId": "R", "fields": {}}]); lost = None
+    tp.create_records([{"recordTypeId": "R", "fields": {}}]); lost = None
 except Exception as e:
     lost = str(e)
-check("a reply with the wrong number of IDs is refused, because the records could not be matched", lost and "cannot be matched" in lost, lost)
+check("a reply with no results list is refused, because the records could not be matched", lost and "cannot be matched" in lost, lost)
 tp, op = real([Resp(200, {})])
 tp.update_record("PR1", {"FC": ["PR9"]})
 check("a record update is a PATCH of its fields", op.reqs[0].get_method() == "PATCH" and op.reqs[0].full_url.endswith("/v2/records/PR1") and json.loads(op.reqs[0].data) == {"fields": {"FC": ["PR9"]}})
