@@ -10,6 +10,8 @@ A local, standard-library-only Python web app (`server.py`, plain HTML/CSS/JS, S
 
 Every Python module lives in `src/` (run the app with `python src/server.py`, the loader with `python src/loader.py`). The pages (`*.html`, `*.js`, `style.css`), `config.json`, `db/`, `data_extract/`, `sql/`, `docs/` and `test/` stay at the project root. `server.py` finds the project root from its own location, so new modules go in `src/` and tests add `src/` to their import path. Do not add loose `.py` files to the root.
 
+**Keep the root tidy.** Scratch files never go in the root: no `*.db`, logs, CSVs or exports. Throwaway files go in `tmp/` (git-ignored, safe to delete at any time); a one-off script's own output goes in `out/`. A hand-run test against a live server needs a database path that is relative to the project root, so use `tmp/name.db` (create `tmp/` first; the app only auto-creates `db/`), never a bare `name.db`. Delete what you create there when you are done.
+
 ## Standing rules
 
 - **Standard library only.** No new dependencies, no build step. Playwright is allowed in the optional browser tests only.
@@ -31,6 +33,7 @@ Every Python module lives in `src/` (run the app with `python src/server.py`, th
 ## Testing
 
 - Run `python test/run_regression.py` after every change (a single suite: `python test/run_regression.py names`). All suites must pass before a change is called done.
+- **Test databases never go in the root or in `db/`.** `test/run_regression.py` runs every suite in a throwaway copy of the project under the system temp folder (it skips `*.db`, `tmp/`, `db/`, `config.json` and `data_extract/`) and deletes it afterwards, so a suite can name its database freely (`"v.db"`) and it lands in that copy. Suites that make their own files use `tempfile.mkdtemp(prefix=...)`. Run a suite by hand only with the runner; if you must run one script against your own server, point it at `tmp/`. After a test run, `git status --short` and `ls *.db` in the root must show nothing new.
 - New behavior gets tests with fabricated data. Report real failures plainly; never describe a failing or skipped check as passing.
 
 ## Commits (this is where drafts go wrong, so follow it exactly)

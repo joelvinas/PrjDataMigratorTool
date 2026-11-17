@@ -31,7 +31,7 @@ def wait_port(port, secs=10):
 def run_suite(scripts, mock_files):
     work = tempfile.mkdtemp(prefix="regress_")
     proj = os.path.join(work, "p")
-    shutil.copytree(ROOT, proj, ignore=shutil.ignore_patterns("__pycache__", "*.db", "config.json", "data_extract", ".git", "db"))
+    shutil.copytree(ROOT, proj, ignore=shutil.ignore_patterns("__pycache__", "*.db", "config.json", "data_extract", ".git", "db", "tmp"))
     with open(os.path.join(proj, "config.json"), "w") as f:
         f.write('{"token":"%s","scopes":["data.records:read","schema.bases:read"],"bases":[{"name":"Sample Shop","baseId":"appSampleBase001"}],"db_path":"db/migration.db","requests_per_second":5}' % TOKEN)
     env = dict(os.environ, MOCK_FILES=mock_files, MOCK_PORT="9100", AIRTABLE_API_BASE="http://127.0.0.1:9100", AT_BACKOFF_BASE="0.2")
