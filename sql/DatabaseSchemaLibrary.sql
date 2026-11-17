@@ -639,3 +639,37 @@ CREATE TABLE field_writer_events (
     FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
 );
 CREATE INDEX idx_field_writer_events_field ON field_writer_events(airtable_field_id, event_id);
+
+-- 19. Where each table's Core objects are created, and the history of that decision (migration 020)
+-- table_core_objects says what a table BECOMES in Core (project, request or task); this says where each new object GOES: the parent's object code and
+-- ID as plain text (Workfront IDs are 32-character hex GUIDs; that check belongs to the page, not the database). A person decides; nothing is automatic.
+-- Codes and IDs only: no record value.
+CREATE TABLE table_core_parents (
+    table_id TEXT NOT NULL PRIMARY KEY,
+    base_id TEXT NOT NULL,
+    parent_obj_code TEXT,
+    parent_obj_id TEXT,
+    decided_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    CHECK ((parent_obj_code IS NULL) = (parent_obj_id IS NULL)),
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_core_parents_base ON table_core_parents(base_id);
+
+-- Append-only history of both decisions (the object type in table_core_objects, and the parent above), so a changed or cleared decision keeps what it was
+-- (the lesson of migrations 018 and 019).
+CREATE TABLE table_core_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_id TEXT NOT NULL,
+    base_id TEXT NOT NULL,
+    subject TEXT NOT NULL CHECK(subject IN ('object_type', 'parent')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('decide', 'change', 'clear')),
+    old_value TEXT,                              -- NULL when there was none before; for a parent: 'PROJ:<id>'
+    new_value TEXT,                              -- NULL after a clear
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
+);
+CREATE INDEX idx_table_core_events_table ON table_core_events(table_id, event_id);
