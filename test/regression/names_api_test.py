@@ -34,7 +34,7 @@ check("fabricated schema ingested", r.get("tables") == 3 and r.get("fields") == 
 
 s, d, h = raw("GET", "/names"); check("the page is served", s == 200 and b"Field review" in d and h["Content-Type"].startswith("text/html"))
 s, d, h = raw("GET", "/names.js"); check("the page script is served", s == 200 and b"decide(" in d and "javascript" in h["Content-Type"])
-s, st_ = get("/api/status"); check("server version matches the pages", st_["version"] == "1.15", st_.get("version"))
+s, st_ = get("/api/status"); check("server version matches the pages", st_["version"] == "1.16", st_.get("version"))
 
 # ---- review, the gate and scope
 s, rv = get("/api/names/review?base_id=" + BASE)
