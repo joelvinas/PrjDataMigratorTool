@@ -3,6 +3,7 @@
 
     python loader.py plan    --db db/migration.db --base appXXXXXXXXXXXXXX [--out out/loader]
     python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX [--env sandbox1|sandbox2|preview|production] [--out out/loader]
+    python loader.py reset   --db db/migration.db --base appXXXXXXXXXXXXXX --table tblXXXXXXXXXXXXXX [--planning-stage dev|uat] [--send --confirm "DELETE RECORDS IN DEV"]
     python loader.py config  [--config config.json]     (which Workfront credentials are set: yes or no only)
 
 The database is opened READ-ONLY and nothing is sent anywhere. `plan` lists everything the migration would create in Workfront Planning and
@@ -28,6 +29,7 @@ import attachments as at
 import coreobjects as co
 import recordload as rl
 import recordmap as rm
+import loadreset as rs
 import coretargets as tg
 import workfronthttp as wh
 
@@ -252,6 +254,66 @@ def _records(a, opener=None):
     return {"rows": rows, "failures": failures}
 
 
+def _reset(a, opener=None):
+    """Wipe one table's records in the Planning Workspace and clear what this tool remembers about them, so a reload starts clean. A dry run (the default) sends nothing at
+    all and only reports counts. The record type and fields stay. load_id_map is never touched. Counts only; no record value is read into a report."""
+    try:
+        data = lc.read_config(a.config)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    creds = lc.credentials(data, "planning")
+    if creds is None or not creds.workspace_id:
+        sys.exit("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % a.config)
+    try:
+        env = lr.resolve_environment(a.planning_stage, None, dry_run=not a.send, workspace_id=creds.workspace_id)
+    except ValueError as e:
+        sys.exit(str(e))
+    need = rs.phrase(env.name)
+    if a.send and a.confirm != need:
+        sys.exit("A reset deletes records and cannot be undone. To send it, add the exact phrase: --confirm \"%s\"" % need)
+    secrets = lc.secret_values(data)
+    if not os.path.isfile(a.db):
+        sys.exit("No such database: %s" % a.db)
+    conn = sqlite3.connect(a.db)
+    conn.row_factory = sqlite3.Row
+    ws = creds.workspace_id
+    try:
+        try:
+            name, rt = rs.target(conn, a.base, a.table, env.name, ws)
+        except rs.ResetError as e:
+            sys.exit(str(e))
+        before = rs.local_counts(conn, a.base, a.table, env.name, ws)
+        lines = ["Reset of table %s (%s) in %s, Workspace %s%s" % (a.table, name, env.name.upper(), ws, "" if a.send else ", dry run: nothing was sent"), "",
+                 "Mapped Planning records this tool holds for the table: %d. Pass markers: %s." % (before["mapped"], ", ".join("%s %d" % kv for kv in sorted(before["markers"].items())) or "none")]
+        result = {"before": before, "wipe": None, "cleared": None}
+        if not a.send:
+            lines += ["", "With --send --confirm \"%s\" it would:" % need,
+                      "  1. delete every record of the record type in Workfront Planning, 100 per call (the record type and its fields stay); the live count is read only when it runs;",
+                      "  2. then, once the record type lists empty, clear this table's rows from target_mappings and record_pass_markers for this stage and Workspace.",
+                      "load_id_map is not touched, so the record type and fields stay recorded as created."]
+        else:
+            tr = pt.PlanningTransport(wh.Http(creds, secrets, opener=opener))
+            try:
+                w = rs.wipe(tr, rt, ws)
+            except rs.ResetError as e:
+                sys.exit(str(e))
+            result["wipe"] = w
+            lines += ["", "Workfront: %d record(s) deleted in %d call(s), %d refused." % (w["deleted"], w["rounds"], w["failed"])]
+            for why, n in sorted(w["reasons"].items()):
+                lines.append("  %d x %s" % (n, why))
+            if w["left"] == 0:
+                result["cleared"] = rs.clear_local(conn, a.base, a.table, env.name, ws)
+                lines += ["The record type is empty. Cleared from this tool's memory: %d mapping(s), %d pass marker(s). The next 'records --send' starts clean." % (result["cleared"]["mappings"], result["cleared"]["markers"])]
+            else:
+                lines += ["The record type is NOT empty (%s still listed), so this tool's memory was left as it is. Run the reset again." % ("an unknown number" if w["left"] is None else "%d" % w["left"])]
+    finally:
+        conn.close()
+    text = lc.redact(chr(10).join(lines), secrets)
+    _write(a.out, "reset_summary.txt", text)
+    print(text + chr(10) + "Report written to %s" % a.out)
+    return result
+
+
 CORE_OBJECT_COLUMNS = ["table_id", "table_name", "object_code", "pending", "created", "failed", "note"]
 
 
@@ -393,6 +455,15 @@ def main(argv=None, opener=None):
     pr.add_argument("--table", dest="tables", action="append", metavar="TABLE_ID", help="limit the run to this table (repeatable); a run filter only, scope is not changed")
     pr.add_argument("--pass", dest="pass_name", default="both", choices=("both", "records", "links"))
     pr.add_argument("--batch", type=int, default=None, help="records per call (default: record_batch_size in config.json, else %d)" % rl.BATCH_DEFAULT)
+    pw = sub.add_parser("reset", help="delete one table's records in the Planning Workspace and clear what this tool remembers about them (dry run unless --send)")
+    pw.add_argument("--db", required=True)
+    pw.add_argument("--base", required=True, help="Airtable base ID")
+    pw.add_argument("--table", required=True, metavar="TABLE_ID", help="the one table to reset")
+    pw.add_argument("--out", default="out/loader")
+    pw.add_argument("--send", action="store_true", help="actually delete records in Workfront. Without it nothing is sent")
+    pw.add_argument("--confirm", default=None, help="the exact phrase a real reset needs: DELETE RECORDS IN DEV (or UAT)")
+    pw.add_argument("--config", default="config.json")
+    pw.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
     pc2 = sub.add_parser("core-objects", help="create one Core object (project, request or task) per record under the parent decided for its table")
     pc2.add_argument("--db", required=True)
     pc2.add_argument("--base", required=True, help="Airtable base ID")
@@ -418,6 +489,8 @@ def main(argv=None, opener=None):
         return _core_objects(a, opener)
     if a.cmd == "records":
         return _records(a, opener)
+    if a.cmd == "reset":
+        return _reset(a, opener)
     if a.cmd == "config":
         try:
             st = lc.status(lc.read_config(a.config))
