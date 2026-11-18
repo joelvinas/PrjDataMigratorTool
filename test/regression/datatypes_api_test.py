@@ -39,6 +39,22 @@ check("the review lists the 17 Planning types and the Core lists", len(rv["plann
 s, e = post("/api/datatypes/apply", A(system="planning", mode="defaults")); check("saving is refused with a plain message until the migrations are applied", s == 409 and "migrations 021 and 022" in e["error"], e)
 check("a bad base ID is refused", get("/api/datatypes/review?base_id=nope")[0] == 400)
 
+# ---- connecting reports the draft migrations as pending without blocking, and the script fixes it
+import subprocess
+s, r = post("/api/db/connect", {"path": "datatypes_api.db"})
+check("connect is still ready but names the pending migrations and the command", s == 200 and r["ready"] is True and [p["migration"] for p in r["pending_migrations"]] == [21, 22, 23]
+      and "sql/apply_draft_migrations.py" in r["pending_message"], r.get("pending_message"))
+p = subprocess.run([sys.executable, os.path.join("sql", "apply_draft_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
+check("the script applies 021 to 023", p.returncode == 0 and "021, 022, 023" in p.stdout, p.stdout + p.stderr)
+s, r = post("/api/db/connect", {"path": "datatypes_api.db"})
+check("after the script nothing is pending", r["ready"] is True and r["pending_migrations"] == [] and r["pending_message"] == "", r.get("pending_message"))
+p = subprocess.run([sys.executable, os.path.join("sql", "apply_draft_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
+check("a second run changes nothing", p.returncode == 0 and "Already up to date" in p.stdout, p.stdout + p.stderr)
+# put the database back to the library form so the rest of this suite still starts from the helper
+os.remove("datatypes_api.db")
+post("/api/db/create", {"path": "datatypes_api.db"}); post("/api/db/connect", {"path": "datatypes_api.db"})
+post("/api/schema/ingest", {"base_id": BASE, "source": "json", "schema_json": json.dumps(schema)})
+
 # ---- apply the migrations to the test database (the server opens it per request)
 c = sqlite3.connect("datatypes_api.db"); tf.apply_migrations(c); c.close()
 s, rv = get("/api/datatypes/review?base_id=" + BASE); check("after the migrations the page is ready and the defaults are listed", s == 200 and rv["ready"] is True and len(rv["defaults"]) == 60)

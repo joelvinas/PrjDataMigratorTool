@@ -111,7 +111,8 @@ airtable-migration-control/
 │   ├── migration_015_add_relationship_directions.sql  applied 2026-11-14: link direction columns
 │   ├── migration_016_load_id_map_workspace_key.sql  applied 2026-11-14: workspace_key in the load_id_map key
 │   ├── migration_017_add_record_id_map.sql         applied 2026-11-14: the record ID map (4 tables)
-│   └── apply_migrations.py             applies 001 to 017 to an existing database (safe to repeat)
+│   ├── apply_migrations.py             applies 001 to 017 to an existing database (safe to repeat)
+│   └── apply_draft_migrations.py       applies the DRAFT migrations 021 to 023 (safe to repeat; separate until they are folded in)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
@@ -292,6 +293,8 @@ Easiest, with Python only (no SQLite client needed):
 ```
 python sql/apply_migrations.py path/to/your.db
 ```
+
+The data type mapping (draft migrations 021 to 023) is applied separately, after the command above: `python sql/apply_draft_migrations.py path/to/your.db`. Connecting does not refuse a database that lacks them, but step 1 shows a warning with this command, and the Data types page cannot save until they are applied.
 
 It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. Migration 005 also drops the old placeholder tables `form_sections` and `form_fields`, and migration 006 drops `automation_catalog` and `automation_steps`, but only if they are empty (a placeholder with rows is kept and reported). The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
