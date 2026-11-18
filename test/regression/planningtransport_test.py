@@ -63,6 +63,10 @@ check("an unknown type, a missing record type, a form and an over-long descripti
 check("rich text is created as long text in Planning", body(t, item(dtype="Rich text"))["type"] == "long-text")
 check("describe shows the request and sends nothing, and an option has no call of its own", t.describe(item(), "RT1")["request"] == "POST /v2/record-types/RT1/fields" and t.describe(item("option", "Open", None), "F1") == dict(t.describe(item("option", "Open", None), "F1")) and t.describe(item("option", "Open", None), "F1")["body"] is None)
 
+dupmsg = str(raises(t.request_for, item(dtype="Multiple select", spec={"options": ["Berlin", "Paris", "berlin", "PARIS ", "Rome"]}), "RT1"))
+check("a select field whose options repeat once case is ignored is refused before any call, naming the repeats", "unique" in dupmsg and "'berlin'" in dupmsg and "'paris'" in dupmsg and "Rome" not in dupmsg and "Nothing was sent" in dupmsg, dupmsg)
+check("options that differ are still sent", len(body(t, item(dtype="Multiple select", spec={"options": ["Berlin", "Paris", "Rome"]}))["options"]) == 3)
+
 # ---- options come back with the field
 t, o = T([Resp(201, {"id": "F5", "options": [{"displayName": "Open", "name": "key-open"}, {"displayName": "Closed"}]})])
 fid = t.create(item(dtype="Single select", name="Status", spec={"options": ["Open", "Closed"]}), "RT1")

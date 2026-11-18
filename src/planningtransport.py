@@ -93,6 +93,16 @@ class PlanningTransport(object):
             names = list(spec.get("options") or [])
             if not names:
                 raise ValueError("A select field needs at least one option, and none of this field's options is ready.")
+            seen, dup = {}, []
+            for n in names:
+                k = " ".join(str(n).split()).lower()        # Planning compares display names ignoring letter case; spacing is folded here too, to be safe
+                if k in seen:
+                    dup.append(k if k not in dup else None)
+                seen[k] = n
+            dup = [d for d in dup if d]
+            if dup:
+                raise ValueError("%d option name(s) repeat another option of this field once letter case is ignored, and Planning refuses that (option display names must be unique): %s%s. Nothing was sent; the options must be made distinct first."
+                                 % (len(dup), "; ".join(repr(d) for d in sorted(dup)[:10]), " and more" if len(dup) > 10 else ""))
             body["options"] = [{"displayName": n} for n in names]
         elif vtype == "reference":
             target = [v for v in (refs or {}).values()]

@@ -112,6 +112,34 @@ Each is an undocumented or unconfirmed behavior to prove once in a sandbox befor
 4. Whether **select options can be added, renamed and reordered** after creation, and whether their IDs come back at creation. A multiple-select field with about 540 options (a location list) was refused with HTTP 400 on 18 November 2026; the reason was not readable at the time (see the error-text fix), so whether Planning caps the options of one create call is still unknown. Do not split the options across calls until the reason is read.
 5. The **500-field limits** (Planning record type, Core form) against the largest table.
 
+## Long option lists as their own record type (proposed 18 November 2026; NOT built)
+
+**Why.** A single or multiple select field with hundreds of options (a list of cities, 540 options) is not realistic as a select field, and its options often need more data of their own. The first attempt to send one failed: Planning answered HTTP 400 "option display names must be unique" because the list held names that repeat once letter case is ignored (Planning's rule for select options). The loader now refuses such a field before sending and names the repeats (`PlanningTransport.request_for`). A record type has no such rule (see "Verified" below), so a long list belongs in a record type of its own.
+
+**The idea.** A person authorizes a select field, field by field, to be migrated as a lookup record type instead of a select field. The tool flags fields with a long option list (a threshold the person sets, for example 50) and proposes; nothing is promoted without a decision, recorded with who, when and why. Core is out of scope for now.
+
+**A mini load order, before the table's own fields.** For each authorized field, in this order:
+1. If the lookup record type is not already registered in the database, create it with a temporary marker in its name. The ID is written to the database register as soon as it is known.
+2. Make its primary field carry the incoming field's name. The planned way is to rename the record type's existing primary field (`PATCH /v2/fields/{primaryFieldId}`), not to create a new field and delete the others; whether the PATCH is allowed on the primary field is **unverified** (Postman test below).
+3. Rename the record type to remove the marker. Until then a stopped run can find the half-built record type again, by the register or by either name.
+4. Bulk-create one record per option (the existing bulk record call, in batches), with the option's name in the primary field. Keep the Planning record ID of each one against the Airtable choice ID (`airtable_fields.choices_json`, `id`). Only IDs are stored; no option text goes into the database, a log or a report.
+
+Only after the lookups a table uses exist does that table's structure load. The select field is then created as a Planning **reference** field (not a select type) pointing at the lookup record type: `multiple` true for a multiple select and false for a single select, with `createBackReference` false (a one-sided link). Because the lookup records already exist, the field's values go in the table's ordinary records pass; the links second pass is not needed for these fields.
+
+**Mapping the values.** The saved records hold the option NAME as text, not the choice ID. A value is matched to a declared choice by exact name (as Airtable does), the choice to its stored lookup record ID, and that ID is sent. Two options that differ only by case stay two lookup records unless a person merges them. A value that matches no declared option (the select-values report already finds these) needs a person's decision: add it as a new lookup record, point it at a near match, or leave it out. Nothing is decided silently.
+
+**Several fields, one list.** Fields that draw on the same list may share one lookup record type; a person chooses that when authorizing, and the shared record type is created once.
+
+**Still to design, and why it is not built.**
+- Storage for the authorization (who, when, why, and which lookup a field uses) is a new table: an additive schema change. It is proposed to the owner first as a `CREATE TABLE` in the style of `sql/DatabaseSchemaLibrary.sql` plus a repeatable `sql/migration_NNN_*.sql`, and is not folded into the library, the embedded DDL or `sql/apply_migrations.py` until the owner confirms it is applied. Whether the existing record map (`source_records`, `target_mappings`) can hold the choice-ID keys, or a new table is needed, is to be checked first.
+- The plan: the new items, the threshold flag, the limit of 30 reference fields per record type in `planlimits.py`, and the reset step, which must know these record types.
+- The record-type setup step with its resume logic, the lookup record load, and the value conversion in `recordload.py`.
+
+**Verified by the owner (18 November 2026, Postman).** `GET /v2/record-types/{id}` returns `primaryFieldId`. Two records whose primary values are `Paris` and `paris` were both accepted, so record names are not forced to be unique. Not yet known: the primary field's type, whether the create call's reply also carries `primaryFieldId`, and whether other fields exist on a new record type.
+
+**Postman test to run before building** (DEV Workspace, the owner's own token; the app never holds it):
+`POST {base}/v2/workspaces/{workspaceId}/record-types` with `{"displayName": "ZZ Test"}`; `GET {base}/v2/record-types/{id}/fields?limit=100`; `PATCH {base}/v2/fields/{primaryFieldId}` with `{"displayName": "New name"}` and read it back; `PATCH {base}/v2/record-types/{id}` with a new `displayName`; then `DELETE {base}/v2/record-types/{id}`. Here `{base}` is the Planning base URL plus `/maestro/api`. Record whether each call works and what the reply holds.
+
 ## Risks
 
 - A record type delete **also deletes its records** ([Adobe](https://experienceleague.adobe.com/en/docs/workfront-fusion/using/references/apps-and-their-modules/adobe-connectors/workfront-planning-modules)); the loader never deletes a record type; `reset` deletes only the records of one table, and the record type and fields stay.
