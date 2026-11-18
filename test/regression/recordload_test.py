@@ -4,6 +4,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 import loadconfig as lc, loadrun as lr, recordload as rl, recordmap as rm, workfronthttp as wh, planningtransport as pt
+from workfronthttp import HttpError
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
@@ -126,6 +127,51 @@ row = r3["tables"][0]
 check("one bad record does not stop the others: the batch is split and only the bad one fails", r3["created"] == 2 and r3["failed"] == 1 and row["failures"][0][0] == "recO2", r3)
 check("the failure reason is scrubbed of credentials", "abc123secretvalue" not in json.dumps(row["failures"]) and "[removed]" in json.dumps(row["failures"]), row["failures"])
 check("the failed record stays pending, so the next run tries it again", [r for _u, r in rm.pending_records(c3, "appL", "tOrd", "records", "dev", "planning", "wsDev")] == ["recO2"])
+
+# ---- a partly failed batch (207) keeps its successes and fails only the failed records
+class ScriptTr(object):
+    """Answers each create_records call from a script: a list of results, or an exception to raise. Records what it was sent."""
+    def __init__(self, script): self.script, self.sent = list(script), []
+    def create_records(self, bodies):
+        self.sent.append([b["fields"].get("FT") for b in bodies])
+        r = self.script.pop(0) if self.script else [{"id": "AUTO%d" % (len(self.sent) * 10 + i)} for i in range(len(bodies))]
+        if isinstance(r, Exception): raise r
+        return r
+def fresh():
+    c = db(); rm.register(c, "appL", "tOrd", ["recO1", "recO2", "recO3"]); return c
+def pend(c): return [r for _u, r in rm.pending_records(c, "appL", "tOrd", "records", "dev", "planning", "wsDev")]
+TO = {"tOrd": T["tOrd"]}
+def go(c, tr, batch=3): return rl.load_records(c, "appL", TO, "x", tr, "dev", "wsDev", batch=batch, dry_run=False, reader=reader)
+
+c4 = fresh(); s4 = ScriptTr([[{"id": "N1"}, {"id": "N2"}, {"id": "N3"}]]); r4 = go(c4, s4)
+check("all succeed: one call, three records created and marked", r4["created"] == 3 and r4["failed"] == 0 and len(s4.sent) == 1 and pend(c4) == [])
+
+c5 = fresh(); s5 = ScriptTr([[{"id": "N1"}, {"error": "Planning refused this record (FORBIDDEN)"}, {"id": "N3"}]]); r5 = go(c5, s5)
+row5 = r5["tables"][0]
+check("a middle record fails (207): the other two are recorded, only the failed one is failed, and nothing is sent again in the run", r5["created"] == 2 and r5["failed"] == 1 and len(s5.sent) == 1
+      and row5["failures"] == [("recO2", "Planning refused this record (FORBIDDEN)")], (r5, s5.sent))
+u1, u3 = rm.lookup(c5, "appL", "tOrd", "recO1"), rm.lookup(c5, "appL", "tOrd", "recO3")
+check("the successes are mapped to their own new IDs by position of the record, and only the failed record stays pending",
+      rm.targets_of(c5, u1, "planning", "dev", "wsDev") == [("record", "N1")] and rm.targets_of(c5, u3, "planning", "dev", "wsDev") == [("record", "N3")] and pend(c5) == ["recO2"])
+check("no record value reaches the failure list or the database", "Two" not in json.dumps(row5["failures"]) and not any("Two" in str(v) for t in ("source_records", "target_mappings", "record_pass_markers") for rw in c5.execute("select * from " + t) for v in rw))
+s5b = ScriptTr([[{"id": "N2"}]]); r5b = go(c5, s5b)
+check("the same batch run again sends ONLY the failed record: nothing that succeeded is sent twice", s5b.sent == [["Two"]] and r5b["created"] == 1 and pend(c5) == [])
+s5c = ScriptTr([]); go(c5, s5c)
+check("and a third run sends nothing", s5c.sent == [])
+
+c6 = fresh(); s6 = ScriptTr([HttpError("Planning refused the call (400) key=abc", 400)]); r6 = go(c6, s6)
+check("a whole batch refused: nothing is known to exist, so the records are sent one at a time and all load", r6["created"] == 3 and r6["failed"] == 0 and len(s6.sent) == 4 and [len(x) for x in s6.sent] == [3, 1, 1, 1])
+
+c7 = fresh(); s7 = ScriptTr([[{"id": "N1"}, {"error": "the reply has no result for this record; it may exist in Planning, so check there before running again"}, {"id": "N3"}]]); r7 = go(c7, s7)
+check("a reply missing an index: that record fails with a 'check Planning' reason and is not resent in the run; the others are recorded", r7["created"] == 2 and r7["failed"] == 1 and len(s7.sent) == 1
+      and "check there" in r7["tables"][0]["failures"][0][1] and pend(c7) == ["recO2"])
+
+c8 = fresh(); s8 = ScriptTr([pt.UnmatchedReply("The create call worked but its reply has no results list, so the records cannot be matched.")]); r8 = go(c8, s8)
+check("a reply that cannot be matched at all: the records may exist, so none is resent and all are failed", r8["created"] == 0 and r8["failed"] == 3 and len(s8.sent) == 1 and len(pend(c8)) == 3)
+
+c9 = fresh(); s9 = ScriptTr([[{"id": "N1"}, {"error": "x"}, {"error": "y"}], [{"id": "N2"}, {"id": "N3"}]]); r9 = go(c9, s9)
+r9b = go(c9, s9)
+check("two failures then a rerun: the rerun sends exactly those two, in one call, and finishes", s9.sent == [["One", "Two", "Three"], ["Two", "Three"]] and r9["failed"] == 2 and r9b["created"] == 2 and pend(c9) == [])
 
 # ---- the real transport: route, body, order of IDs
 SECRET = "fakeBEARER0123456789"

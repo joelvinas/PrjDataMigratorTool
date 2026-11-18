@@ -31,6 +31,10 @@ DATE_FORMAT = "locale"      # the example value in the v2 reference; unverified 
 MAX_PAGES = 100
 
 
+class UnmatchedReply(HttpError):
+    """Planning answered, but the answer cannot be matched to the records sent, so they MAY exist. The caller must not send them again."""
+
+
 class PlanningTransport(object):
     system = "planning"
 
@@ -157,7 +161,7 @@ class PlanningTransport(object):
             reply = self.http.request("POST", "/v2/record-types/%s/records/bulk" % rt, [{"data": bodies[p].get("fields") or {}} for p in positions])
             rows = reply.get("results") if isinstance(reply, dict) else None
             if not isinstance(rows, list):
-                raise HttpError("The create call worked but its reply has no results list, so the records cannot be matched.")
+                raise UnmatchedReply("The create call worked but its reply has no results list, so the records cannot be matched.")
             seen = {}
             for r in rows:
                 i = r.get("requestIndex") if isinstance(r, dict) else None
@@ -166,7 +170,7 @@ class PlanningTransport(object):
             for i, p in enumerate(positions):
                 got = seen.get(i) or []
                 if len(got) != 1:
-                    out[p] = {"error": "the reply has no result for this record" if not got else "the reply holds two results for this record"}
+                    out[p] = {"error": "the reply has no result for this record; it may exist in Planning, so check there before running again" if not got else "the reply holds two results for this record; check Planning before running again"}
                     continue
                 r = got[0]
                 if r.get("error") or str(r.get("status") or "").lower() == "error":
