@@ -78,11 +78,12 @@ function renderDefaults() {
     const pt = select(D.R.planning_types, p.type, "Planning default for " + at), cd = select(D.R.core_data_types, c.type, "Core dataType default for " + at);
     const cp = select(D.R.core_display_types, c.display_type, "Core displayType default for " + at);
     const note = (p.note || "") + (p.note && c.note ? " / " : "") + (c.note || "");
+    const rules = el("td", { class: "hint" }, [p.rule_text ? el("div", { text: "Planning: " + p.rule_text }) : null, c.rule_text ? el("div", { text: "Core: " + c.rule_text }) : null]);
     const save = btn("Save", async () => {
       const a = await decide("/api/datatypes/default", { system: "planning", airtable_type: at, type: pt.value || null }, "bulkMessage", null);
       if (a) await decide("/api/datatypes/default", { system: "core", airtable_type: at, type: cd.value || null, display_type: cp.value || null }, "bulkMessage", "Defaults for " + at + " saved.");
     }, { disabled: !D.R.ready });
-    body.appendChild(el("tr", {}, el("td", { text: at }), el("td", {}, pt), el("td", {}, cd), el("td", {}, cp), el("td", { class: "hint", text: note }), el("td", {}, save)));
+    body.appendChild(el("tr", {}, el("td", { text: at }), el("td", {}, pt), el("td", {}, cd), el("td", {}, cp), el("td", { class: "hint", text: note }), rules, el("td", {}, save)));
   }
 }
 
@@ -146,7 +147,8 @@ function renderFields() {
     const cd = select(D.R.core_data_types, f.core.type, "Core dataType for " + f.field_name);
     const cp = select(D.R.core_display_types, f.core.display_type, "Core displayType for " + f.field_name);
     const hint = (x, sys) => el("div", {}, tag(STATE_TEXT[x.state][0], STATE_TEXT[x.state][1]),
-      x.proposed ? el("div", { class: "hint", text: "default: " + x.proposed.type + (x.proposed.display_type ? " / " + x.proposed.display_type : "") }) : el("div", { class: "hint", text: "no default" }));
+      x.proposed ? el("div", { class: "hint", text: "default: " + x.proposed.type + (x.proposed.display_type ? " / " + x.proposed.display_type : "") }) : el("div", { class: "hint", text: "no default" }),
+      x.note ? el("div", { class: "hint", text: x.note }) : null);
     const save = (sys) => btn("Save " + sys, () => decide("/api/datatypes/apply", { system: sys, mode: "each", changes: [{ field_id: f.field_id, type: sys === "planning" ? pt.value : cd.value, display_type: sys === "core" ? cp.value : null }] },
       "fieldsMessage", "Saved " + f.field_name + "."), { disabled: !D.R.ready });
     body.appendChild(el("tr", {}, el("td", { text: f.table_name }), el("td", {}, el("div", { text: f.field_name }), el("div", { class: "hint", text: f.field_id })), el("td", { text: f.airtable_type }),

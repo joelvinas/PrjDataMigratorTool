@@ -48,6 +48,7 @@ import recordmap
 import tableload
 import coretargets
 import selectvalues
+import fieldnames_io as names_io
 import fieldnames_report as names_report
 import fieldnames_store as names_store
 import datatypes_store as types_store
@@ -5294,6 +5295,11 @@ def api_names_groups_dissolve(body):
         return dict(r, review=_names(names_store.review, conn, base))
 
 
+def api_names_import_template(_q=None):
+    """The import template: the header and one obvious dummy row (the importer skips it). No database is needed."""
+    return (names_io.template_csv().encode("utf-8"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="field-names-and-types-template.csv"'})
+
+
 def api_names_import(body):
     with db() as conn:
         base = _names_base(body)
@@ -5566,7 +5572,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
               "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
               "/api/names/review": api_names_review, "/api/datatypes/review": api_datatypes_review, "/api/names/report": api_names_report,
-              "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
+              "/api/names/import-template.csv": api_names_import_template, "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,

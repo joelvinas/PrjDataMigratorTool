@@ -20,6 +20,27 @@ import fielddesc as fd
 import fieldnames as fn
 
 COLUMNS = ("field_id", "old_name", "new_name", "new_label", "old_datatype", "new_datatype")
+# The import file's headers, matched ignoring case, spaces, underscores and hyphens. new_name feeds BOTH names; planning_name and core_name override it per target.
+# new_dataType (or planning_data_type) is the Planning type; the Core dataType and displayType are two columns because the Core API needs both.
+HEADERS = {"field_id": ("fieldid",), "old_name": ("oldname",), "base_id": ("baseid",), "old_datatype": ("olddatatype",), "new_name": ("newname",),
+           "planning_name": ("planningname",), "core_name": ("corename",), "new_label": ("newlabel", "corelabel"),
+           "planning_type": ("newdatatype", "planningdatatype", "planningtargettype"), "core_type": ("coredatatype", "coretargettype"), "core_display": ("coredisplaytype",)}
+TEMPLATE_HEADER = ("field_id", "old_name", "old_dataType", "planning_name", "core_name", "core_label", "planning_data_type", "core_data_type", "core_display_type")
+TEMPLATE_ROW = ("fldEXAMPLE0000000", "Example field (DELETE THIS ROW)", "singleSelect", "Example Planning Name", "Example Core Name", "Example Core Label", "single-select", "TEXT", "SLCT")
+EXAMPLE_PREFIX = "fldexample"
+
+
+def template_csv():
+    """The import template: the header and ONE obvious dummy row (its field_id starts with fldEXAMPLE; the importer skips it). UTF-8 with a BOM, so Excel opens it."""
+    out = io.StringIO(newline="")
+    w = csv.writer(out, lineterminator="\r\n")
+    w.writerow(TEMPLATE_HEADER)
+    w.writerow(TEMPLATE_ROW)
+    return "\ufeff" + out.getvalue()
+
+
+def _hkey(h):
+    return re.sub(r"[^a-z0-9]", "", (h or "").lower())
 
 
 def decode_csv(data):
@@ -36,7 +57,9 @@ def _norm_type(s):
 
 
 def parse_import(text, db_fields, other_base_ids=(), base_id=None):
-    """Match the spreadsheet to the database. Returns {manual, target_types, problems, rows}.
+    """Match the spreadsheet to the database. Returns {manual, target_types, core_types, problems, rows}.
+    manual {field_id: {planning_name, core_name, core_label}}; target_types {field_id: Planning type}; core_types {field_id: (dataType, displayType)}. A type is kept
+    only when it is on its list (src/datatypes.py): anything else is reported and not stored, and a Core type needs BOTH values.
     A row is matched on field_id first; only when the ID is blank or not in this base is the name used, compared after trimming spaces at both
     ends and only when exactly one field has that trimmed name (an ambiguous name is reported, never guessed). Nothing is renamed: the database
     name is shown untrimmed in the problem text so the difference is visible.
@@ -48,21 +71,28 @@ def parse_import(text, db_fields, other_base_ids=(), base_id=None):
     for f in db_fields:
         by_name.setdefault((f["field_name"] or "").strip(), []).append(f["field_id"])
     other = set(other_base_ids)
-    problems, manual, target_types, seen = [], {}, {}, set()
+    problems, manual, target_types, core_types, seen = [], {}, {}, {}, set()
     def prob(kind, sev, fid, detail):
         problems.append({"kind": kind, "severity": sev, "field_id": fid or "", "detail": detail})
     reader = csv.DictReader(io.StringIO(text, newline=""))
-    cols = {(h or "").strip().lower(): h for h in (reader.fieldnames or [])}
+    heads = {_hkey(h): h for h in (reader.fieldnames or [])}
+    cols = {k: heads[a] for k, names in HEADERS.items() for a in names if a in heads}
     if "field_id" not in cols:
         prob("MISSING_COLUMN", "error", "", "The file has no field_id column; nothing was imported.")
-        return {"manual": {}, "target_types": {}, "problems": problems, "rows": 0}
-    for c in COLUMNS[1:]:
-        if c not in cols:
-            prob("MISSING_COLUMN", "warn", "", "No %s column." % c)
+        return {"manual": {}, "target_types": {}, "core_types": {}, "problems": problems, "rows": 0}
+    if not ({"new_name", "planning_name", "core_name"} & set(cols)):
+        prob("MISSING_COLUMN", "warn", "", "No new_name column (or planning_name and core_name).")
+    if "new_label" not in cols:
+        prob("MISSING_COLUMN", "warn", "", "No new_label (or core_label) column.")
+    if bool("core_type" in cols) != bool("core_display" in cols):
+        prob("MISSING_COLUMN", "warn", "", "A Core type needs both a core_data_type and a core_display_type column; no Core type can be imported from this file.")
     get = lambda row, c: (row.get(cols[c]) or "").strip() if c in cols else ""
     n, other_rows = 0, 0
     for n, row in enumerate(reader, start=2):               # row 1 is the header
         fid = get(row, "field_id")
+        if fid.lower().startswith(EXAMPLE_PREFIX):
+            prob("TEMPLATE_EXAMPLE_ROW", "info", fid, "Row %d is the template's example row and was skipped." % n)
+            continue
         row_base = get(row, "base_id")
         if (row_base and base_id and row_base != base_id) or (fid and fid not in by_id and fid in other):
             other_rows += 1
@@ -98,25 +128,37 @@ def parse_import(text, db_fields, other_base_ids=(), base_id=None):
                 prob("OLD_NAME_MISMATCH", "warn", fid, "Spreadsheet says '%s'; the database has '%s'. The field may have been renamed in Airtable." % (get(row, "old_name"), f["field_name"]))
         if "old_datatype" in cols and get(row, "old_datatype") and _norm_type(get(row, "old_datatype")) != _norm_type(f["data_type"]):
             prob("OLD_TYPE_MISMATCH", "warn", fid, "Spreadsheet says '%s'; the database has '%s'." % (get(row, "old_datatype"), f["data_type"]))
-        nm, lb = get(row, "new_name"), get(row, "new_label")
-        if nm or lb:
-            manual[fid] = {"planning_name": nm, "core_name": nm, "core_label": lb}
-        if not nm:
+        both, lb = get(row, "new_name"), get(row, "new_label")
+        pn, cn = get(row, "planning_name") or both, get(row, "core_name") or both
+        if pn or cn or lb:
+            manual[fid] = {"planning_name": pn, "core_name": cn, "core_label": lb}
+        if not (pn or cn):
             prob("BLANK_NEW_NAME", "warn", fid, "No new_name; the Airtable name is validated instead.")
         if not lb:
             prob("BLANK_NEW_LABEL", "info", fid, "No new_label; the Airtable name is validated as the label.")
-        if get(row, "new_datatype"):
-            canon = dt.planning_type(get(row, "new_datatype"))
+        if get(row, "planning_type"):
+            canon = dt.planning_type(get(row, "planning_type"))
             if canon:
                 target_types[fid] = canon
             else:
-                prob("NEW_TYPE_NOT_ON_LIST", "warn", fid, "new_dataType '%s' is not a Workfront Planning data type (%s), so no type was stored for this field; set it on the Data types page."
-                     % (get(row, "new_datatype"), ", ".join(dt.PLANNING_TYPES)))
+                prob("NEW_TYPE_NOT_ON_LIST", "warn", fid, "The Planning data type '%s' is not a Workfront Planning data type (%s), so no type was stored for this field; set it on the Data types page."
+                     % (get(row, "planning_type"), ", ".join(dt.PLANNING_TYPES)))
+        cd, cp = get(row, "core_type"), get(row, "core_display")
+        if cd or cp:
+            pair = dt.core_pair(cd, cp)
+            if not (cd and cp):
+                prob("CORE_PAIR_INCOMPLETE", "warn", fid, "A Core type needs BOTH a dataType and a displayType (the file has '%s' and '%s'), so no Core type was stored for this field." % (cd, cp))
+            elif not pair:
+                prob("CORE_TYPE_NOT_ON_LIST", "warn", fid, "%s No Core type was stored for this field; set it on the Data types page." % dt.core_problem(cd, cp))
+            else:
+                core_types[fid] = pair
+                if pair[0] == "RICH":
+                    prob("CORE_RICH_BY_HAND", "info", fid, "A RICH Core field cannot be created through the API: it is stored, but the loader will refuse to create it. Create it by hand in the Custom Form interface.")
     for fid in sorted(set(by_id) - seen):
         prob("MISSING_FROM_IMPORT", "warn", fid, "'%s' is in the database but not in the spreadsheet." % by_id[fid]["field_name"])
     if other_rows:
         prob("OTHER_BASE", "info", "", "%d row%s belong%s to another base and %s ignored." % (other_rows, "" if other_rows == 1 else "s", "s" if other_rows == 1 else "", "was" if other_rows == 1 else "were"))
-    return {"manual": manual, "target_types": target_types, "problems": problems, "rows": len(seen)}
+    return {"manual": manual, "target_types": target_types, "core_types": core_types, "problems": problems, "rows": len(seen)}
 
 
 def load_db(path, base_id):

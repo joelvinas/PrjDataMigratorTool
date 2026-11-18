@@ -52,9 +52,10 @@
 
 <section class="card" id="defaultsCard">
   <h2><span class="num">B</span> Default mapping</h2>
+  <div class="note info"><b>Rich text in Core.</b> The API can create a text area (<code>TEXT</code> with <code>TXTA</code>) but not a true rich text field (dataType <code>RICH</code>). A rich text field can be created by hand in the Custom Form interface, so a Core default is never <code>RICH</code>.</div>
   <p class="hint">What the tool proposes for each Airtable field type. Change a default and the proposal changes for every field of that type; nothing already set is touched. A blank default means a person must decide each field.</p>
   <div class="tablewin" id="defaultsWin" tabindex="0"><table class="grid" id="defaultsGrid"><thead><tr>
-    <th>Airtable type</th><th>Planning type</th><th>Core dataType</th><th>Core displayType</th><th>Note</th><th></th>
+    <th>Airtable type</th><th>Planning type</th><th>Core dataType</th><th>Core displayType</th><th>Note</th><th>Transformation rule</th><th></th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 

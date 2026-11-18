@@ -26,6 +26,8 @@ def missing(conn):
     out = [t for t in TABLES if not fs.has_table(conn, t)]
     if NEEDS_COLUMN not in {r[1] for r in conn.execute("PRAGMA table_info(field_names)")}:
         out.append("field_names." + NEEDS_COLUMN)
+    if fs.has_table(conn, "data_type_defaults") and "rule_text" not in {r[1] for r in conn.execute("PRAGMA table_info(data_type_defaults)")}:
+        out.append("data_type_defaults.rule_text")
     return out
 
 
@@ -56,11 +58,11 @@ def _check_value(system, type_, display):
 
 # ---------------------------------------------------------------- the default mapping
 def read_defaults(conn):
-    """[{system, airtable_type, type, display_type, note, updated_by, updated_at}], sorted. Empty until migration 021 exists."""
+    """[{system, airtable_type, type, display_type, note, rule_text, updated_by, updated_at}], sorted. Empty until migration 021 exists (rule_text is NULL until 023)."""
     if not fs.has_table(conn, "data_type_defaults"):
         return []
     return [{"system": r["system"], "airtable_type": r["airtable_type"], "type": r["default_type"], "display_type": r["default_display_type"], "note": r["note"],
-             "updated_by": r["updated_by"], "updated_at": r["updated_at"]}
+             "rule_text": r["rule_text"] if "rule_text" in r.keys() else None, "updated_by": r["updated_by"], "updated_at": r["updated_at"]}
             for r in conn.execute("SELECT * FROM data_type_defaults ORDER BY system, airtable_type")]
 
 
@@ -241,15 +243,15 @@ def clear_invalid(conn, base_id, actor, reason):
     return {"batch": batch, "cleared": cleared}
 
 
-def record_import(conn, actor, imported, batch):
-    """After a spreadsheet import stored Planning types, record who imported them. imported = {field_id: (old type or None, new type)}, new already on the list.
-    Nothing happens before the migrations are applied."""
+def record_import(conn, actor, items, batch):
+    """After a spreadsheet import stored types, record who imported them. items = [(field_id, system, old_type, old_display, new_type, new_display)], new already on
+    its list. Nothing happens before the migrations are applied."""
     if missing(conn):
         return 0
-    for fid, (old, new) in sorted(imported.items()):
-        conn.execute("INSERT INTO field_type_decisions(airtable_field_id, system, chosen_type, source, decided_by, reason) VALUES (?,?,?,?,?,?) "
-                     "ON CONFLICT(airtable_field_id, system) DO UPDATE SET chosen_type=excluded.chosen_type, chosen_display_type=NULL, source=excluded.source, "
-                     "decided_by=excluded.decided_by, decided_at=CURRENT_TIMESTAMP, reason=excluded.reason", (fid, "planning", new, "import", actor, batch))
-        conn.execute("INSERT INTO data_type_events(batch_id, airtable_field_id, system, event_type, old_type, new_type, source, actor, reason) VALUES (?,?,?,?,?,?,?,?,?)",
-                     (batch, fid, "planning", "change" if old else "set", old, new, "import", actor, batch))
-    return len(imported)
+    for fid, system, old, old_disp, new, new_disp in sorted(items):
+        conn.execute("INSERT INTO field_type_decisions(airtable_field_id, system, chosen_type, chosen_display_type, source, decided_by, reason) VALUES (?,?,?,?,?,?,?) "
+                     "ON CONFLICT(airtable_field_id, system) DO UPDATE SET chosen_type=excluded.chosen_type, chosen_display_type=excluded.chosen_display_type, "
+                     "source=excluded.source, decided_by=excluded.decided_by, decided_at=CURRENT_TIMESTAMP, reason=excluded.reason", (fid, system, new, new_disp, "import", actor, batch))
+        conn.execute("INSERT INTO data_type_events(batch_id, airtable_field_id, system, event_type, old_type, old_display_type, new_type, new_display_type, source, actor, reason) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)", (batch, fid, system, "change" if old or old_disp else "set", old, old_disp, new, new_disp, "import", actor, batch))
+    return len(items)

@@ -36,7 +36,7 @@ B = "appTypes001"
 for tid, nm in (("tA", "Orders"), ("tB", "Customers")):
     c.execute("insert into airtable_tables(table_id, base_id, table_name) values (?,?,?)", (tid, B, nm))
 F = [("f1", "tA", "Orders", "Title", "singleLineText"), ("f2", "tA", "Orders", "Notes", "multilineText"), ("f3", "tA", "Orders", "Status", "singleSelect"),
-     ("f4", "tA", "Orders", "Due", "dateTime"), ("f5", "tA", "Orders", "Mystery", "autoNumber"), ("f6", "tB", "Customers", "Name", "singleLineText"),
+     ("f4", "tA", "Orders", "Due", "dateTime"), ("f5", "tA", "Orders", "Mystery", "barcode"), ("f6", "tB", "Customers", "Name", "singleLineText"),
      ("f7", "tB", "Customers", "Owner", "singleCollaborator"), ("f8", "tB", "Customers", "Old", "singleLineText")]
 for r in F:
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values (?,?,?,?,?,?,'2026-01-01 10:00:00.000000')", (B, r[1], r[2], r[0], r[3], r[4]))
@@ -50,18 +50,18 @@ e = refused(dts.apply, c, B, "JV", "why", "planning", "defaults")
 check("saving is refused plainly until migrations 021 and 022 are applied", e and e.status == 409 and "migrations 021 and 022" in e.message, e and e.message)
 
 tf.apply_migrations(c); tf.apply_migrations(c)
-check("the migrations apply, and a second run changes nothing", dts.missing(c) == [] and c.execute("select count(*) from data_type_defaults").fetchone()[0] == 52)
+check("the migrations apply, and a second run changes nothing", dts.missing(c) == [] and c.execute("select count(*) from data_type_defaults").fetchone()[0] == 60)
 check("the view shows target_type under its clear name", [r[1] for r in c.execute("pragma table_info(field_data_types)")] == ["airtable_field_id", "planning_target_type", "core_target_type", "core_display_type"])
 dflt = {(d["system"], d["airtable_type"]): d for d in dts.read_defaults(c)}
 check("the default mapping: Planning uses the 17 types, Core keeps dataType and displayType apart", dflt[("planning", "singleSelect")]["type"] == "single-select"
       and (dflt[("core", "multilineText")]["type"], dflt[("core", "multilineText")]["display_type"]) == ("TEXT", "TXTA") and dflt[("core", "singleSelect")]["display_type"] == "SLCT"
-      and dflt[("planning", "autoNumber")]["type"] is None and dflt[("core", "formula")]["type"] is None)
+      and dflt[("planning", "manualSort")]["type"] is None and dflt[("planning", "autoNumber")]["type"] == "number" and dflt[("core", "formula")]["type"] is None)
 check("every seeded default is on its list", all(d["type"] is None or (dt.planning_type(d["type"]) == d["type"] if s == "planning" else dt.core_pair(d["type"], d["display_type"]) == (d["type"], d["display_type"]))
       for (s, _), d in dflt.items()))
 
 rv = dts.review(c, B)
 f = {x["field_id"]: x for x in rv["fields"]}
-check("the review proposes each field's default for each system, and has none for an autoNumber", f["f3"]["planning"]["proposed"] == {"type": "single-select", "display_type": None}
+check("the review proposes each field's default for each system, and has none for a type with no row", f["f3"]["planning"]["proposed"] == {"type": "single-select", "display_type": None}
       and f["f3"]["core"]["proposed"] == {"type": "TEXT", "display_type": "SLCT"} and f["f5"]["planning"]["proposed"] is None and rv["ready"] is True)
 check("fields are in a fixed order: table, then field", [x["field_id"] for x in rv["fields"]] == ["f6", "f8", "f7", "f4", "f5", "f2", "f3", "f1"], [x["field_id"] for x in rv["fields"]])
 
@@ -136,7 +136,7 @@ check("a changed default changes the proposal, and leaves fields already set alo
 
 # ---- the spreadsheet importer keeps only values on the list
 fields = [{"field_id": "f2", "field_name": "Notes", "table_name": "Orders", "data_type": "multilineText"}, {"field_id": "f4", "field_name": "Due", "table_name": "Orders", "data_type": "dateTime"},
-          {"field_id": "f5", "field_name": "Mystery", "table_name": "Orders", "data_type": "autoNumber"}]
+          {"field_id": "f5", "field_name": "Mystery", "table_name": "Orders", "data_type": "barcode"}]
 imp = fio.parse_import("field_id,old_name,new_name,new_label,old_dataType,new_dataType\r\nf2,Notes,Notes,Notes,x,Long-Text\r\nf4,Due,Due,Due,x,Single select\r\nf5,Mystery,Mystery,Mystery,x,\r\n", fields, [], B)
 check("a Planning type in the file is normalised; one off the list is not stored and is reported", imp["target_types"] == {"f2": "long-text"} and [p["kind"] for p in imp["problems"] if p["field_id"] == "f4"].count("NEW_TYPE_NOT_ON_LIST") == 1
       and "not a Workfront Planning data type" in [p["detail"] for p in imp["problems"] if p["kind"] == "NEW_TYPE_NOT_ON_LIST"][0], imp["problems"])

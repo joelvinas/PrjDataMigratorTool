@@ -41,7 +41,7 @@ check("a bad base ID is refused", get("/api/datatypes/review?base_id=nope")[0] =
 
 # ---- apply the migrations to the test database (the server opens it per request)
 c = sqlite3.connect("datatypes_api.db"); tf.apply_migrations(c); c.close()
-s, rv = get("/api/datatypes/review?base_id=" + BASE); check("after the migrations the page is ready and the defaults are listed", s == 200 and rv["ready"] is True and len(rv["defaults"]) == 52)
+s, rv = get("/api/datatypes/review?base_id=" + BASE); check("after the migrations the page is ready and the defaults are listed", s == 200 and rv["ready"] is True and len(rv["defaults"]) == 60)
 s, e = post("/api/datatypes/apply", {"base_id": BASE, "system": "planning", "mode": "defaults"}); check("initials are required", s == 400 and "initials" in e["error"], e)
 s, e = post("/api/datatypes/apply", {"base_id": BASE, "actor": "JV", "system": "planning", "mode": "defaults"}); check("a reason is required", s == 400 and "reason" in e["error"], e)
 s, r = post("/api/datatypes/apply", A(system="planning", mode="defaults"))
@@ -67,6 +67,22 @@ s, e = post("/api/datatypes/default", A(system="core", airtable_type="number", t
 c = sqlite3.connect("datatypes_api.db")
 check("the history holds every change with who and why", c.execute("select count(*) from data_type_events where actor='JV' and reason='api test'").fetchone()[0] >= 8 and c.execute("select count(*) from data_type_events where event_type='clear'").fetchone()[0] == 1)
 c.close()
+
+# ---- the names-and-types importer: the template, and held conflicts
+s, d, h = raw("GET", "/api/names/import-template.csv")
+lines = d.decode("utf-8-sig").splitlines()
+check("the template downloads as a CSV with the header and one example row", s == 200 and "csv" in h["Content-Type"] and "attachment" in h["Content-Disposition"] and len(lines) == 2 and lines[1].startswith("fldEXAMPLE"), lines)
+s2, dn, h2 = raw("GET", "/names"); check("the Names page links the template and explains held values", b"import-template.csv" in dn and b"reported and held" in dn)
+import base64
+body = "\r\n".join(["field_id,old_name,planning_name,core_name,core_label,planning_data_type,core_data_type,core_display_type", "fldD01,Order Name,Order Title,Order Title,Order Title,long-text,TEXT,TEXT", "fldEXAMPLE0000000,x,x,x,x,text,TEXT,TEXT", ""])
+s, r = post("/api/names/import", {"base_id": BASE, "actor": "JV", "csv_base64": base64.b64encode(body.encode()).decode()})
+check("importing: the Core pair is stored, the differing Planning type is held, and the template row is skipped", s == 200 and r["types_imported"] == 1 and r["held_count"] == 1 and r["held"][0]["target"] == "planning"
+      and r["held"][0]["current"] == "text" and r["held"][0]["file"] == "long-text" and any(p["kind"] == "TEMPLATE_EXAMPLE_ROW" for p in r["problems"]), r.get("error") or r)
+s, rv = get("/api/datatypes/review?base_id=" + BASE)
+f = {x["field_id"]: x for x in rv["fields"]}
+check("the held value changed nothing, and the imported Core pair shows as an import decision", f["fldD01"]["planning"]["type"] == "text" and (f["fldD01"]["core"]["type"], f["fldD01"]["core"]["display_type"]) == ("TEXT", "TEXT")
+      and f["fldD01"]["core"]["decision"]["source"] == "import")
+check("the defaults carry the transformation rule text", any(d["rule_text"] for d in rv["defaults"]))
 
 print("ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
