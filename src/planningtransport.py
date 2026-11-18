@@ -4,7 +4,10 @@
 Routes and property names come from the saved Planning API v2 reference:
     POST /v2/workspaces/{workspaceId}/record-types       body {displayName, description}                 -> {id, ...}
     POST /v2/record-types/{recordTypeId}/fields          body {displayName, type, description, ...}      -> {id, options, ...}
-Owner-verified (17 November 2026): a field CAN be changed in place with PATCH; bulk-create IDs line up with the order sent; record type names are checked per Workspace
+    POST /v2/record-types/{recordTypeId}/records/bulk    body [{"data": {"<fieldId>": value}}]            -> 201 (all created) or 207 (some failed): {status, total, succeeded, failed,
+                                                          requestId, results: [{requestIndex, id, ...}]}; a failed result has status "error" and error {code, message}
+Owner-verified (17 November 2026): a field CAN be changed in place with PATCH; the bulk record route, body and reply above (Postman test 5; the exact keys of a SUCCESSFUL
+result beyond requestIndex and id, including its status text, were not copied, so success is "no error and an id"); record type names are checked per Workspace
 (this loader creates no Global record types); a record needs only its recordTypeId; the description property is `description`; authentication is a Bearer token from config.json.
 
 NOT yet verified, so marked in docs/LOADER_PLAN.md and meant to be proven in the first DEV run:
@@ -26,6 +29,10 @@ from workfronthttp import HttpError
 _CONFLICT = re.compile(r"(?i)NOT_UNIQUE|already exists|must be unique|duplicate")
 DATE_FORMAT = "locale"      # the example value in the v2 reference; unverified for other values
 MAX_PAGES = 100
+
+
+class UnmatchedReply(HttpError):
+    """Planning answered, but the answer cannot be matched to the records sent, so they MAY exist. The caller must not send them again."""
 
 
 class PlanningTransport(object):
@@ -134,19 +141,46 @@ class PlanningTransport(object):
             raise HttpError("The option %r is not in the field Planning created (it may not have been ready when the field was sent)." % item["name"])
         return key
 
-    # ---- records (UNVERIFIED route and body names: see recordload.py and docs/LOADER_PLAN.md)
+    # ---- records (route, body and reply verified by Postman test 5, 17 November 2026; see the module docstring)
     def create_records(self, bodies):
-        """Create records in one call; the IDs come back in the order sent (verified by the owner for a JSON array). Each body is {recordTypeId, fields}. Returns the IDs."""
-        if not bodies:
-            return []
-        reply = self.http.request("POST", "/v2/records/bulk", list(bodies))
-        rows = reply
-        if isinstance(reply, dict):
-            rows = reply.get("content") or reply.get("records") or reply.get("data")
-        ids = [str(r.get("id")) for r in rows or [] if isinstance(r, dict) and r.get("id")]
-        if len(ids) != len(bodies):
-            raise HttpError("The create call worked but its reply holds %d usable ID(s) for %d record(s), so they cannot be matched." % (len(ids), len(bodies)))
-        return ids
+        """Create records, one bulk call per record type: POST /v2/record-types/{recordTypeId}/records/bulk with a JSON array of {"data": {fieldId: value}}.
+        Each body is {recordTypeId, fields}. Returns one result per body, in the order given: {"id": "..."} for a record Planning created, or {"error": "short reason"}.
+
+        The reply (201 all created, 207 some failed) holds results[], each with requestIndex; a result is matched to its record by requestIndex, never by position.
+        A result is a failure when it has an `error` object or status "error" (a failed result can still carry an id, so the error is checked first). Only the error CODE
+        is kept as the reason: Planning's message text could echo a value. A record with no result is reported as an error, never assumed created.
+        A call that is refused as a whole (an HTTP error) raises, so the caller knows nothing was recorded."""
+        out = [None] * len(bodies)
+        groups = {}
+        for pos, b in enumerate(bodies):
+            groups.setdefault(str(b.get("recordTypeId") or ""), []).append(pos)
+        for rt in sorted(groups):
+            if not rt:
+                raise ValueError("A record needs its record type's Planning ID.")
+            positions = groups[rt]
+            reply = self.http.request("POST", "/v2/record-types/%s/records/bulk" % rt, [{"data": bodies[p].get("fields") or {}} for p in positions])
+            rows = reply.get("results") if isinstance(reply, dict) else None
+            if not isinstance(rows, list):
+                raise UnmatchedReply("The create call worked but its reply has no results list, so the records cannot be matched.")
+            seen = {}
+            for r in rows:
+                i = r.get("requestIndex") if isinstance(r, dict) else None
+                if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(positions):
+                    seen.setdefault(i, []).append(r)
+            for i, p in enumerate(positions):
+                got = seen.get(i) or []
+                if len(got) != 1:
+                    out[p] = {"error": "the reply has no result for this record; it may exist in Planning, so check there before running again" if not got else "the reply holds two results for this record; check Planning before running again"}
+                    continue
+                r = got[0]
+                if r.get("error") or str(r.get("status") or "").lower() == "error":
+                    code = (r.get("error") or {}).get("code") if isinstance(r.get("error"), dict) else None
+                    out[p] = {"error": "Planning refused this record (%s)" % (str(code)[:40] if code else "no error code")}
+                elif r.get("id"):
+                    out[p] = {"id": str(r["id"])}
+                else:
+                    out[p] = {"error": "the reply holds no ID for this record"}
+        return out
 
     def update_record(self, record_id, fields):
         """Set fields on one record (used for the links second pass)."""

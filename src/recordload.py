@@ -12,18 +12,20 @@ Rules kept here (CLAUDE.md):
   * A record VALUE is read from the saved record file in memory, converted, sent to Workfront and forgotten. It never goes into SQLite, a log, a report, an error message
     or the browser. A conversion problem names the field ID and a short reason, never the value.
   * Deterministic: tables in table ID order, records in record ID order, batches of a fixed size.
-  * Idempotent: only records with no marker are sent. Known limit, stated plainly: if the program stops AFTER Workfront answered a batch and BEFORE the answer is written
+  * Idempotent: only records with no marker are sent. A partly failed batch (HTTP 207) records its successes by requestIndex and fails only the failed records. Known limit, stated plainly: if the program stops AFTER Workfront answered a batch and BEFORE the answer is written
     here, that batch is sent again on the next run and its records exist twice. The batch size is small (settings: record_batch_size) to keep that window short.
   * Nothing is sent without the caller's explicit step, and a dry run only counts.
 
-UNVERIFIED (to be proven in the first DEV run; marked in docs/LOADER_PLAN.md): the record route and body (`recordTypeId` plus a `fields` map keyed by field ID), the bulk
-route, the value formats Planning accepts (dates as ISO text, percentages as Airtable's fraction, a link as a list of record IDs) and the reply shape.
+VERIFIED (Postman test 5, 17 November 2026): the bulk route is per record type and the body is [{"data": {fieldId: value}}] (see planningtransport.py). UNVERIFIED (to be
+proven in the first DEV run; marked in docs/LOADER_PLAN.md): the value formats Planning accepts (dates as ISO text, percentages as Airtable's fraction, a link as a list of
+record IDs) and the link update route.
 """
 import json
 import os
 import re
 
 import loadrun as lr
+import planningtransport as pt
 import recordmap as rm
 import typemap as tm
 
@@ -214,31 +216,40 @@ def load_records(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DE
 
 
 def _send_batch(tr, sendable, row):
-    """Send a batch; on failure send its records one by one so one bad record does not hold up the others. Yields (surrogate ID, new Planning record ID)."""
+    """Send a batch and yield (surrogate ID, new Planning record ID) for each record Planning created.
+
+    The reply says, per record, whether it was created (matched by requestIndex inside the transport), so a partly failed batch (HTTP 207) keeps its successes and
+    fails ONLY the failed records, each with a short scrubbed reason. A failed record is not sent again in the same run (its refusal is not going to change); it stays
+    pending for the next run. Never resending a record that succeeded is what keeps a 207 from creating duplicates.
+      * The whole call is refused or fails (an HTTP error): nothing is known to exist, so the batch is split and each record is sent alone, so one bad record does
+        not hold up the others.
+      * Planning answered but the answer cannot be matched (UnmatchedReply): the records MAY exist, so none is resent; all fail with that reason, to be checked.
+    A reason never holds a record value."""
     if not sendable:
         return
     try:
-        ids = tr.create_records([b for _u, _r, b in sendable])
-        if len(ids) != len(sendable):
-            raise ValueError("the reply holds %d ID(s) for %d record(s), so they cannot be matched" % (len(ids), len(sendable)))
-        for (uid, _rid, _b), new in zip(sendable, ids):
-            yield uid, str(new)
+        got = tr.create_records([b for _u, _r, b in sendable])
+    except pt.UnmatchedReply as e:
+        for _u, rid, _b in sendable:
+            row["failed"] += 1
+            row["failures"].append((rid, lr.scrub(e)))
         return
     except Exception as e:
         batch_error = lr.scrub(e)
-    if len(sendable) == 1:
-        row["failed"] += 1
-        row["failures"].append((sendable[0][1], batch_error))
-        return
-    for uid, rid, body in sendable:
-        try:
-            ids = tr.create_records([body])
-            if len(ids) != 1:
-                raise ValueError("the reply holds no usable ID")
-            yield uid, str(ids[0])
-        except Exception as e:
+        if len(sendable) == 1:
             row["failed"] += 1
-            row["failures"].append((rid, lr.scrub(e)))
+            row["failures"].append((sendable[0][1], batch_error))
+            return
+        for item in sendable:
+            for out in _send_batch(tr, [item], row):
+                yield out
+        return
+    for (uid, rid, _b), g in zip(sendable, got):
+        if isinstance(g, dict) and g.get("id") and not g.get("error"):
+            yield uid, str(g["id"])
+        else:
+            row["failed"] += 1
+            row["failures"].append((rid, lr.scrub((g or {}).get("error") if isinstance(g, dict) else None) or "Planning gave no result for this record"))
 
 
 def load_links(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DEFAULT, dry_run=True, reader=read_extract):
