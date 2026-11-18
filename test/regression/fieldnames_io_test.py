@@ -97,6 +97,31 @@ check("UTF-8 BOM is accepted", t.startswith("field_id") and note == "")
 t, note = fio.decode_csv("field_id\r\ncafé\r\n".encode("cp1252"))
 check("a non-UTF-8 file is read as Windows-1252 and the user is told", "café" in t and "Windows-1252" in note)
 
+# ---- other bases and edge spaces
+mini = [{"field_id": "fldA", "field_name": "Status ", "data_type": "singleLineText"},
+        {"field_id": "fldB", "field_name": "Owner", "data_type": "singleLineText"},
+        {"field_id": "fldC", "field_name": "Notes", "data_type": "singleLineText"},
+        {"field_id": "fldD", "field_name": "Notes", "data_type": "singleLineText"}]
+mix = ("field_id,old_name,new_name\r\nfldA,Status,State\r\nfldZ1,Elsewhere,Else One\r\nfldZ2,Elsewhere Too,Else Two\r\n"
+       ",Owner,Lead\r\nfldQ,Notes,Memo\r\n")
+r = fio.parse_import(mix, mini, other_base_ids=["fldZ1", "fldZ2"], base_id="appT")
+k = {}
+for p_ in r["problems"]:
+    k.setdefault(p_["kind"], []).append(p_)
+check("rows of another base are one summary line, not unmatched fields", len(k.get("OTHER_BASE", [])) == 1
+      and k["OTHER_BASE"][0]["detail"] == "2 rows belong to another base and were ignored." and "UNMATCHED_ID" not in k, k)
+bc = fio.parse_import("field_id,base_id,new_name\r\nfldB,appOther,X\r\nfldC,appT,Y\r\n", mini, [], "appT")
+check("a base_id column also sets rows aside", [x["detail"] for x in bc["problems"] if x["kind"] == "OTHER_BASE"] == ["1 row belongs to another base and was ignored."])
+check("a trimmed name matches the schema name that has a trailing space", r["manual"].get("fldA", {}).get("planning_name") == "State"
+      and k["NAME_HAS_EDGE_SPACES"][0]["detail"].startswith("The Airtable name is 'Status ' "), k.get("NAME_HAS_EDGE_SPACES"))
+check("no OLD_NAME_MISMATCH for a name that differs only by edge spaces", "OLD_NAME_MISMATCH" not in k)
+check("a blank field_id falls back to the unique trimmed name and says so", r["manual"].get("fldB", {}).get("planning_name") == "Lead"
+      and [x["field_id"] for x in k["NAME_MATCH_ONLY"] if "no field_id" in x["detail"]] == ["fldB"], k.get("NAME_MATCH_ONLY"))
+check("an unknown ID with an ambiguous name is reported, never guessed", [x["field_id"] for x in k.get("AMBIGUOUS_NAME", [])] == ["fldQ"] and "fldC" not in r["manual"] and "fldD" not in r["manual"])
+check("the import never changes the schema names", mini[0]["field_name"] == "Status " and mini[1]["field_name"] == "Owner")
+check("the field ID wins over the name", fio.parse_import("field_id,old_name,new_name\r\nfldB,Status,Z\r\n", mini)["manual"] == {"fldB": {"planning_name": "Z", "core_name": "Z", "core_label": ""}})
+check("load_db lists the field IDs held under other bases", fio.load_db(dbp, "appT")["other_base_ids"] == [])
+
 # ---- reports
 res = fn.run(db["fields"], db["tables"], fn.Settings(), manual=imp["manual"], abandoned=["fld2"])
 reports = fio.build_reports(res, db["fields"], imp, db["notes"])
