@@ -36,6 +36,7 @@ csvt = "field_id,old_name,new_name,new_label,old_dataType,new_dataType\r\nfA1,Or
        "fA3,Total,Total,Total,Formula,Number\r\nfA4,PO,PO,PO,Link,Link\r\nfB1,PO Number,PO Number,PO Number,Single line text,Text\r\n"
 st.import_names(c, "appL", "JV", csv_base64=base64.b64encode(csvt.encode()).decode())
 st.approve_fields(c, "appL", "JV", mode="pass_and_auto")
+import typesfixture; typesfixture.fill_defaults(c, "appL")      # Planning type and Core dataType and displayType from the default mapping
 c.close()
 h0 = hashlib.sha256(open(dbp, "rb").read()).hexdigest()
 
@@ -47,7 +48,7 @@ rows = {r["temp_id"]: r for r in csv.DictReader(open(os.path.join(out, "load_pla
 check("record types use the approved table names and are ready", rows["P-T-tA"]["status"] == "ready" and rows["P-T-tB"]["status"] == "ready" and rows["P-T-tB"]["name"] == "POs", rows.get("P-T-tB"))
 check("only the Planning plus Core table has a Core form, on hold", "C-T-tA" in rows and "C-T-tB" not in rows and rows["C-T-tA"]["status"] == "hold")
 check("a plain field is ready in Planning, and in Core for the Core table only", rows["P-F-fA1"]["status"] == "ready" and rows["C-F-fA1"]["status"] == "ready" and not any(k.startswith("C-F-fB") for k in rows)
-      and rows["P-F-fB1"]["data_type"] == "Text")
+      and rows["P-F-fB1"]["data_type"] == "text")
 check("the formula is on hold with its reason", rows["P-F-fA3"]["status"] == "hold" and "derived" in rows["P-F-fA3"]["reasons"])
 check("the link is blocked while its direction is not confirmed (Stage 1, step 4), and still names the second pass", rows["P-F-fA4"]["status"] == "blocked"
       and "second pass" in rows["P-F-fA4"]["reasons"] and "not confirmed" in rows["P-F-fA4"]["reasons"])

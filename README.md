@@ -54,6 +54,8 @@ airtable-migration-control/
 │   ├── fieldnames.py            field and table name validator: the rules and the pipeline (pure functions, no I/O)
 │   ├── fieldnames_io.py         validator command line: CSV import, read-only database loader, report files
 │   ├── fieldnames_store.py      the review page's saved decisions: approvals, abandon, import, settings, exports (tables from migration 007)
+│   ├── datatypes.py             the data type lists: Planning's 17 types, Core's dataType and displayType (pure)
+│   ├── datatypes_store.py       the Data types page's saved decisions: default mapping, bulk update, clear, history (migrations 021 and 022)
 │   ├── fieldnames_report.py     the HTML report (pure: builds one self-contained document from the review)
 │   ├── emojitext.py             emoji handling shared by names, labels and descriptions: remove, or replace with the Unicode name
 │   ├── fielddesc.py             field descriptions in the lineage syntax: generate, parse back, validate (pure functions)
@@ -101,6 +103,8 @@ airtable-migration-control/
 │   ├── migration_010_add_load_id_map.sql   applied 2026-11-14: load_id_map (Workfront IDs against temporary IDs, per environment)
 │   ├── migration_011_add_table_core_objects.sql    applied 2026-11-14: table_core_objects
 │   ├── migration_012_add_core_target_type.sql      applied 2026-11-14: field_names.core_target_type (one new column)
+│   ├── migration_021_add_data_type_mapping.sql     DRAFT, not applied: data_type_defaults, field_type_decisions, data_type_events (default mapping, who/when/why, history)
+│   ├── migration_022_add_core_display_type.sql     DRAFT, not applied: field_names.core_display_type (one new column) and the view field_data_types
 │   ├── migration_013_add_field_relationships.sql   applied 2026-11-14: field_relationships
 │   ├── migration_014_add_option_names.sql          applied 2026-11-14: option_names, option_workfront_ids
 │   ├── migration_015_add_relationship_directions.sql  applied 2026-11-14: link direction columns
@@ -149,7 +153,7 @@ airtable-migration-control/
 3. Open **http://127.0.0.1:8765**. It opens on **Setup** (the old address `/index.html` redirects there). For another port: `PORT=8800 python src/server.py` (Mac) or `set PORT=8800 && python src/server.py` (Windows cmd).
 4. Stop with Ctrl+C.
 
-Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/names` (Field names), `/load` (Stage 4: Map and load), `/postman` (Postman tests), `/log` (API call log). The left panel links them. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
+Pages: `/` or `/setup` (Setup), `/stage1` (Stage 1: Data), `/stage2` (Forms, the recorder), `/stage3` (Automations), `/names` (Field names), `/datatypes` (Data types), `/load` (Stage 4: Map and load), `/postman` (Postman tests), `/log` (API call log). The left panel links them. The server holds the database connection, so every page shows the same connected state; the base you choose is remembered for the browser tab (the base ID only, in `sessionStorage`) so it carries from Setup to Stage 1. A stage page with no database connected shows a notice with a link to Setup and keeps its buttons off.
 
 Without `config.json`, or with an empty token, the page shows a setup message and still works for everything that does not call Airtable (for example, pasted schema JSON).
 
@@ -559,6 +563,25 @@ python src/fieldnames_io.py --db db/migration.db --base appXXXXXXXXXXXXXX --impo
 
 **Tests.** `python test/run_regression.py names` runs the validator's suites (the pure rules; the import, database loader, reports and command line; the saved decisions; the descriptions; emoji handling; value comparison; and consolidation rules) with fabricated names only, and `namesapi` tests the page's endpoints against the mock server. `namesui` drives the real page in Chromium through the whole workflow (the table-approval gate, initials, previewing and saving settings, the emoji option, filters, approving, duplicate groups and value comparison, withdrawing, importing, descriptions, scope, the report preview and downloads, and that a hostile field name never runs) and, like the other browser suites, is skipped when Playwright is not installed.
 
+### Data types (`/datatypes`)
+
+Workfront Planning and Workfront Core do not share one list of data types, so each field has **two answers**, kept apart:
+
+| System | Stored in | Allowed values |
+|---|---|---|
+| Planning | `field_names.target_type` (shown as `planning_target_type` in the view `field_data_types`; the column is not renamed) | exactly one of Adobe's 17: `text`, `long-text`, `number`, `percentage`, `currency`, `date`, `single-select`, `multi-select`, `boolean`, `reference`, `user`, `formula`, `created-by`, `created-at`, `updated-by`, `updated-at`, `record-id` |
+| Core dataType | `field_names.core_target_type` | `CURC`, `DATE`, `DTTM`, `NMBR`, `RICH`, `TEXT` |
+| Core displayType | `field_names.core_display_type` | `TEXT`, `TXTA` (verified); `SLCT`, `MULT`, `CHCK` (**not yet verified** in a sandbox) |
+
+The Core API needs both Core values, so they are two columns. A Core type is valid only as a pair, and `RICH` cannot be created through the API (it is built by hand).
+
+- **A default mapping** (`data_type_defaults`, seeded by migration 021): one row per system and Airtable field type, for example `singleSelect` gives `single-select` in Planning and `TEXT` with `SLCT` in Core. Types with no sensible target (an automatic number, attachments, a link in Core) have no default, so a person decides. A default can be edited on the page; each edit records who and why.
+- **The tool proposes, a person decides.** *Apply the defaults* fills only the fields that have no valid type. A person can override one field, or set one value (or clear) for many fields at once, filtered by table, Airtable type and current state. A bulk update is all or nothing, takes one set of initials and one reason, and shares a batch number in the history. Abandoned and consolidated-away fields are never touched.
+- **Who, when and why** are kept in `field_type_decisions` (the latest decision per field and system: default, override or import) and in the append-only `data_type_events` (the old and new value of every change, set, clear or default edit).
+- **A value that is not on its list is never kept.** The spreadsheet import (`new_dataType`) stores a Planning type only when it is on the list (case is ignored, so `Number` becomes `number`) and reports anything else (`NEW_TYPE_NOT_ON_LIST`), for example `Single select`. A value already stored that is off the list (or half a Core pair) shows as **invalid**, and *Clear every value that is not on the list* empties it on a person's say-so; the old value stays in the history. The API would refuse these values, so they must be set again.
+- **The load plan** sends each system its own type: Planning items carry the one Planning type, Core items carry the dataType and the displayType (`data_type` and `display_type` in `load_plan.csv`). A field with no valid type for one system is **blocked for that system only**, with the reason.
+- The page works before the migrations are applied (it shows the current values and says what is missing), but nothing can be saved until migrations 021 and 022 are applied. Endpoints: `GET /api/datatypes/review`, `POST /api/datatypes/apply`, `/api/datatypes/default`, `/api/datatypes/clear-invalid`.
+
 ## The loader (Stage 4, begun)
 
 Stage 4 creates the target in Workfront in steps. Built: a **load plan**, a **dry run** (they send nothing), and **`run --send`**, which creates the plan's ready record types, fields and select options in Workfront Planning and Workfront Core. The record load itself (the records, their links and attachments) is not built. Full detail, including what Adobe's documentation confirms and what is not verified, is in [docs/LOADER_PLAN.md](docs/LOADER_PLAN.md).
@@ -654,6 +677,7 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
 | Stage 1: Data | `/stage1` | Schema, load order, profiling, record and attachment capture (steps 3 to 6, plus the open runbook items) | Built |
 | Stage 2: Forms | `/stage2` | Record Airtable forms by hand (structure, display and skip logic, hidden fields, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.12) |
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
+| Data types | `/datatypes` | Map, bulk update and track the Workfront Planning type and the Workfront Core dataType and displayType of every field, from a default mapping a person can override | Built; needs migrations 021 and 022 applied |
 | Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14) |
 | Stage 4: Map and load | `/load` | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.15): the load plan, dry run, field creation (`run --send`), the Planning record load (`records`) and the screens that show the record map, pass markers and attachment map (`/load`, read-only, IDs and counts only, sortable on the server). See `docs/LOADER_PLAN.md` |
 | Load a table | `/loadtable` | Load ONE table into Workfront Planning step by step without the command line: check, create the record type and fields, records, links, verify, and a reset | **Begun** (version 1.16) |

@@ -15,6 +15,7 @@ Import CSV headers (case does not matter): field_id, base_id (optional), old_nam
   new_dataType    the target Workfront data type, carried into the report
 """
 import argparse, csv, io, os, pathlib, re, sqlite3, sys
+import datatypes as dt
 import fielddesc as fd
 import fieldnames as fn
 
@@ -105,7 +106,12 @@ def parse_import(text, db_fields, other_base_ids=(), base_id=None):
         if not lb:
             prob("BLANK_NEW_LABEL", "info", fid, "No new_label; the Airtable name is validated as the label.")
         if get(row, "new_datatype"):
-            target_types[fid] = get(row, "new_datatype")
+            canon = dt.planning_type(get(row, "new_datatype"))
+            if canon:
+                target_types[fid] = canon
+            else:
+                prob("NEW_TYPE_NOT_ON_LIST", "warn", fid, "new_dataType '%s' is not a Workfront Planning data type (%s), so no type was stored for this field; set it on the Data types page."
+                     % (get(row, "new_datatype"), ", ".join(dt.PLANNING_TYPES)))
     for fid in sorted(set(by_id) - seen):
         prob("MISSING_FROM_IMPORT", "warn", fid, "'%s' is in the database but not in the spreadsheet." % by_id[fid]["field_name"])
     if other_rows:

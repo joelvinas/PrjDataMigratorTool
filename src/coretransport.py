@@ -44,7 +44,7 @@ class CoreTransport(object):
     def request_for(self, item, parent_id, refs=None):
         """(method, path, body) for one item. Raises ValueError (plain message) when the item cannot be created in Core."""
         if item["kind"] == "field":
-            data_type, display_type, _verified = tm.core_type(item["data_type"])
+            data_type, display_type, _verified = tm.core_pair(item["data_type"], item.get("display_type"))
             body = {"name": item["name"], "dataType": data_type, "displayType": display_type}
             if item.get("label"):
                 body["label"] = item["label"]
@@ -62,7 +62,7 @@ class CoreTransport(object):
 
     def describe(self, item, parent_id, refs=None):
         m, p, b = self.request_for(item, parent_id, refs)
-        return {"system": "core", "action": "create " + item["kind"], "name": item["name"], "label": item["label"], "data_type": item["data_type"], "position": item["position"],
+        return {"system": "core", "action": "create " + item["kind"], "name": item["name"], "label": item["label"], "data_type": item["data_type"], "display_type": item.get("display_type"), "position": item["position"],
                 "parent": parent_id, "temp_id": item["temp_id"], "request": "%s %s" % (m, p), "body": b}
 
     # ---- sending

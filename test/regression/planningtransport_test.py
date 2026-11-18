@@ -58,7 +58,7 @@ check("a select field is sent with its ready options in order; with none it is r
       and "at least one option" in str(raises(t.request_for, item(dtype="Single select", spec={"options": []}), "RT1")))
 check("a link field points at the record type it needs and is multiple unless Airtable says single, with no back reference", body(t, item(dtype="Link", spec={"single": False}), refs={"P-T-t2": "RT2"})["referenceOptions"] == {"recordTypeId": "RT2", "multiple": True, "createBackReference": False}
       and body(t, item(dtype="Link", spec={"single": True}), refs={"P-T-t2": "RT2"})["referenceOptions"]["multiple"] is False and "second pass" in str(raises(t.request_for, item(dtype="Link"), "RT1")))
-check("an unknown type, a missing record type, a form and an over-long description are refused before any call", "not one this loader knows" in str(raises(t.request_for, item(dtype="Quantum"), "RT1")) and "record type's Planning ID" in str(raises(t.request_for, item(), None))
+check("an unknown type, a missing record type, a form and an over-long description are refused before any call", "not a Planning data type" in str(raises(t.request_for, item(dtype="Quantum"), "RT1")) and "does not create it" in str(raises(t.request_for, item(dtype="formula"), "RT1")) and "record type's Planning ID" in str(raises(t.request_for, item(), None))
       and "only" in str(raises(t.request_for, item("form"), "RT1")) and "512" in str(raises(t.request_for, item(dtype="Text", description="x" * 513), "RT1")) and body(t, item(dtype="Text", description="x" * 512))["description"] == "x" * 512)
 check("rich text is created as long text in Planning", body(t, item(dtype="Rich text"))["type"] == "long-text")
 check("describe shows the request and sends nothing, and an option has no call of its own", t.describe(item(), "RT1")["request"] == "POST /v2/record-types/RT1/fields" and t.describe(item("option", "Open", None), "F1") == dict(t.describe(item("option", "Open", None), "F1")) and t.describe(item("option", "Open", None), "F1")["body"] is None)
@@ -86,13 +86,13 @@ check("finding an existing field is by its record type", t.find_existing(item(),
 
 # ---- the plan: second pass for links
 def tr(name): return {"candidate": name, "status": "approved", "approved_name": name}
-def row(fid, table, name, typ="singleLineText", tt="Text"):
+def row(fid, table, name, typ="singleLineText", tt="text"):
     return {"field_id": fid, "table_id": table, "table_name": "T", "original": name, "data_type": typ, "abandoned": False, "consolidated": None, "target_type": tt,
             "description": {"text": "Source: Airtable. Origins: T.%s." % name}, "targets": {"planning_name": tr(name), "core_name": tr(name), "core_label": tr(name + " label")}}
 tbl = lambda tid, nm, scope="in", target="planning_only": {"table_id": tid, "old": nm, "scope": scope, "target": target, "approved": True, "effective": nm}
 RV = {"settings": None, "tables": [tbl("tA", "Orders"), tbl("tB", "Customers"), tbl("tX", "Dropped", "out")],
-      "fields": [row("a1", "tA", "Title"), row("a2", "tA", "Customer", "multipleRecordLinks", "Link"), row("a3", "tA", "Status", "singleSelect", "Single select"), row("b1", "tB", "Name"), row("b2", "tB", "Orders", "multipleRecordLinks", "Link"),
-                 row("a4", "tA", "Gone", "multipleRecordLinks", "Link")]}
+      "fields": [row("a1", "tA", "Title"), row("a2", "tA", "Customer", "multipleRecordLinks", "reference"), row("a3", "tA", "Status", "singleSelect", "single-select"), row("b1", "tB", "Name"), row("b2", "tB", "Orders", "multipleRecordLinks", "reference"),
+                 row("a4", "tA", "Gone", "multipleRecordLinks", "reference")]}
 CH = {"a3": [{"id": "s1", "name": "Open"}, {"id": "s2", "name": "Closed"}]}
 FACTS = {"a2": {"linked_table_id": "tB", "single": True}, "b2": {"linked_table_id": "tA", "single": False}, "a4": {"linked_table_id": "tX", "single": False}}
 p = lp.build_plan(RV, CH, link_state={"a2": True, "b2": True, "a4": True}, field_facts=FACTS)

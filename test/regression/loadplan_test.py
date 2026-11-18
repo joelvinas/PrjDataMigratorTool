@@ -14,8 +14,11 @@ def check(n, c, x=""):
 
 def tr(name):
     return {"candidate": name, "status": "approved", "approved_name": name}
-def row(fid, table, name, typ="singleLineText", target_type="Text", planning=True, core=True, **kw):
+CORE_OF = {"text": ("TEXT", "TEXT"), "number": ("NMBR", "TEXT"), "single-select": ("TEXT", "SLCT")}
+def row(fid, table, name, typ="singleLineText", target_type="text", planning=True, core=True, **kw):
+    cd, cp = CORE_OF.get(target_type, (None, None))
     r = {"field_id": fid, "table_id": table, "table_name": "T", "original": name, "data_type": typ, "abandoned": False, "consolidated": None, "target_type": target_type,
+         "core_target_type": cd, "core_display_type": cp,
          "description": {"text": "Source: Airtable. Origins: T.%s." % name}, "targets": {}}
     if planning:
         r["targets"]["planning_name"] = tr(name)
@@ -27,8 +30,8 @@ def row(fid, table, name, typ="singleLineText", target_type="Text", planning=Tru
 def tbl(tid, old, scope="in", target="planning_only", approved=True, effective=None):
     return {"table_id": tid, "old": old, "scope": scope, "target": target, "approved": approved, "effective": effective or old}
 RV = {"tables": [tbl("tA", "Orders", target="planning_and_core"), tbl("tB", "PO#s", effective="POs"), tbl("tC", "Archive", scope="undecided", target=None, approved=False), tbl("tD", "Hidden", scope="out", target=None)],
-      "fields": [row("fA1", "tA", "Order Name"), row("fA2", "tA", "Amount", "number", "Number", core=False), row("fA3", "tA", "Status", "singleSelect", "Single select"),
-                 row("fA4", "tA", "Total", "formula", "Number"), row("fA5", "tA", "PO", "multipleRecordLinks", "Link"), row("fA6", "tA", "Files", "multipleAttachments", "Attachment"),
+      "fields": [row("fA1", "tA", "Order Name"), row("fA2", "tA", "Amount", "number", "number", core=False), row("fA3", "tA", "Status", "singleSelect", "single-select"),
+                 row("fA4", "tA", "Total", "formula", "number"), row("fA5", "tA", "PO", "multipleRecordLinks", "reference"), row("fA6", "tA", "Files", "multipleAttachments", "text"),
                  row("fA7", "tA", "Old", abandoned=True), row("fA8", "tA", "Merged", consolidated={"survivor_id": "fA1"}), row("fA9", "tA", "No Type", target_type=None),
                  row("fB1", "tB", "PO Number", planning=True, core=False), row("fC1", "tC", "Loose", core=False)]}
 CHOICES = {"fA3": [{"id": "selA", "name": "Open"}, {"id": "selB", "name": "Café Closed"}, {"id": "selC", "name": "Done"}]}
@@ -50,13 +53,13 @@ check("an out-of-scope table has no items and is counted", not any(i["table_id"]
 check("a Core form exists only for Planning plus Core, and is on hold until the Core object type is decided", "C-T-tA" in I and "C-T-tB" not in I and I["C-T-tA"]["status"] == "hold" and "object type" in I["C-T-tA"]["reasons"][0])
 
 # ---- fields
-check("a plain field with an approved name and a target type is ready, with its lineage description", I["P-F-fA1"]["status"] == "ready" and I["P-F-fA1"]["name"] == "Order Name" and I["P-F-fA1"]["data_type"] == "Text"
+check("a plain field with an approved name and a target type is ready, with its lineage description", I["P-F-fA1"]["status"] == "ready" and I["P-F-fA1"]["name"] == "Order Name" and I["P-F-fA1"]["data_type"] == "text" and I["C-F-fA1"]["data_type"] == "TEXT" and I["C-F-fA1"]["display_type"] == "TEXT" and I["P-F-fA1"]["display_type"] is None
       and I["P-F-fA1"]["description"] == "Source: Airtable. Origins: T.Order Name.")
 check("the Core field carries the Core name and its own label; it needs no parent but names the form it will join", I["C-F-fA1"]["name"] == "Order Name" and I["C-F-fA1"]["label"] == "Order Name label"
       and I["C-F-fA1"]["parent"] is None and I["C-F-fA1"]["group"] == "C-T-tA" and I["P-F-fA1"]["parent"] == "P-T-tA" and I["P-F-fA1"]["group"] is None)
 check("a Planning-only table gets no Core fields", not any(k.startswith("C-F-fB") for k in I))
 check("a Core field is blocked when the Core name and label are not both approved", "C-F-fA2" in I and I["C-F-fA2"]["status"] == "blocked" and "Core name and label" in I["C-F-fA2"]["reasons"][0] and I["P-F-fA2"]["status"] == "ready")
-check("a field with no target data type is blocked", I["P-F-fA9"]["status"] == "blocked" and any("target data type" in r for r in I["P-F-fA9"]["reasons"]))
+check("a field with no target data type is blocked", I["P-F-fA9"]["status"] == "blocked" and any("Planning data type" in r for r in I["P-F-fA9"]["reasons"]) and I["C-F-fA9"]["status"] == "blocked" and any("Core data type" in r for r in I["C-F-fA9"]["reasons"]))
 check("a derived field is on hold with the reason", I["P-F-fA4"]["status"] == "hold" and "derived field" in I["P-F-fA4"]["reasons"][0])
 check("a link and an attachment are on hold with their own reasons", I["P-F-fA5"]["status"] == "hold" and "second pass" in I["P-F-fA5"]["reasons"][0] and I["P-F-fA6"]["status"] == "hold" and "Core documents" in I["P-F-fA6"]["reasons"][0])
 plan_d = lp.build_plan(RV, CHOICES, link_state={"fA5": False})
@@ -80,7 +83,8 @@ sysf = {i["temp_id"]: i for i in plan["items"] if i["source"] == "migration" and
 check("a Planning plus Core table gets the three Planning link fields and the two Core fields", sorted(sysf) == sorted("S-%s-tA-%s" % (s, slug) for s, slug in
       [("P", "core-object-type"), ("P", "core-object-id"), ("P", "core-object-link"), ("C", "planning-record-id"), ("C", "sync-status")]))
 check("they use the names and types from the design, and pass the naming rules", [(i["name"], i["data_type"]) for i in (sysf["S-P-tA-core-object-type"], sysf["S-P-tA-core-object-id"], sysf["S-P-tA-core-object-link"])]
-      == [("Core object type", "Single select"), ("Core object ID", "Single-line text"), ("Core object link", "Single-line text")] and all(i["status"] == "ready" for i in sysf.values()))
+      == [("Core object type", "single-select"), ("Core object ID", "text"), ("Core object link", "text")] and all(i["status"] == "ready" for i in sysf.values())
+      and [(sysf[k]["data_type"], sysf[k]["display_type"]) for k in ("S-C-tA-planning-record-id", "S-C-tA-sync-status")] == [("TEXT", "TEXT"), ("TEXT", "SLCT")])
 check("the object-type and sync-status fields carry their options in order", [o["name"] for o in plan["items"] if o["parent"] == "S-P-tA-core-object-type"] == ["Project", "Request", "Task"]
       and [o["name"] for o in plan["items"] if o["parent"] == "S-C-tA-sync-status"] == ["Not published", "Published", "Failed"])
 check("their descriptions say they are set by the migration", sysf["S-P-tA-core-object-id"]["description"].startswith("Source: Migration. Origins: "))

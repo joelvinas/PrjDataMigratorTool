@@ -61,7 +61,7 @@ check("200 or more is reported with the total and the largest tables first", [f[
 import loadplan as lp
 def tr(name): return {"candidate": name, "status": "approved", "approved_name": name}
 def row(fid, table, name, typ="singleLineText"):
-    return {"field_id": fid, "table_id": table, "table_name": "T", "original": name, "data_type": typ, "abandoned": False, "consolidated": None, "target_type": "Text",
+    return {"field_id": fid, "table_id": table, "table_name": "T", "original": name, "data_type": typ, "abandoned": False, "consolidated": None, "target_type": "long-text", "core_target_type": "TEXT", "core_display_type": "TXTA",
             "description": {"text": "Source: Airtable. Origins: T.%s." % name}, "targets": {"planning_name": tr(name), "core_name": tr(name), "core_label": tr(name + " label")}}
 RV = {"settings": None, "tables": [{"table_id": "tA", "old": "Orders", "scope": "in", "target": "planning_and_core", "approved": True, "effective": "Orders"},
                                     {"table_id": "tB", "old": "Big", "scope": "in", "target": "planning_only", "approved": True, "effective": "Big"}],

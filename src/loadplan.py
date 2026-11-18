@@ -20,9 +20,9 @@ Temporary IDs:  P-T-<table>  Planning record type      P-F-<field>  Planning fie
 """
 from collections import Counter, OrderedDict
 
+import datatypes as dt
 import fielddesc as fd
 import planlimits as pl
-import typemap as tm
 import fieldnames as fn
 
 SYSTEMS = ("planning", "core")
@@ -38,23 +38,27 @@ HOLD_REASON = {
     "attachment": "attachments move as Core documents on the new objects, which is not decided or built yet",
 }
 
+NO_PLANNING_TYPE = "no Workfront Planning data type is set for this field (Data types page)"
+NO_PLANNING_TYPE_INVALID = "the stored Planning data type is not one of Adobe's 17 types: clear it and set one (Data types page)"
+NO_CORE_TYPE = "no Workfront Core data type and display type are set for this field (Data types page)"
+NO_CORE_TYPE_INVALID = "the stored Core data type and display type are not a valid pair: clear them and set both (Data types page)"
 LINK_UNDECIDED = "the direction of this link is not confirmed (Stage 1, step 4, link directions): the schema cannot be built until a person decides"
 
 # Fields the migration itself adds so a Core object and its Planning record can find each other (from the Migration Design). The names are
 # checked against the same naming rules as every other name.
 CORE_LINK_FIELDS = [
-    ("planning", "core-object-type", "Core object type", "Single select", ["Project", "Request", "Task"], "Which kind of Core object this record is linked to."),
-    ("planning", "core-object-id", "Core object ID", "Single-line text", [], "The GUID of the Core object (a 32-character text value, not a number)."),
-    ("planning", "core-object-link", "Core object link", "Single-line text", [], "The full URL to the Core object in Workfront, as plain text."),
-    ("core", "planning-record-id", "Planning record ID", "Single-line text", [], "The Planning record's ID: write-once, set only through the API."),
-    ("core", "sync-status", "Sync status", "Single select", ["Not published", "Published", "Failed"], "Whether this object has been published to Planning."),
+    ("planning", "core-object-type", "Core object type", "single-select", ["Project", "Request", "Task"], "Which kind of Core object this record is linked to."),
+    ("planning", "core-object-id", "Core object ID", "text", [], "The GUID of the Core object (a 32-character text value, not a number)."),
+    ("planning", "core-object-link", "Core object link", "text", [], "The full URL to the Core object in Workfront, as plain text."),
+    ("core", "planning-record-id", "Planning record ID", ("TEXT", "TEXT"), [], "The Planning record's ID: write-once, set only through the API."),
+    ("core", "sync-status", "Sync status", ("TEXT", "SLCT"), ["Not published", "Published", "Failed"], "Whether this object has been published to Planning."),
 ]
 
 
 def _item(temp_id, system, kind, name, status, reasons=(), parent=None, table_id=None, field_id=None, label=None, data_type=None, position=None,
-          description=None, source="airtable", group=None, spec=None, requires=None, pass_name=None):
+          description=None, source="airtable", group=None, spec=None, requires=None, pass_name=None, display_type=None):
     return OrderedDict([("temp_id", temp_id), ("system", system), ("kind", kind), ("parent", parent), ("table_id", table_id), ("field_id", field_id), ("name", name),
-                        ("label", label), ("data_type", data_type), ("position", position), ("status", status), ("reasons", list(reasons)), ("description", description),
+                        ("label", label), ("data_type", data_type), ("display_type", display_type), ("position", position), ("status", status), ("reasons", list(reasons)), ("description", description),
                         ("source", source), ("group", group), ("spec", spec), ("requires", list(requires or [])), ("pass", pass_name)])
 
 
@@ -150,7 +154,9 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
         for f in by_table.get(tid, []):
             if f["abandoned"] or f.get("consolidated"):
                 continue
-            typ, target_type = f["data_type"], f.get("target_type")
+            typ = f["data_type"]
+            planning_type = dt.planning_type(f.get("target_type")) if dt.state("planning", f.get("target_type")) == "set" else None     # a stored value off the list is not used
+            core_data, core_display = (f.get("core_target_type"), f.get("core_display_type")) if dt.state("core", f.get("core_target_type"), f.get("core_display_type")) == "set" else (None, None)
             hold = "derived" if typ in DERIVED_TYPES else "link" if typ in LINK_TYPES else "attachment" if typ in ATTACHMENT_TYPES else None
             ff = facts.get(f["field_id"]) or {}
             second_pass = (hold == "link" and link_state is not None and link_state.get(f["field_id"]) is True and ff.get("linked_table_id") in in_plan)
@@ -178,14 +184,18 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
                     if not nm:
                         status = "blocked"
                         rs.append(why_name)
-                    if not target_type:
+                    if system == "planning" and not planning_type:
                         status = "blocked"
-                        rs.append("no target data type (new_dataType) was imported for this field")
+                        rs.append(NO_PLANNING_TYPE_INVALID if f.get("target_type") else NO_PLANNING_TYPE)
+                    if system == "core" and not core_data:
+                        status = "blocked"
+                        rs.append(NO_CORE_TYPE_INVALID if (f.get("core_target_type") or f.get("core_display_type")) else NO_CORE_TYPE)
                 if not table_ok and status == "ready":
                     status = "blocked"
                 fid = ("P-F-" if system == "planning" else "C-F-") + f["field_id"]
                 spec = {"airtable_type": typ, "precision": ff.get("precision"), "currency_symbol": ff.get("currency_symbol"), "linked_table_id": ff.get("linked_table_id"), "single": bool(ff.get("single"))} if ff else None
-                items.append(_item(fid, system, "field", nm or f["original"], status, rs, parent=parent, table_id=tid, field_id=f["field_id"], label=lb, data_type=target_type,
+                items.append(_item(fid, system, "field", nm or f["original"], status, rs, parent=parent, table_id=tid, field_id=f["field_id"], label=lb,
+                                   data_type=planning_type if system == "planning" else core_data, display_type=None if system == "planning" else core_display,
                                    description=(f.get("description") or {}).get("text"), group=("C-T-" + tid if system == "core" else None), spec=spec,
                                    requires=["P-T-" + ff["linked_table_id"]] if is_link2 else None, pass_name="links" if is_link2 else None))
                 if typ in SELECT_TYPES:
@@ -196,10 +206,11 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
         if both and include_link_fields:
             for system, slug, nm, dtype, opts, desc in CORE_LINK_FIELDS:
                 tmp = "S-%s-%s-%s" % ("P" if system == "planning" else "C", tid, slug)
+                ptype, ctype = (dtype, None) if system == "planning" else (dtype[0], dtype[1])
                 bad = fn.violations(nm, "planning_name" if system == "planning" else "core_name", fn.Settings())
                 rs = (["the table is not ready (see its record type)"] if not table_ok else []) + (["the name breaks the naming rules: %s" % ", ".join(bad)] if bad else [])
                 items.append(_item(tmp, system, "field", nm, "ready" if not rs else "blocked", rs, parent=("P-T-" + tid) if system == "planning" else None, table_id=tid,
-                                   label=nm if system == "core" else None, data_type=dtype, source="migration", group=("C-T-" + tid) if system == "core" else None,
+                                   label=nm if system == "core" else None, data_type=ptype, display_type=ctype, source="migration", group=("C-T-" + tid) if system == "core" else None,
                                    description=fd.format_lineage("Migration", [(t["old"], nm)], desc)))
                 for pos, o in enumerate(opts):
                     items.append(_item(tmp + "-O-%d" % pos, system, "option", o, "ready" if not rs else "blocked", rs, parent=tmp, table_id=tid, position=pos, source="migration"))
@@ -210,7 +221,7 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
         if i["kind"] == "option" and i["status"] == "ready":
             chosen.setdefault(i["parent"], []).append(i["name"])          # in Airtable's order; an option on hold is not sent with its field
     for i in items:
-        if i["kind"] == "field" and tm.kind(i["data_type"]) in tm.SELECT_KINDS:
+        if i["kind"] == "field" and (i.get("display_type") in ("SLCT", "MULT") if i["system"] == "core" else i["data_type"] in ("single-select", "multi-select")):
             i["spec"] = dict(i["spec"] or {}, options=chosen.get(i["temp_id"], []))
     items.sort(key=_rank)                                   # parents before children; the sort is stable, so the order inside a rank is unchanged
     summ = summarize(items, out_of_scope)

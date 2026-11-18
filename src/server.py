@@ -50,6 +50,7 @@ import coretargets
 import selectvalues
 import fieldnames_report as names_report
 import fieldnames_store as names_store
+import datatypes_store as types_store
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import formatdate
@@ -4854,6 +4855,35 @@ def api_names_review(q):
         return _names(names_store.review, conn, _names_base(q))
 
 
+def api_datatypes_review(q):
+    """The data type grid: every field's Planning type and Core dataType and displayType, the default mapping, and what each default would set."""
+    with db() as conn:
+        return _names(types_store.review, conn, _names_base(q))
+
+
+def api_datatypes_apply(body):
+    """Bulk or single update of the types, all or nothing, with who and why for the whole batch (mode: defaults, value, each, clear)."""
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(types_store.apply, conn, base, body.get("actor"), body.get("reason"), body.get("system"), body.get("mode"), selection=body.get("selection"),
+                   value=body.get("value"), changes=body.get("changes"), overwrite=bool(body.get("overwrite")))
+        return dict(r, review=_names(types_store.review, conn, base))
+
+
+def api_datatypes_default(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(types_store.set_default, conn, body.get("actor"), body.get("system"), body.get("airtable_type"), body.get("type"), body.get("display_type"), body.get("reason"))
+        return dict(r, review=_names(types_store.review, conn, base))
+
+
+def api_datatypes_clear_invalid(body):
+    with db() as conn:
+        base = _names_base(body)
+        r = _names(types_store.clear_invalid, conn, base, body.get("actor"), body.get("reason"))
+        return dict(r, review=_names(types_store.review, conn, base))
+
+
 def api_names_preview(body):
     """The review with settings other than the saved ones (nothing is saved): used to see what a toggle or preset does before committing to it."""
     with db() as conn:
@@ -5512,11 +5542,11 @@ HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("pages/setup.html", HTML), "/setup": ("pages/setup.html", HTML),
-          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML),
+          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML),
           "/log": ("pages/log.html", HTML),
           "/style.css": ("css/style.css", "text/css; charset=utf-8"),
           "/common.js": ("js/common.js", JS), "/setup.js": ("js/setup.js", JS),
-          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
+          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
@@ -5535,7 +5565,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/usage": api_automations_usage, "/api/automations/report.html": api_auto_report_html,
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
               "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
-              "/api/names/review": api_names_review, "/api/names/report": api_names_report,
+              "/api/names/review": api_names_review, "/api/datatypes/review": api_datatypes_review, "/api/names/report": api_names_report,
               "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
@@ -5543,7 +5573,8 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
-               "/api/names/preview": api_names_preview, "/api/names/settings": api_names_settings,
+               "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/datatypes/default": api_datatypes_default,
+               "/api/datatypes/clear-invalid": api_datatypes_clear_invalid, "/api/names/settings": api_names_settings,
                "/api/names/tables/approve": api_names_tables_approve, "/api/names/tables/revoke": api_names_tables_revoke,
                "/api/names/tables/scope": api_names_tables_scope, "/api/names/descriptions": api_names_descriptions,
                "/api/names/fields/approve": api_names_fields_approve, "/api/names/fields/status": api_names_fields_status,

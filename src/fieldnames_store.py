@@ -275,7 +275,8 @@ def review(conn, base_id, settings=None):
     for fid, e in res["fields"].items():
         n = c["names"].get(fid) or {}
         row = {"field_id": fid, "table_id": e["table_id"], "table_name": fbi[fid]["table_name"], "original": e["original"], "data_type": fbi[fid]["data_type"],
-               "presence": e["presence"], "abandoned": e["abandoned"] and fid not in c["merged"], "target_type": n.get("target_type"), "import_batch": n.get("import_batch"),
+               "presence": e["presence"], "abandoned": e["abandoned"] and fid not in c["merged"], "target_type": n.get("target_type"), "core_target_type": n.get("core_target_type"),
+               "core_display_type": n.get("core_display_type"), "import_batch": n.get("import_batch"),
                "description": desc[fid],
                "abandon": {"by": n.get("abandoned_by"), "at": n.get("abandoned_at"), "reason": n.get("abandoned_reason")} if e["abandoned"] and fid not in c["merged"] else None,
                "consolidated": ({"group_id": c["merged"][fid]["group_id"], "survivor_id": c["merged"][fid]["survivor_id"], "survivor_name": fbi[c["merged"][fid]["survivor_id"]]["field_name"],
@@ -696,7 +697,7 @@ def import_names(conn, base_id, actor, csv_base64=None, csv_text=None):
     imp = fio.parse_import(text, fields, other, base_id)
     _, names = _stored(conn, base_id)
     batch = "import-" + _now().replace(" ", "T").replace(":", "")
-    now, applied, kept = _now(), 0, 0
+    now, applied, kept, typed = _now(), 0, 0, {}
     with conn:
         for fid in sorted(set(imp["manual"]) | set(imp["target_types"])):
             row = names.get(fid) or {}
@@ -713,6 +714,9 @@ def import_names(conn, base_id, actor, csv_base64=None, csv_text=None):
             if imp["target_types"].get(fid):
                 conn.execute("INSERT INTO field_names(airtable_field_id, target_type, import_batch, updated_at) VALUES (?,?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET "
                              "target_type=excluded.target_type, import_batch=excluded.import_batch, updated_at=excluded.updated_at", (fid, imp["target_types"][fid], batch, now))
+                typed[fid] = (row.get("target_type"), imp["target_types"][fid])
+        import datatypes_store as dts           # imported here: datatypes_store imports this module
+        dts.record_import(conn, actor, typed, batch)
     return {"batch": batch, "rows": imp["rows"], "names_imported": applied, "kept_approved": kept, "problems": imp["problems"][:2000],
             "problem_count": len(imp["problems"]), "note": note}
 
