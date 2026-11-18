@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Draft migrations 021, 022 and 023 (the data type mapping): check for them and apply them. Standard library only.
+"""Draft migrations 021, 022 and 023 (the data type mapping) and 024 (lookup lists): check for them and apply them. Standard library only.
 
-Why this is separate: the three migrations are drafts until the owner confirms they are applied, so they are not in DatabaseSchemaLibrary.sql, the embedded DDL
+Why this is separate: these migrations are drafts until the owner confirms they are applied, so they are not in DatabaseSchemaLibrary.sql, the embedded DDL
 or sql/apply_migrations.py, and the app does not refuse a database that lacks them. This module is how the app (database connect) and the owner's script
 (sql/apply_draft_migrations.py) know what is still missing. Once the owner confirms the migrations are applied and folds them in, delete this module and its callers.
 Schema only: no record value is read or written.
@@ -9,7 +9,8 @@ Schema only: no record value is read or written.
 import os
 
 SQL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
-FILES = {21: "migration_021_add_data_type_mapping.sql", 22: "migration_022_add_core_display_type.sql", 23: "migration_023_add_rule_text_and_new_types.sql"}
+FILES = {21: "migration_021_add_data_type_mapping.sql", 22: "migration_022_add_core_display_type.sql", 23: "migration_023_add_rule_text_and_new_types.sql", 24: "migration_024_add_lookup_lists.sql"}
+TABLES_024 = ("lookup_lists", "field_lookup_decisions", "lookup_list_events")
 TABLES_021 = ("data_type_defaults", "field_type_decisions", "data_type_events")
 
 
@@ -22,7 +23,7 @@ def _columns(conn, table):
 
 
 def pending(conn):
-    """[{migration, missing}] for each draft migration the database still lacks, in order. Empty when all three are in place."""
+    """[{migration, missing}] for each draft migration the database still lacks, in order. Empty when all of them are in place."""
     have = _tables(conn)
     out = []
     m21 = [t for t in TABLES_021 if t not in have]
@@ -37,6 +38,9 @@ def pending(conn):
         out.append({"migration": 22, "missing": m22})
     if "data_type_defaults" not in have or "rule_text" not in _columns(conn, "data_type_defaults"):
         out.append({"migration": 23, "missing": ["data_type_defaults.rule_text"]})
+    m24 = [t for t in TABLES_024 if t not in have]
+    if m24:
+        out.append({"migration": 24, "missing": m24})
     return out
 
 
@@ -44,8 +48,8 @@ def describe(items):
     """One plain sentence for the Setup page and the command line, or '' when nothing is pending."""
     if not items:
         return ""
-    return ("The data type mapping is not set up in this database yet (migration%s %s). Back up the file, then run: "
-            "python sql/apply_draft_migrations.py <this database file>, and connect again. Until then the Data types page can show values but not save them."
+    return ("The data type mapping or the lookup lists are not set up in this database yet (migration%s %s). Back up the file, then run: "
+            "python sql/apply_draft_migrations.py <this database file>, and connect again. Until then the Data types and Lookup lists pages can show values but not save them."
             % ("s" if len(items) > 1 else "", ", ".join("%03d" % i["migration"] for i in items)))
 
 
@@ -70,6 +74,8 @@ def apply(conn):
             ran.append(22)
     if 23 in todo:
         run(23)
+    if 24 in todo:
+        run(24)
     conn.commit()
     return ran
 

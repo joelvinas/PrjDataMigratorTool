@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lookup lists - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="lookups">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="baseStrip">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="actor">Your initials</label>
+    <input id="actor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+    <label for="reason">Why</label>
+    <input id="reason" type="text" class="wide" maxlength="500" placeholder="A short reason, kept with every change" autocomplete="off">
+  </div>
+  <p class="hint">A single or multiple select field with hundreds of options (a list of cities, for example) is not realistic as a select field, and its options often need more data of their own. Here a person can authorize such a field to be migrated as a <b>lookup list</b> instead: a Workfront Planning record type of its own, with one record per option, loaded <b>before</b> the table that uses it. The select field then becomes a one-sided link to that record type. The tool only flags long lists and proposes a name; nothing is decided until a person does it, and every decision keeps who, when and why. Core is not part of this yet. Nothing is sent to Workfront from this page.</p>
+  <div id="pageMessage" class="msg"></div>
+</section>
+
+<section class="card" id="notReady" hidden>
+  <h2>Migration needed</h2>
+  <div id="notReadyText" class="note warn"></div>
+</section>
+
+<section class="card" id="summaryCard">
+  <h2><span class="num">A</span> Where things stand</h2>
+  <div class="row">
+    <label for="threshold">Flag a list as long from</label>
+    <input id="threshold" type="number" class="short" min="1" max="100000" value="50" aria-describedby="thresholdHint">
+    <span id="thresholdHint" class="hint">options. A starting value for this page only; Workfront does not set it.</span>
+  </div>
+  <div id="summaryStrip" class="row"></div>
+</section>
+
+<section class="card" id="listsCard">
+  <h2><span class="num">B</span> Lookup lists</h2>
+  <p class="hint">Each list becomes one record type in Planning. Fields that share a list point at the same record type, and the option count is the number of different option names across its fields (letter case and spacing ignored). A name is a Planning name, so it follows the naming rules and cannot equal a table's name.</p>
+  <div id="listsMessage" class="msg"></div>
+  <div class="tablewin" id="listsWin" tabindex="0"><table class="grid" id="listsGrid"><thead><tr>
+    <th>List name</th><th>Fields that use it</th><th>Options</th><th>Decided by</th><th>Why</th><th></th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<section class="card" id="fieldsCard">
+  <h2><span class="num">C</span> Select fields</h2>
+  <div class="row">
+    <label for="fShow">Show</label>
+    <select id="fShow"><option value="long">Long lists only</option><option value="undecided">Long lists not yet decided</option><option value="authorized">Authorized as a lookup list</option><option value="repeats">Options that repeat</option><option value="all">All select fields</option></select>
+    <label for="fTable">Table</label><select id="fTable"></select>
+    <input id="fSearch" type="text" class="wide" placeholder="Search field name or ID" autocomplete="off">
+  </div>
+  <div class="row">
+    <span id="selCount" class="hint"></span>
+    <label for="targetList">Move the ticked fields to</label>
+    <select id="targetList"></select>
+    <input id="newName" type="text" class="wide" maxlength="120" placeholder="Name of the new list (a Planning record type name)" autocomplete="off" aria-label="Name of the new list">
+    <button id="btnAssign" type="button" class="primary">Authorize as lookup list</button>
+    <button id="btnUnassign" type="button">Return to select fields</button>
+  </div>
+  <div id="fieldsMessage" class="msg"></div>
+  <div class="tablewin" id="fieldsWin" tabindex="0"><table class="grid" id="fieldsGrid"><thead><tr>
+    <th><input type="checkbox" id="tickAll" aria-label="Tick every field on this page"></th><th>Table</th><th>Field</th><th>Airtable type</th><th>Options</th><th>Lookup list</th><th>Decision</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div class="row"><button id="btnPrev" type="button">Previous</button><span id="pageInfo" class="hint"></span><button id="btnNext" type="button">Next</button></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/lookups.js"></script>
+</body>
+</html>
