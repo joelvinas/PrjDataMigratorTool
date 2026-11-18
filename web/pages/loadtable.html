@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load a table - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="loadtable">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="ctxCard">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="stageSel">Planning stage</label>
+    <select id="stageSel"><option value="dev">dev</option><option value="uat">uat</option></select>
+    <label for="wsId">Workspace ID</label>
+    <output id="wsId" class="wsid" aria-live="polite">(not read yet)</output>
+  </div>
+  <div class="row">
+    <label for="tableSel">Table</label>
+    <select id="tableSel"><option value="">Choose a table...</option></select>
+    <span id="tableInfo" class="hint"></span>
+  </div>
+  <p class="hint">Loads <strong>one table</strong> into Workfront Planning, one step at a time. Each step opens only when the one before is done, and a step that sends anything asks you to confirm the table, the stage and the Workspace ID first. Nothing runs when this page opens. The Workspace ID is read from <code>config.json</code>; the token is never shown here. It uses the same code as <code>loader.py</code> (<code>run</code>, <code>records</code>, <code>reset</code> with <code>--table</code>), so a step done here and a step done from the command line leave the same record in the database.</p>
+  <div id="pageMessage" class="msg"></div>
+</section>
+
+<section class="card jobpanel" id="jobPanel" hidden aria-live="polite">
+  <div class="row"><strong id="jobTitle">Running</strong><span id="jobProgress" class="hint"></span><button id="btnCancel" type="button">Cancel</button></div>
+  <div class="hint" id="jobHint">A cancel takes effect between items or batches, never in the middle of a call. Whatever was finished is kept, and a rerun carries on from there.</div>
+</section>
+
+<section class="card step" id="step1">
+  <h2>1. Check <span id="pill1" class="tag">not run</span></h2>
+  <p class="hint">Builds the plan for this table only and counts its items: <strong>ready</strong> (everything decided and approved), <strong>on hold</strong> (a design decision is open: a formula, a lookup, an attachment) and <strong>blocked</strong> (something this tool controls is missing). Anything blocked stops here: nothing below opens until it is fixed. Held items are skipped, not loaded. Reads only; nothing is sent.</p>
+  <div class="row"><button id="btnCheck" type="button" class="primary" disabled>Check this table</button></div>
+  <div id="checkMsg" class="msg"></div>
+  <div class="tablewin" id="reasonWin" hidden><table id="reasonGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Status</th><th data-sort="text">Reason</th><th class="num" data-sort="num">Items</th><th>Examples</th></tr></thead><tbody></tbody>
+  </table></div>
+  <h3 id="depHead" hidden>Tables this table links to</h3>
+  <div class="tablewin" id="depWin" hidden><table id="depGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Linked table</th><th class="num" data-sort="num">Link fields</th><th data-sort="text">Record type in Workfront</th><th class="num" data-sort="num">Records loaded</th><th data-sort="text">Loaded?</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card step" id="step2">
+  <h2>2. Create the record type and fields <span id="pill2" class="tag">locked</span></h2>
+  <p class="hint">Creates this table's Planning record type, its fields and their select options (one table, like <code>--table</code>). A record type that one of its link fields points to is created <strong>empty</strong> so the link field can be built. Run the dry run first; it sends nothing. Each new Workfront ID is written to the database as it comes back, so a stop or a restart never creates anything twice.</p>
+  <div class="row"><button id="btnStructDry" type="button" disabled>Dry run</button><button id="btnStructSend" type="button" class="primary" disabled>Send to Workfront...</button></div>
+  <div id="structMsg" class="msg"></div>
+  <div class="tablewin" id="structWin" hidden><table id="structGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Kind</th><th data-sort="text">Airtable field</th><th data-sort="text">Name</th><th data-sort="text">Outcome</th><th>Detail</th></tr></thead><tbody></tbody>
+  </table></div>
+  <h3>Workfront ID map</h3>
+  <p class="hint">Each field's Airtable field ID, new name and the Workfront ID it was given. Select options are counted, not listed.</p>
+  <div class="tablewin" id="mapWin" hidden><table id="mapGrid" class="grid compact">
+    <thead><tr><th data-sort="text">What</th><th data-sort="text">Airtable field ID</th><th data-sort="text">Airtable name</th><th data-sort="text">New name</th><th data-sort="text">State</th><th data-sort="text">Workfront ID</th><th>Options created</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card step" id="step3">
+  <h2>3. Records <span id="pill3" class="tag">locked</span></h2>
+  <p class="hint">Loads this table's saved Airtable records (without their links) into its record type. The saved file is read in memory and each value is sent and forgotten: only record IDs, counts and statuses are shown or stored. A record Planning refuses is listed by Airtable record ID with a short reason and tried again on the next run; the ones that worked are kept.</p>
+  <div class="row"><button id="btnFile" type="button" disabled>Check the saved file</button><button id="btnRecDry" type="button" disabled>Dry run</button><button id="btnRecSend" type="button" class="primary" disabled>Send to Workfront...</button></div>
+  <div id="fileMsg" class="msg"></div>
+  <div id="recMsg" class="msg"></div>
+  <div class="tablewin" id="recFailWin" hidden><table id="recFailGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Airtable record ID</th><th data-sort="text">Reason</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card step" id="step4">
+  <h2>4. Links <span id="pill4" class="tag">locked</span></h2>
+  <p class="hint">The second pass: sets each record's link fields to the Planning records its Airtable links became. A link to a record that is not loaded yet <strong>waits</strong> (it is never guessed) and is filled in by a later run, after the other table's records are loaded. A table with no link fields has nothing to do here.</p>
+  <div class="row"><button id="btnLinkDry" type="button" disabled>Dry run</button><button id="btnLinkSend" type="button" class="primary" disabled>Send to Workfront...</button></div>
+  <div id="linkMsg" class="msg"></div>
+  <div class="tablewin" id="waitWin" hidden><table id="waitGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Links wait for table</th><th class="num" data-sort="num">Link fields</th><th class="num" data-sort="num">Records loaded</th><th class="num" data-sort="num">Records registered</th></tr></thead><tbody></tbody>
+  </table></div>
+  <div class="tablewin" id="linkFailWin" hidden><table id="linkFailGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Airtable record ID</th><th data-sort="text">Reason</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card step" id="step5">
+  <h2>5. Verify <span id="pill5" class="tag">locked</span></h2>
+  <p class="hint">Compares the number of records in the saved file, in this tool's registry, with the records pass done and mapped, and the count Workfront reports (one read of one page; no value is kept). Differences are shown as counts only and are never repaired here. This step opens once the records pass is complete; links that wait for other tables do not hold it back.</p>
+  <div class="row"><button id="btnVerify" type="button" disabled>Verify counts</button></div>
+  <div id="verifyMsg" class="msg"></div>
+  <div class="tablewin" id="verifyWin" hidden><table id="verifyGrid" class="grid compact">
+    <thead><tr><th>Count</th><th class="num">Records</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<details class="card danger step" id="step6">
+  <summary><strong>6. Reset this table (danger zone)</strong> <span id="pill6" class="tag">locked</span></summary>
+  <p class="hint">Deletes <strong>every record</strong> of this table's record type in the Planning Workspace and clears what this tool remembers about them, so the table can be loaded again from step 3. The record type and its fields stay. A delete cannot be undone. The dry run reads this tool's own counts and sends nothing.</p>
+  <div class="row"><button id="btnResetDry" type="button" disabled>Dry run</button></div>
+  <div id="resetMsg" class="msg"></div>
+  <div class="row"><label for="resetPhrase">Type the phrase <code id="resetPhraseShown"></code></label><input id="resetPhrase" type="text" maxlength="40" autocomplete="off" disabled>
+    <button id="btnResetSend" type="button" class="primary" disabled>Delete the records...</button></div>
+</details>
+</main>
+</div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog">
+    <h2 id="confirmTitle">Confirm</h2>
+    <p id="confirmText"></p>
+    <dl class="facts"><dt>Table</dt><dd id="confirmTable"></dd><dt>Stage</dt><dd id="confirmStage"></dd><dt>Workspace ID</dt><dd id="confirmWs"></dd></dl>
+    <div class="row"><button id="confirmNo" type="button" value="cancel">Cancel</button><button id="confirmYes" type="button" class="primary">Confirm and send</button></div>
+  </form>
+</dialog>
+<script src="/common.js"></script>
+<script src="/loadtable.js"></script>
+</body>
+</html>

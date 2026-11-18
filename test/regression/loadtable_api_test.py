@@ -56,6 +56,8 @@ try:
     check("setup shows the Workspace ID, the stages and the typed reset phrases, and says configured; the token is not in it", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["stages"] == ["dev", "uat"]
           and r["phrases"] == {"dev": "DELETE RECORDS IN DEV", "uat": "DELETE RECORDS IN UAT"} and TOKEN not in json.dumps(r), r)
     check("the picker rows carry scope, target and name approval, in-scope tables only (Hidden is absent)", all(t["scope"] == "in" and t["target"] == "planning_only" and t["name_approved"] for t in r["tables"]) and "tD" not in [t["table_id"] for t in r["tables"]])
+    s, r = call("GET", "/api/loadtable/setup?base_id=appNoSuchBase1")
+    check("a base the database does not know still shows the Workspace ID and the settings, with the problem in plain words", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["tables"] == [], r)
     check("a stage other than dev or uat is refused", post("/api/loadtable/check", {"base_id": BASE, "table_id": "tC", "stage": "production"})[0] == 400)
     check("a bad table or base is refused", post("/api/loadtable/check", {"base_id": BASE, "table_id": "tZ", "stage": "dev"})[0] == 404 and post("/api/loadtable/check", {"base_id": "x y", "table_id": "tC"})[0] == 400
           and post("/api/loadtable/check", {"base_id": BASE, "table_id": "", "stage": "dev"})[0] == 400)
