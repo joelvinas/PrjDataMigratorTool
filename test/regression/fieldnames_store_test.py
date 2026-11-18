@@ -127,7 +127,7 @@ check("un-abandon clears the flag and is audited", c.execute("select abandoned f
 # ---- import
 csvtext = "field_id,old_name,new_name,new_label,old_dataType,new_dataType\r\nf9,Plain,Plain Text,Plain Text,Single line text,Text\r\nf3,Notes!,Different,Different,Single line text,Text\r\nfNONE,x,x,x,x,x\r\n"
 r = st.import_names(c, B, "JV", csv_base64=base64.b64encode(csvtext.encode("utf-8")).decode())
-check("import stores names and target type by field ID, and keeps the already approved Planning name", c.execute("select planning_name, core_name, core_label, target_type from field_names where airtable_field_id='f9'").fetchone()[:] == ("Plain", "Plain Text", "Plain Text", "Text"), r)
+check("import stores names and target type by field ID, and keeps the already approved Planning name", c.execute("select planning_name, core_name, core_label, target_type from field_names where airtable_field_id='f9'").fetchone()[:] == ("Plain", "Plain Text", "Plain Text", "text"), r)
 check("import never overwrites an approved name", c.execute("select planning_name from field_names where airtable_field_id='f3'").fetchone()[0] == "Notes" and r["kept_approved"] >= 1)
 check("import reports an unmatched ID and fields missing from the file", any(p["kind"] == "UNMATCHED_ID" for p in r["problems"]) and any(p["kind"] == "MISSING_FROM_IMPORT" for p in r["problems"]))
 check("an import is audited per name with the batch", c.execute("select count(*) from name_events where event_type='import' and reason=?", (r["batch"],)).fetchone()[0] >= 2)

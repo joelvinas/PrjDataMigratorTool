@@ -21,6 +21,7 @@ A description over the 512 characters the plan allows is refused here and never 
 """
 import re
 
+import datatypes as dt
 import loadrun as lr
 import planlimits as pl
 import typemap as tm
@@ -73,7 +74,9 @@ class PlanningTransport(object):
             raise ValueError("A field needs its record type's Planning ID first.")
         vtype, k = tm.planning_type(item["data_type"])
         if vtype is None:
-            raise ValueError("The target data type %r is not one this loader knows; check the new_dataType value for this field." % str(item.get("data_type") or ""))
+            if dt.planning_type(item.get("data_type")):
+                raise ValueError("The Planning type %r is on the Adobe list but this loader does not create it (derived and system fields stay on hold)." % str(item["data_type"]))
+            raise ValueError("The target data type %r is not a Planning data type; set one on the Data types page." % str(item.get("data_type") or ""))
         spec = item.get("spec") or {}
         body = {"displayName": item["name"], "type": vtype}
         if desc:

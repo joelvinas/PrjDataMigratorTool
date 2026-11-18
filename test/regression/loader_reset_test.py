@@ -34,6 +34,7 @@ st.set_scope(c, "appL", "JV", [{"table_id": t, "decision": "in", "target": "plan
 csvt = "field_id,old_name,new_name,new_label,old_dataType,new_dataType\r\n" + "".join("%s,%s,%s,%s,x,Text\r\n" % (r[0], r[3], r[3], r[3]) for r in F)
 st.import_names(c, "appL", "JV", csv_base64=base64.b64encode(csvt.encode()).decode())
 st.approve_fields(c, "appL", "JV", mode="pass_and_auto")
+import typesfixture; typesfixture.fill_defaults(c, "appL")      # Planning type and Core dataType and displayType from the default mapping
 c.close()
 cfgp = os.path.join(tmp, "config.json")
 def config(path, ws):

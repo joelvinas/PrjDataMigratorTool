@@ -21,11 +21,12 @@ SECRET = "fakeKEY0123456789abcdef"
 check("data type texts are matched ignoring case, hyphens and spacing", [tm.kind(x) for x in ("Single-line text", "SINGLE LINE TEXT", "long_text", "Multiple selects", "Link to another record", "Checkbox", "Date time")]
       == ["text", "text", "long-text", "multi-select", "reference", "boolean", "datetime"])
 check("an unknown data type is never guessed", tm.kind("Quantum") is None and tm.kind(None) is None and tm.planning_type("Quantum") == (None, None))
-check("Core: text and long text use the verified displayTypes, any data type blends with them", tm.core_type("Text") == ("TEXT", "TEXT", True) and tm.core_type("Long text") == ("TEXT", "TXTA", True)
-      and tm.core_type("Number") == ("NMBR", "TEXT", True) and tm.core_type("Currency") == ("CURC", "TEXT", True) and tm.core_type("Date")[0] == "DATE" and tm.core_type("Date time")[0] == "DTTM")
-check("Core: select, multiple select and checkbox are mapped but marked unverified", [tm.core_type(x)[1:] for x in ("Single select", "Multiple select", "Checkbox")] == [("SLCT", False), ("MULT", False), ("CHCK", False)])
-msg = lambda x: str(raises(tm.core_type, x))
-check("Core: rich text cannot be created through the API and says so; a link and an unknown type are refused plainly", "custom form viewer" in msg("Rich text") and "Planning connection" in msg("Link") and "not one this loader knows" in msg("Quantum"))
+check("Core: the dataType and displayType are two values; text and long text use the verified displayTypes", tm.core_pair("TEXT", "TEXT") == ("TEXT", "TEXT", True) and tm.core_pair("TEXT", "TXTA") == ("TEXT", "TXTA", True)
+      and tm.core_pair("NMBR", "TEXT") == ("NMBR", "TEXT", True) and tm.core_pair("CURC", "TEXT")[0] == "CURC" and tm.core_pair("date", "text")[:2] == ("DATE", "TEXT") and tm.core_pair("DTTM", "TEXT")[0] == "DTTM")
+check("Core: SLCT, MULT and CHCK are accepted but marked unverified", [tm.core_pair("TEXT", x)[1:] for x in ("SLCT", "MULT", "CHCK")] == [("SLCT", False), ("MULT", False), ("CHCK", False)])
+msg = lambda *x: str(raises(tm.core_pair, *x))
+check("Core: RICH cannot be created through the API and says so; a missing half and a value off the list are refused plainly", "custom form viewer" in msg("RICH", "TEXT") and "no Core data type and display type" in msg("TEXT", None)
+      and "no Core data type and display type" in msg(None, "TEXT") and "dataType 'Text field' must be one of" in msg("Text field", "TEXT") and "displayType 'BOX' must be one of" in msg("TEXT", "BOX"))
 check("Planning: the v2 field types", [tm.planning_type(x)[0] for x in ("Text", "Long text", "Number", "Percent", "Currency", "Date", "Date time", "Single select", "Multiple select", "Checkbox", "Link", "User", "Rich text")]
       == ["text", "long-text", "number", "percentage", "currency", "date", "date", "single-select", "multi-select", "boolean", "reference", "user", "long-text"])
 
@@ -79,19 +80,19 @@ check("a redirect is not followed", "redirect" in str(raises(h.request, "GET", "
 check("an empty reply is None and a non-JSON reply is an error", http([Resp(204, b"")])[0].request("DELETE", "/x") is None and "not JSON" in str(raises(http([Resp(200, b"<html>")])[0].request, "GET", "/x")))
 
 # ---- the Core transport
-def item(kind="field", name="Order Total", dtype="Number", **kw):
-    return dict({"temp_id": "C-F-f1", "system": "core", "kind": kind, "parent": None, "name": name, "label": "Order Total label", "data_type": dtype, "position": None, "description": None}, **kw)
+def item(kind="field", name="Order Total", dtype="NMBR", display="TEXT", **kw):
+    return dict({"temp_id": "C-F-f1", "system": "core", "kind": kind, "parent": None, "name": name, "label": "Order Total label", "data_type": dtype, "display_type": display, "position": None, "description": None}, **kw)
 h, _ = http([Resp(200, {"data": {"ID": "PARAM9", "name": "Order Total"}})])
 t = ct.CoreTransport(h)
 check("a field is created with name, dataType and displayType, and the new ID comes back", t.create(item(), None) == "PARAM9" and h.opener.reqs[0].full_url.endswith("/attask/api/v21.0/param")
       and json.loads(h.opener.reqs[0].data) == {"name": "Order Total", "dataType": "NMBR", "displayType": "TEXT", "label": "Order Total label"})
 check("a description is sent when there is one", t.request_for(item(description="Source: Airtable. Origins: A.B."), None)[2]["description"].startswith("Source:"))
-check("a long text field is a text area", t.request_for(item(dtype="Long text"), None)[2]["displayType"] == "TXTA")
+check("a long text field is a text area", t.request_for(item(dtype="TEXT", display="TXTA"), None)[2]["displayType"] == "TXTA")
 o = item("option", "Open", None, position=2)
 check("an option is created against its field's Core ID with its order", t.request_for(o, "PARAM9") == ("POST", "/popt", {"parameterID": "PARAM9", "label": "Open", "value": "Open", "displayOrder": 2}))
 check("an option without its field, a rich text field, a form and an unknown type are refused in plain words, before any call",
-      "field's Core ID" in str(raises(t.request_for, o, None)) and "custom form viewer" in str(raises(t.request_for, item(dtype="Rich text"), None)) and "by hand" in str(raises(t.request_for, item("form"), None))
-      and "not one this loader knows" in str(raises(t.request_for, item(dtype="Quantum"), None)) and len(h.opener.reqs) == 1)
+      "field's Core ID" in str(raises(t.request_for, o, None)) and "custom form viewer" in str(raises(t.request_for, item(dtype="RICH"), None)) and "by hand" in str(raises(t.request_for, item("form"), None))
+      and "dataType 'Quantum' must be one of" in str(raises(t.request_for, item(dtype="Quantum"), None)) and "no Core data type and display type" in str(raises(t.request_for, item(display=None), None)) and len(h.opener.reqs) == 1)
 d = t.describe(item(), None)
 check("describe shows the request and sends nothing", d["request"] == "POST /param" and d["body"]["dataType"] == "NMBR" and len(h.opener.reqs) == 1)
 h, _ = http([Resp(200, {"data": {}})])

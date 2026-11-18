@@ -610,7 +610,15 @@ async function doImport() {
   N.R = r.review; N.saved = r.review.settings; render();
   const kinds = {};
   for (const p of r.problems) kinds[p.kind] = (kinds[p.kind] || 0) + 1;
-  out.appendChild(el("div", { class: "note ok", text: "Imported " + fmt(r.names_imported) + " name(s) from " + fmt(r.rows) + " row(s)" + (r.kept_approved ? "; " + fmt(r.kept_approved) + " already approved name(s) were kept." : ".") }));
+  out.appendChild(el("div", { class: "note ok", text: "Imported " + fmt(r.names_imported) + " name(s) and " + fmt(r.types_imported) + " data type(s) from " + fmt(r.rows) + " row(s); " + fmt(r.unchanged) + " value(s) already matched the file." }));
+  if (r.held_count) {
+    const target = { planning_name: "Planning name", core_name: "Core name", core_label: "Core label", planning: "Planning type", core: "Core type" };
+    out.appendChild(el("div", { class: "note warn" }, el("b", { text: fmt(r.held_count) + " value(s) held: they differ from what a person already decided, so nothing was changed." }),
+      el("div", { style: "overflow-x:auto" }, el("table", { class: "grid" },
+        el("thead", {}, el("tr", {}, ["Field ID", "Field", "What", "Now", "In the file"].map((h) => el("th", { text: h })))),
+        el("tbody", {}, r.held.slice(0, 200).map((h) => el("tr", {}, el("td", { text: h.field_id }), el("td", { text: h.field_name }), el("td", { text: target[h.target] || h.target }), el("td", { text: h.current || "" }), el("td", { text: h.file })))))),
+      r.held_count > 200 ? el("div", { class: "hint", text: "Showing the first 200." }) : null));
+  }
   if (r.note) out.appendChild(el("div", { class: "note warn", text: r.note }));
   if (r.problem_count) {
     const shown = r.problems.slice(0, 200);

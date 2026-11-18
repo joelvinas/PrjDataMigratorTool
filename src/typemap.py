@@ -9,12 +9,14 @@ stay on hold in the plan.
 CORE (owner-verified 17 November 2026): POST /param needs only name and dataType. The displayTypes TEXT (shown as text) and TXTA (shown as a text area) work with any
 dataType. dataType is one of DATE, DTTM, NMBR, CURC, TEXT, RICH. A RICH field cannot be created through the API: it is built by hand in the custom form viewer, so it is
 refused here with that message. The select, multi-select and checkbox displayTypes (SLCT, MULT, CHCK) are in the schema but NOT yet verified: they are marked so, and the
-first sandbox run must confirm them.
+first sandbox run must confirm them. The two values are stored and planned separately (field_names.core_target_type and core_display_type).
 
 The label match ignores case, hyphens, underscores and extra spaces, and a few common spellings are accepted. A label this module does not know is never guessed: the
 caller gets None and reports it, and the item fails with a plain message.
 """
 import re
+
+import datatypes as dt
 
 _ALIASES = {
     "text": ("text", "single line text", "singlelinetext", "short text", "string", "single line", "line text"),
@@ -55,25 +57,18 @@ def planning_type(label):
 
 
 # ------------------------------------------------------------------ Core
-# kind -> (dataType, displayType, verified)
-CORE_TYPE = {
-    "text": ("TEXT", "TEXT", True), "long-text": ("TEXT", "TXTA", True),
-    "number": ("NMBR", "TEXT", True), "percentage": ("NMBR", "TEXT", True), "currency": ("CURC", "TEXT", True),
-    "date": ("DATE", "TEXT", True), "datetime": ("DTTM", "TEXT", True),
-    "single-select": ("TEXT", "SLCT", False), "multi-select": ("TEXT", "MULT", False), "boolean": ("TEXT", "CHCK", False),
-}
-CORE_REFUSED = {
-    "rich-text": "A rich text field cannot be created through the Workfront Core API. Build it by hand in the custom form viewer.",
-    "reference": "A link has no Core custom field type; it is a Planning connection and is not created in Core.",
-    "user": "A user field is not created as a Core custom field by this loader.",
-}
+# The plan carries the Core dataType and displayType as two values (src/datatypes.py); nothing is guessed from a label.
+CORE_REFUSED = {"RICH": "A rich text field cannot be created through the Workfront Core API. Build it by hand in the custom form viewer."}
 
 
-def core_type(label):
-    """(dataType, displayType, verified) for a Core custom field, or raises ValueError with a plain message (unknown or not creatable)."""
-    k = kind(label)
-    if k is None:
-        raise ValueError("The target data type %r is not one this loader knows; check the new_dataType value for this field." % str(label or ""))
-    if k in CORE_REFUSED:
-        raise ValueError(CORE_REFUSED[k])
-    return CORE_TYPE[k]
+def core_pair(data_type, display_type):
+    """(dataType, displayType, verified) for a Core custom field, or raises ValueError with a plain message (missing, unknown or not creatable)."""
+    if not data_type or not display_type:
+        raise ValueError("This field has no Core data type and display type; set both on the Data types page.")
+    problem = dt.core_problem(data_type, display_type)
+    if problem:
+        raise ValueError(problem)
+    d, p = dt.core_pair(data_type, display_type)
+    if d in CORE_REFUSED:
+        raise ValueError(CORE_REFUSED[d])
+    return d, p, p not in dt.CORE_UNVERIFIED_DISPLAY

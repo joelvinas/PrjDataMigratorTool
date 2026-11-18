@@ -15,6 +15,7 @@ import zipfile
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 
+import datatypes as dt
 import fielddesc as fd
 import fieldwriters as fw
 import fieldnames as fn
@@ -275,7 +276,8 @@ def review(conn, base_id, settings=None):
     for fid, e in res["fields"].items():
         n = c["names"].get(fid) or {}
         row = {"field_id": fid, "table_id": e["table_id"], "table_name": fbi[fid]["table_name"], "original": e["original"], "data_type": fbi[fid]["data_type"],
-               "presence": e["presence"], "abandoned": e["abandoned"] and fid not in c["merged"], "target_type": n.get("target_type"), "import_batch": n.get("import_batch"),
+               "presence": e["presence"], "abandoned": e["abandoned"] and fid not in c["merged"], "target_type": n.get("target_type"), "core_target_type": n.get("core_target_type"),
+               "core_display_type": n.get("core_display_type"), "import_batch": n.get("import_batch"),
                "description": desc[fid],
                "abandon": {"by": n.get("abandoned_by"), "at": n.get("abandoned_at"), "reason": n.get("abandoned_reason")} if e["abandoned"] and fid not in c["merged"] else None,
                "consolidated": ({"group_id": c["merged"][fid]["group_id"], "survivor_id": c["merged"][fid]["survivor_id"], "survivor_name": fbi[c["merged"][fid]["survivor_id"]]["field_name"],
@@ -696,25 +698,59 @@ def import_names(conn, base_id, actor, csv_base64=None, csv_text=None):
     imp = fio.parse_import(text, fields, other, base_id)
     _, names = _stored(conn, base_id)
     batch = "import-" + _now().replace(" ", "T").replace(":", "")
-    now, applied, kept = _now(), 0, 0
+    now, applied, kept, typed, held, unchanged = _now(), 0, 0, [], [], 0
+    fnames = {f["field_id"]: f["field_name"] for f in fields}
+    def hold(fid, what, target, current, wanted):
+        held.append({"field_id": fid, "field_name": fnames.get(fid, ""), "what": what, "target": target, "current": current, "file": wanted})
+    have_core = "core_display_type" in {r[1] for r in conn.execute("PRAGMA table_info(field_names)")}
+    core_skipped = bool(imp["core_types"]) and not have_core
+    if core_skipped:
+        imp["problems"].append({"kind": "CORE_NEEDS_MIGRATION", "severity": "warn", "field_id": "", "detail": "The file has Core types, but migration 022 (field_names.core_display_type) is not applied, so no Core type was stored."})
     with conn:
-        for fid in sorted(set(imp["manual"]) | set(imp["target_types"])):
+        for fid in sorted(set(imp["manual"]) | set(imp["target_types"]) | set(imp["core_types"])):
             row = names.get(fid) or {}
             for t, name in sorted((imp["manual"].get(fid) or {}).items()):
                 if not name:
                     continue
                 if row.get(_COL[t][1]) == "approved":
-                    kept += 1
+                    if row.get(t) == name:
+                        unchanged += 1
+                    else:
+                        kept += 1                      # an approved name is a person's decision: reported and held, never overwritten
+                        hold(fid, "name", t, row.get(t), name)
                     continue
                 conn.execute("INSERT INTO field_names(airtable_field_id, %s, import_batch, updated_at) VALUES (?,?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET %s=excluded.%s, "
                              "import_batch=excluded.import_batch, updated_at=excluded.updated_at" % (t, t, t), (fid, name, batch, now))
                 _event(conn, "field", fid, "import", actor, t, row.get(t), name, batch)
                 applied += 1
-            if imp["target_types"].get(fid):
-                conn.execute("INSERT INTO field_names(airtable_field_id, target_type, import_batch, updated_at) VALUES (?,?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET "
-                             "target_type=excluded.target_type, import_batch=excluded.import_batch, updated_at=excluded.updated_at", (fid, imp["target_types"][fid], batch, now))
-    return {"batch": batch, "rows": imp["rows"], "names_imported": applied, "kept_approved": kept, "problems": imp["problems"][:2000],
-            "problem_count": len(imp["problems"]), "note": note}
+            new = imp["target_types"].get(fid)
+            if new:
+                cur = row.get("target_type")
+                if dt.state("planning", cur) == "set" and cur != new:
+                    hold(fid, "type", "planning", cur, new)                # a valid type is already set: a person decides
+                elif cur == new and dt.state("planning", cur) == "set":
+                    unchanged += 1
+                else:
+                    conn.execute("INSERT INTO field_names(airtable_field_id, target_type, import_batch, updated_at) VALUES (?,?,?,?) ON CONFLICT(airtable_field_id) DO UPDATE SET "
+                                 "target_type=excluded.target_type, import_batch=excluded.import_batch, updated_at=excluded.updated_at", (fid, new, batch, now))
+                    typed.append((fid, "planning", cur, None, new, None))
+            pair = imp["core_types"].get(fid) if have_core else None
+            if pair:
+                cur = (row.get("core_target_type"), row.get("core_display_type"))
+                if dt.state("core", *cur) == "set" and cur != pair:
+                    hold(fid, "type", "core", "%s / %s" % cur, "%s / %s" % pair)
+                elif cur == pair:
+                    unchanged += 1
+                else:
+                    conn.execute("INSERT INTO field_names(airtable_field_id, core_target_type, core_display_type, import_batch, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(airtable_field_id) "
+                                 "DO UPDATE SET core_target_type=excluded.core_target_type, core_display_type=excluded.core_display_type, import_batch=excluded.import_batch, "
+                                 "updated_at=excluded.updated_at", (fid, pair[0], pair[1], batch, now))
+                    typed.append((fid, "core", cur[0], cur[1], pair[0], pair[1]))
+        import datatypes_store as dts           # imported here: datatypes_store imports this module
+        dts.record_import(conn, actor, typed, batch)
+    held.sort(key=lambda h: (h["field_id"], h["what"], h["target"]))
+    return {"batch": batch, "rows": imp["rows"], "names_imported": applied, "types_imported": len(typed), "kept_approved": kept, "unchanged": unchanged,
+            "held": held[:2000], "held_count": len(held), "problems": imp["problems"][:2000], "problem_count": len(imp["problems"]), "note": note}
 
 
 # ---------------------------------------------------------------- exports

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data types - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="datatypes">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="baseStrip">
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="actor">Your initials</label>
+    <input id="actor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+    <label for="reason">Why</label>
+    <input id="reason" type="text" class="wide" maxlength="500" placeholder="A short reason, kept with every change" autocomplete="off">
+  </div>
+  <p class="hint">Workfront Planning and Workfront Core do not share one list of data types, so each field has two answers. <b>Planning</b> takes one of Adobe's 17 types. <b>Core</b> needs two values: a <b>dataType</b> and a <b>displayType</b> (the display types SLCT, MULT and CHCK are not yet verified in a sandbox). The tool proposes a type from the default mapping for each Airtable type; you apply the defaults, override them, or clear a value. Every change records who made it, when, and why (the initials and reason above), and the history keeps the old value.</p>
+  <div id="pageMessage" class="msg"></div>
+</section>
+
+<section class="card" id="notReady" hidden>
+  <h2>Migrations needed</h2>
+  <div id="notReadyText" class="note warn"></div>
+</section>
+
+<section class="card" id="summaryCard">
+  <h2><span class="num">A</span> Where things stand</h2>
+  <div id="summaryStrip" class="row"></div>
+  <div class="row"><button id="btnClearInvalid" type="button">Clear every value that is not on the list</button></div>
+  <p class="hint">A stored type that is not on its list (for example "Single select" instead of "single-select", or half of a Core pair) would be refused by the API, so it is shown as <b>invalid</b>. Clearing empties it for both systems; the old value stays in the history. Then set it again below.</p>
+</section>
+
+<section class="card" id="defaultsCard">
+  <h2><span class="num">B</span> Default mapping</h2>
+  <div class="note info"><b>Rich text in Core.</b> The API can create a text area (<code>TEXT</code> with <code>TXTA</code>) but not a true rich text field (dataType <code>RICH</code>). A rich text field can be created by hand in the Custom Form interface, so a Core default is never <code>RICH</code>.</div>
+  <p class="hint">What the tool proposes for each Airtable field type. Change a default and the proposal changes for every field of that type; nothing already set is touched. A blank default means a person must decide each field.</p>
+  <div class="tablewin" id="defaultsWin" tabindex="0"><table class="grid" id="defaultsGrid"><thead><tr>
+    <th>Airtable type</th><th>Planning type</th><th>Core dataType</th><th>Core displayType</th><th>Note</th><th>Transformation rule</th><th></th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<section class="card" id="bulkCard">
+  <h2><span class="num">C</span> Update many fields at once</h2>
+  <div class="row">
+    <label for="bSystem">System</label>
+    <select id="bSystem"><option value="planning">Planning</option><option value="core">Core</option></select>
+    <label for="bTable">Table</label><select id="bTable"></select>
+    <label for="bAirtable">Airtable type</label><select id="bAirtable"></select>
+    <label for="bState">Currently</label>
+    <select id="bState"><option value="">Any</option><option value="unset" selected>Not set</option><option value="invalid">Invalid</option><option value="set">Set</option></select>
+  </div>
+  <div class="row"><span id="bMatch" class="hint"></span></div>
+  <div class="row">
+    <button id="btnDefaults" type="button" class="primary">Apply the defaults</button>
+    <span class="hint">or set one value for all of them:</span>
+    <select id="bType" aria-label="Planning type or Core dataType"></select>
+    <select id="bDisplay" aria-label="Core displayType"></select>
+    <button id="btnValue" type="button">Set this value</button>
+    <button id="btnClear" type="button">Clear them</button>
+  </div>
+  <div id="bulkMessage" class="msg"></div>
+</section>
+
+<section class="card" id="fieldsCard">
+  <h2><span class="num">D</span> Fields</h2>
+  <div class="row">
+    <label for="fTable">Table</label><select id="fTable"></select>
+    <label for="fState">Planning</label>
+    <select id="fState"><option value="">Any</option><option value="unset">Not set</option><option value="invalid">Invalid</option><option value="set">Set</option></select>
+    <label for="fCState">Core</label>
+    <select id="fCState"><option value="">Any</option><option value="unset">Not set</option><option value="invalid">Invalid</option><option value="set">Set</option></select>
+    <input id="fSearch" type="text" class="wide" placeholder="Search field name or ID" autocomplete="off">
+  </div>
+  <div id="fieldsMessage" class="msg"></div>
+  <div class="tablewin" id="fieldsWin" tabindex="0"><table class="grid" id="fieldsGrid"><thead><tr>
+    <th>Table</th><th>Field</th><th>Airtable type</th><th>Planning type</th><th>Core dataType</th><th>Core displayType</th><th>Decision</th><th></th>
+  </tr></thead><tbody></tbody></table></div>
+  <div class="row"><button id="btnPrev" type="button">Previous</button><span id="pageInfo" class="hint"></span><button id="btnNext" type="button">Next</button></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/datatypes.js"></script>
+</body>
+</html>

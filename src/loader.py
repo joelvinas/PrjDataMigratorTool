@@ -34,7 +34,7 @@ import tableload as tl
 import coretargets as tg
 import workfronthttp as wh
 
-PLAN_COLUMNS = ["temp_id", "system", "kind", "parent", "group", "table_id", "airtable_field_id", "name", "label", "data_type", "position", "status", "reasons", "source", "description"]
+PLAN_COLUMNS = ["temp_id", "system", "kind", "parent", "group", "table_id", "airtable_field_id", "name", "label", "data_type", "display_type", "position", "status", "reasons", "source", "description"]
 
 
 def _csv(header, rows):
@@ -48,7 +48,7 @@ def _csv(header, rows):
 
 def plan_csv(plan):
     return _csv(PLAN_COLUMNS, [[i["temp_id"], i["system"], i["kind"], i["parent"] or "", i["group"] or "", i["table_id"] or "", i["field_id"] or "", i["name"], i["label"] or "",
-                                i["data_type"] or "", "" if i["position"] is None else i["position"], i["status"], " | ".join(i["reasons"]), i["source"], i["description"] or ""]
+                                i["data_type"] or "", i["display_type"] or "", "" if i["position"] is None else i["position"], i["status"], " | ".join(i["reasons"]), i["source"], i["description"] or ""]
                                for i in plan["items"]])
 
 

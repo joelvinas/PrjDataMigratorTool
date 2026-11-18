@@ -89,7 +89,7 @@ check("stale old_name is flagged", kinds.get("OLD_NAME_MISMATCH") == ["fld5"], k
 check("old data type compared loosely and flagged when really different", kinds.get("OLD_TYPE_MISMATCH") == ["fld3", "fld5"], kinds)
 check("loose type match: 'Number' equals number, 'Single line text' equals singleLineText", fio._norm_type("Single line text") == fio._norm_type("singleLineText"))
 check("new_name feeds both Planning and Core name; new_label feeds the label", imp["manual"]["fld1"] == {"planning_name": "Amount Total", "core_name": "Amount Total", "core_label": "Amount (Total)"})
-check("target data type is carried", imp["target_types"]["fld1"] == "Number" and imp["target_types"]["fld5"] == "Text")
+check("target data type is carried", imp["target_types"]["fld1"] == "number" and imp["target_types"]["fld5"] == "text")
 check("a file with no field_id column imports nothing", fio.parse_import("a,b\r\n1,2\r\n", db["fields"])["problems"][0]["kind"] == "MISSING_COLUMN")
 check("headers are case-insensitive", fio.parse_import("FIELD_ID,New_Name\r\nfld1,Zed\r\n", db["fields"])["manual"]["fld1"]["planning_name"] == "Zed")
 t, note = fio.decode_csv(b"\xef\xbb\xbffield_id\r\nfld1\r\n")

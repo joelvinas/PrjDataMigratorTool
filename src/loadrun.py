@@ -93,7 +93,7 @@ class DryRunTransport(object):
         self.system = system
 
     def describe(self, item, parent_id):
-        return {"system": self.system, "action": "create " + item["kind"], "name": item["name"], "label": item["label"], "data_type": item["data_type"],
+        return {"system": self.system, "action": "create " + item["kind"], "name": item["name"], "label": item["label"], "data_type": item["data_type"], "display_type": item.get("display_type"),
                 "position": item["position"], "parent": parent_id, "temp_id": item["temp_id"], "note": "intent only: the request shape is not implemented yet"}
 
     def create(self, item, parent_id):

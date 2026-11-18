@@ -38,6 +38,7 @@ csvt = ("field_id,old_name,new_name,new_label,old_dataType,new_dataType\r\nfA1,O
         "fA5,Amount,Amount,Amount,x,Number\r\nfB1,Customer Name,Customer Name,Customer Name,x,Text\r\n")
 st.import_names(c, "appL", "JV", csv_base64=base64.b64encode(csvt.encode()).decode())
 st.approve_fields(c, "appL", "JV", mode="pass_and_auto")
+import typesfixture; typesfixture.fill_defaults(c, "appL")      # Planning type and Core dataType and displayType from the default mapping
 ld.sync(c, [r for r in c.execute("select * from airtable_fields")])
 ld.decide(c, "JV", "fA4", "many_to_one", None, "orders belong to one customer")
 c.close()
