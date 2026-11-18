@@ -177,10 +177,14 @@ def _pending_uids(conn, base_id, table_id, pass_name, env, ws):
     return rm.pending_records(conn, base_id, table_id, pass_name, env, "planning", ws)
 
 
-def load_records(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DEFAULT, dry_run=True, reader=read_extract):
-    """The records pass. Returns {tables: [{table_id, name, pending, created, failed, problems}], created, failed}. dry_run counts and sends nothing."""
-    res = {"tables": [], "created": 0, "failed": 0}
-    for tid in sorted(tables):
+def load_records(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DEFAULT, dry_run=True, reader=read_extract, only=None, should_stop=None, progress=None):
+    """The records pass. Returns {tables: [{table_id, name, pending, created, failed, problems}], created, failed, cancelled}. dry_run counts and sends nothing.
+    only: the table IDs to load (default every table in `tables`). should_stop() is asked before each batch, so a stop never interrupts one; progress({table_id, name, pass,
+    batch, batches, created, failed, pending}) is called after each batch. Both are for the web page's background job."""
+    res = {"tables": [], "created": 0, "failed": 0, "cancelled": False}
+    for tid in sorted(tables if only is None else [t for t in only if t in tables]):
+        if res["cancelled"]:
+            break
         t = tables[tid]
         row = {"table_id": tid, "name": t["name"], "pending": 0, "created": 0, "failed": 0, "problems": 0, "note": None, "failures": []}
         res["tables"].append(row)
@@ -196,7 +200,11 @@ def load_records(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DE
             row["note"] = str(e)
             continue
         by_id = {r.get("id"): r for r in doc["records"] if isinstance(r, dict)}
-        for part in _batches(pend, max(1, int(batch))):
+        parts = list(_batches(pend, max(1, int(batch))))
+        for n, part in enumerate(parts, 1):
+            if should_stop and should_stop():
+                res["cancelled"] = True
+                break
             issues, sendable = [], []
             for uid, rid in part:
                 if rid not in by_id:
@@ -210,6 +218,8 @@ def load_records(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DE
                 rm.add_target(conn, uid, "planning", env, ws, "record", new_id)
                 rm.mark_pass(conn, [uid], "records", env, "planning", ws)
                 row["created"] += 1
+            if progress:
+                progress({"table_id": tid, "name": t["name"], "pass": "records", "batch": n, "batches": len(parts), "created": row["created"], "failed": row["failed"], "pending": row["pending"]})
         res["created"] += row["created"]
         res["failed"] += row["failed"]
     return res
@@ -252,11 +262,15 @@ def _send_batch(tr, sendable, row):
             row["failures"].append((rid, lr.scrub((g or {}).get("error") if isinstance(g, dict) else None) or "Planning gave no result for this record"))
 
 
-def load_links(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DEFAULT, dry_run=True, reader=read_extract):
-    """The links pass: set each record's link fields. A record is marked done only when every one of its links resolved."""
-    res = {"tables": [], "updated": 0, "waiting": 0, "failed": 0}
+def load_links(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DEFAULT, dry_run=True, reader=read_extract, only=None, should_stop=None, progress=None):
+    """The links pass: set each record's link fields. A record is marked done only when every one of its links resolved.
+    only: the table IDs to update (default every table in `tables`); `tables` still says which linked tables exist. should_stop() is asked every `batch` records and
+    progress({table_id, name, pass, batch, batches, updated, waiting, failed, pending}) is called there, for the web page's background job."""
+    res = {"tables": [], "updated": 0, "waiting": 0, "failed": 0, "cancelled": False}
     mapped = _mapped(conn, env, ws)
-    for tid in sorted(tables):
+    for tid in sorted(tables if only is None else [t for t in only if t in tables]):
+        if res["cancelled"]:
+            break
         t = tables[tid]
         links = [f for f in t["fields"] if f["pass"] == "links" and f["linked_table_id"] in tables]
         row = {"table_id": tid, "name": t["name"], "pending": 0, "updated": 0, "waiting": 0, "failed": 0, "note": None, "failures": []}
@@ -278,7 +292,14 @@ def load_links(conn, base_id, tables, extract_dir, tr, env, ws, batch=BATCH_DEFA
         for f in links:
             if f["linked_table_id"] not in lookups:
                 lookups[f["linked_table_id"]] = rm.uid_map(conn, base_id, f["linked_table_id"])
-        for uid, rid in pend:
+        size = max(1, int(batch))
+        for n, (uid, rid) in enumerate(pend):
+            if n % size == 0:
+                if should_stop and should_stop():
+                    res["cancelled"] = True
+                    break
+                if progress and n:
+                    progress({"table_id": tid, "name": t["name"], "pass": "links", "batch": n // size, "batches": -(-len(pend) // size), "updated": row["updated"], "waiting": row["waiting"], "failed": row["failed"], "pending": row["pending"]})
             rec = by_id.get(rid)
             if rec is None:
                 row["failed"] += 1

@@ -115,9 +115,10 @@ def _find_one(tr, args):
     return str(found) if found else None
 
 
-def run_plan(items, state, transports, env, dry_run=True, log=None):
+def run_plan(items, state, transports, env, dry_run=True, log=None, should_stop=None):
     """Walk the plan in order. Returns {results: [{temp_id, outcome, detail}], counts}. outcomes: would_create, created, already_created, not_ready,
-    parent_missing, no_transport, adopted, failed. log(temp_id, outcome, detail) is called for each item (the caller decides where it goes)."""
+    parent_missing, no_transport, adopted, failed. log(temp_id, outcome, detail) is called for each item (the caller decides where it goes).
+    should_stop() is asked BEFORE each item (never in the middle of one), so a stop leaves no item half done; the result then says cancelled=True."""
     if not isinstance(env, Environment):
         raise ValueError("Give the runner an Environment from resolve_environment().")
     if not dry_run and env.name == PRODUCTION and not env.confirmed:
@@ -131,7 +132,11 @@ def run_plan(items, state, transports, env, dry_run=True, log=None):
         log(item["temp_id"], outcome, detail)
 
     placeholder = {}                                        # dry run: a parent that would be created stands in for its ID
+    cancelled = False
     for item in items:
+        if should_stop and should_stop():
+            cancelled = True
+            break
         tid = item["temp_id"]
         if item["status"] != "ready":
             done(item, "not_ready", "; ".join(item["reasons"]) or item["status"])
@@ -182,4 +187,4 @@ def run_plan(items, state, transports, env, dry_run=True, log=None):
             continue
         state.set(tid, env.name, wid)                       # written back at once, so a restart skips it
         done(item, "created", wid)
-    return {"results": results, "counts": counts, "environment": env.name, "dry_run": dry_run}
+    return {"results": results, "counts": counts, "environment": env.name, "dry_run": dry_run, "cancelled": cancelled}
