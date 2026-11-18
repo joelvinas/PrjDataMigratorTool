@@ -584,6 +584,14 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
   ```
 
   It reads the saved record files (`data_extract`) in memory, registers each Airtable record ID, sends records in small batches, and writes each new Planning ID and a pass marker to the database straight away, so a stopped run carries on and a finished record is never sent again. One bad record never holds up the rest: when Planning answers a batch with some records failed (207), the successes are kept and only the failed ones are listed (never sent again in that run); when a whole call is refused, the batch is split and only the bad record fails; it is listed by Airtable ID with a scrubbed reason in `record_load_failures.csv` and tried again next run. **No record value goes into the database, the reports or the log**, and a value that does not fit its field is left out and counted, never described. A link whose target record is not loaded yet waits for a later run. Known limit: a stop between Workfront's answer and writing it can send that batch twice, so keep `record_batch_size` small. The bulk call (route, body and reply) matches Postman test 5; **unverified:** the value formats and the link update route (see docs/LOADER_PLAN.md). Core objects and attachments are not part of this command yet.
+- **One table at a time (`--table TABLE_ID`, repeatable)** on `plan`, `dry-run`, `run` and `records` limits the run to those tables' record types, fields and select options, so one table can be rehearsed in a dummy DEV Workspace. It is a **run filter only**: the scope decisions are never changed. A record type a chosen table's link field points to is created as a **dependency only** (empty: no fields, no records) so the link field can be built; with `records`, links to tables that are not in the run stay on hold and the report says which (`links to table(s) not in this run stay on hold`). A table ID that is not in the base, or is out of scope, is refused. Repeated and unordered values give the same plan.
+
+  ```
+  python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --table tblXXXXXXXXXXXXXX --env dev
+  python src/loader.py run     --db db/migration.db --base appXXXXXXXXXXXXXX --only planning --planning-stage dev --table tblXXXXXXXXXXXXXX --send
+  python src/loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX --planning-stage dev --table tblXXXXXXXXXXXXXX --send
+  ```
+
 - **`core-objects`** creates one Workfront Core object per registered record, under the parent decided for its table (see the next item): a project (`/proj`), a request (`/optask`) or a task (`/task`). The name is the record's Airtable primary field (or `Untitled <record ID>` when it is empty; a name over 255 characters fails that record and is never cut).
 
   ```

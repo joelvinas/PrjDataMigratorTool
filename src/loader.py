@@ -51,7 +51,13 @@ def plan_csv(plan):
 
 def summary_text(plan, base_id, title="Load plan", sent=False):
     s = plan["summary"]
-    L = ["%s for %s" % (title, base_id), "", "Items: %d" % s["total"]]
+    L = ["%s for %s" % (title, base_id), ""]
+    if s.get("only_tables"):
+        L += ["Limited to table(s): %s (a run filter; the scope decisions are unchanged)." % ", ".join(s["only_tables"])]
+        if s.get("dependency_tables"):
+            L += ["Record type(s) created only because a chosen table links to them: %s (their records and fields are not loaded)." % ", ".join(s["dependency_tables"])]
+        L += [""]
+    L += ["Items: %d" % s["total"]]
     L += ["  %-8s %d" % (k, v) for k, v in sorted(s["by_status"].items())]
     L += ["", "By system, kind and status:"] + ["  %s: %d" % (k, v) for k, v in s["by_system_kind_status"].items()]
     if s["reasons"]:
@@ -66,6 +72,17 @@ def summary_text(plan, base_id, title="Load plan", sent=False):
 def dry_run_csv(res):
     return _csv(["temp_id", "system", "kind", "name", "outcome", "detail"], [[r["temp_id"], r["system"], r["kind"], r["name"], r["outcome"], r["detail"] if not isinstance(r["detail"], dict) else
                                                                            "; ".join("%s=%s" % kv for kv in sorted(r["detail"].items()) if kv[1] not in (None, ""))] for r in res["results"]])
+
+
+def _only(a, inputs):
+    """The sorted table IDs from --table (a run filter only: the scope decisions are never touched), or None for every table. An ID that is not in the base, or is out of scope, is refused."""
+    chosen = sorted(set(getattr(a, "tables", None) or []))
+    if not chosen:
+        return None
+    bad = lp.unknown_tables(inputs["review"], chosen)
+    if bad:
+        sys.exit("Not a table in this plan (wrong ID, or the table is out of scope): %s." % ", ".join(bad))
+    return chosen
 
 
 def _open(path):
@@ -128,7 +145,7 @@ def _run(a, opener=None):
             sys.exit(e.message)
         inputs["link_state"] = ld.field_states(conn)
         plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"),
-                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
+                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"), only_tables=_only(a, inputs))
         _write(a.out, "load_plan.csv", plan_csv(plan))
         rows, lines, results = [], ["Load run for %s" % a.base, ""], {}
         for s in systems:
@@ -188,10 +205,18 @@ def _records(a, opener=None):
         except store.StoreError as e:
             sys.exit(e.message)
         inputs["link_state"] = ld.field_states(conn)
+        only = _only(a, inputs)
         plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=True, link_state=inputs.get("link_state"),
-                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
+                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"), only_tables=only)
         state = ls.DbState(conn, a.base, creds.workspace_id)
         tables = rl.table_targets(plan["items"], state, env.name)
+        link_notes = {}
+        if only:                                              # a dependency record type is created empty: its records are not loaded, and links to it wait
+            tables = {t: v for t, v in tables.items() if t in only}
+            for t, v in sorted(tables.items()):
+                gone = sorted({f["linked_table_id"] for f in v["fields"] if f["pass"] == "links" and f["linked_table_id"] not in tables})
+                if gone:
+                    link_notes[t] = "links to table(s) not in this run stay on hold: %s" % ", ".join(str(g) for g in gone)
         ws = creds.workspace_id
         notes = {}
         if a.send:
@@ -210,7 +235,7 @@ def _records(a, opener=None):
             res = fn(conn, a.base, tables, a.extract_dir, tr, env.name, ws, batch=batch, dry_run=not a.send)
             for t in res["tables"]:
                 done = t.get("created", t.get("updated", 0))
-                rows.append([t["table_id"], t["name"], p, t["pending"], done, t.get("waiting", 0), t["failed"], t.get("problems", 0), t["note"] or notes.get(t["table_id"], "")])
+                rows.append([t["table_id"], t["name"], p, t["pending"], done, t.get("waiting", 0), t["failed"], t.get("problems", 0), t["note"] or notes.get(t["table_id"], "") or link_notes.get(t["table_id"], "")])
                 failures += [[t["table_id"], p, rid, why] for rid, why in t["failures"]]
             n_done, n_wait = sum(r[4] for r in rows if r[2] == p), sum(r[3] for r in rows if r[2] == p)
             lines.append("%s pass: %s, %d failed." % (p.title(), ("%d record(s) done, %d still waiting" % (n_done, sum(r[5] for r in rows if r[2] == p))) if a.send else ("%d record(s) registered and waiting" % n_wait),
@@ -347,6 +372,7 @@ def main(argv=None, opener=None):
         p.add_argument("--base", required=True, help="Airtable base ID")
         p.add_argument("--out", default="out/loader")
         p.add_argument("--no-link-fields", action="store_true", help="leave out the fields that link a Core object to its Planning record")
+        p.add_argument("--table", dest="tables", action="append", metavar="TABLE_ID", help="limit the run to this table (repeatable); a run filter only, scope is not changed")
         if name == "dry-run":
             p.add_argument("--env", default="sandbox1", choices=lr.ENVIRONMENTS, help="the environment or stage label (default: sandbox1; dev and uat are the Planning stages)")
         if name == "run":
@@ -364,6 +390,7 @@ def main(argv=None, opener=None):
     pr.add_argument("--config", default="config.json")
     pr.add_argument("--extract-dir", default="data_extract", help="where the saved record files are (default: data_extract)")
     pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
+    pr.add_argument("--table", dest="tables", action="append", metavar="TABLE_ID", help="limit the run to this table (repeatable); a run filter only, scope is not changed")
     pr.add_argument("--pass", dest="pass_name", default="both", choices=("both", "records", "links"))
     pr.add_argument("--batch", type=int, default=None, help="records per call (default: record_batch_size in config.json, else %d)" % rl.BATCH_DEFAULT)
     pc2 = sub.add_parser("core-objects", help="create one Core object (project, request or task) per record under the parent decided for its table")
@@ -413,7 +440,8 @@ def main(argv=None, opener=None):
         sys.exit(e.message)
     finally:
         conn.close()
-    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"))
+    plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"), record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"),
+                         only_tables=_only(a, inputs))
     _write(a.out, "load_plan.csv", plan_csv(plan))
     text = summary_text(plan, a.base)
     if a.cmd == "plan":

@@ -90,12 +90,34 @@ def option_check(name, status, settings):
     return ("hold" if status in ("ready", "hold") else status), [why]
 
 
-def build_plan(rv, choices=None, include_link_fields=True, link_state=None, record_counts=None, field_facts=None):
+def restrict_items(items, only_tables):
+    """A RUN FILTER, never a decision: keep the items of the chosen tables, plus the record type (and nothing else) of any table a ready link field of a chosen table
+    points to, marked dependency=True so the field can be created. The scope decisions are not touched. Order is unchanged, so the result is deterministic."""
+    only = set(only_tables)
+    kept = [i for i in items if i["table_id"] in only]
+    need = {r for i in kept if i["status"] == "ready" for r in i["requires"]}
+    deps = []
+    for i in items:
+        if i["table_id"] not in only and i["kind"] == "record_type" and i["system"] == "planning" and i["temp_id"] in need:
+            i["dependency"] = True
+            deps.append(i)
+    keep_ids = {i["temp_id"] for i in kept} | {i["temp_id"] for i in deps}
+    return [i for i in items if i["temp_id"] in keep_ids]
+
+
+def unknown_tables(rv, only_tables):
+    """The chosen table IDs that are not in the base or are out of scope (so they have no items): sorted, for a plain refusal."""
+    live = {t["table_id"] for t in rv["tables"] if t["scope"] != "out"}
+    return sorted(set(only_tables) - live)
+
+
+def build_plan(rv, choices=None, include_link_fields=True, link_state=None, record_counts=None, field_facts=None, only_tables=None):
     """rv: the review payload from fieldnames_store.review(). choices: {field_id: [{id, name}, ...]} select options in Airtable order.
     field_facts: {field_id: {precision, currency_symbol, linked_table_id, single}} read from the schema; a Planning link whose direction is confirmed is created in the
     SECOND PASS (status ready, after every record type) only when its facts and its linked table's record type are in the plan; otherwise it stays on hold.
     record_counts: {table_id: profiled record count}, for the 25,000-record and the Core-history checks (None = not checked).
     link_state: {link field_id: True when a person confirmed its direction}; a link field whose direction is not confirmed is BLOCKED (None = not checked).
+    only_tables: limit the plan to these table IDs (a run filter; see restrict_items). None = every table.
     Returns {items, summary}. Items are ordered so every parent comes before its children."""
     choices = choices or {}
     lset = label_settings(rv.get("settings"))
@@ -181,6 +203,8 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
                                    description=fd.format_lineage("Migration", [(t["old"], nm)], desc)))
                 for pos, o in enumerate(opts):
                     items.append(_item(tmp + "-O-%d" % pos, system, "option", o, "ready" if not rs else "blocked", rs, parent=tmp, table_id=tid, position=pos, source="migration"))
+    if only_tables is not None:
+        items = restrict_items(items, only_tables)
     chosen = {}
     for i in items:
         if i["kind"] == "option" and i["status"] == "ready":
@@ -190,11 +214,15 @@ def build_plan(rv, choices=None, include_link_fields=True, link_state=None, reco
             i["spec"] = dict(i["spec"] or {}, options=chosen.get(i["temp_id"], []))
     items.sort(key=_rank)                                   # parents before children; the sort is stable, so the order inside a rank is unchanged
     summ = summarize(items, out_of_scope)
+    if only_tables is not None:
+        summ["only_tables"] = sorted(set(only_tables))
+        summ["dependency_tables"] = sorted(i["table_id"] for i in items if i.get("dependency"))
     names = {t["table_id"]: t["old"] for t in rv["tables"]}
     found = pl.check(items, {f["field_id"]: f["data_type"] for f in rv["fields"]})
     if record_counts is not None:
         found += pl.check_record_counts({t: n for t, n in record_counts.items() if t in names and any(t == i["table_id"] and i["kind"] == "record_type" and i["system"] == "planning" and i["status"] != "blocked" for i in items)}, names)
-        found += pl.check_core_history({t["table_id"]: record_counts.get(t["table_id"], 0) for t in rv["tables"] if t.get("target") == "planning_and_core" and t["scope"] != "out"}, names)
+        found += pl.check_core_history({t["table_id"]: record_counts.get(t["table_id"], 0) for t in rv["tables"] if t.get("target") == "planning_and_core" and t["scope"] != "out"
+                                        and (only_tables is None or t["table_id"] in only_tables)}, names)
     found.sort(key=lambda f: (f["limit"], str(f["scope"]).lower(), f["detail"]))
     summ["limit_findings"] = found
     return {"items": items, "summary": summ}
