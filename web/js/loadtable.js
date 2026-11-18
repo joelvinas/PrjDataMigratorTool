@@ -21,10 +21,12 @@ const tableName = () => { const t = tableRow(); return t ? t.name : tableNow(); 
 const OUTCOME = { created: "created", already_created: "already created", adopted: "adopted", failed: "failed", would_create: "would create", not_ready: "on hold", parent_missing: "waiting for its parent", no_transport: "no transport" };
 const KIND = { record_type: "record type", field: "field", option: "select option", form: "form" };
 
-function fillGrid(tableId, winId, rows, cells) {
+const OUTCOME_ROW = { created: "out-ok", already_created: "out-ok", adopted: "out-ok", failed: "out-fail", not_ready: "out-hold" };   // waiting for its parent, a dry run and the rest: no highlight
+
+function fillGrid(tableId, winId, rows, cells, rowClass) {
   const t = $(tableId), body = t.querySelector("tbody");
   clear(body);
-  rows.forEach((r) => body.appendChild(el("tr", {}, cells(r))));
+  rows.forEach((r) => body.appendChild(el("tr", { class: rowClass ? rowClass(r) : null }, cells(r))));
   $(winId).hidden = rows.length === 0;
   applySort(tableId);
 }
@@ -255,7 +257,7 @@ function renderResult(j) {
     const bad = (r.counts && r.counts.failed) || 0;
     setMsg("structMsg", (r.dry_run ? "Dry run (nothing was sent): " : r.cancelled ? "Stopped part way: " : "Done: ") + countsText(r.counts) + "." + (r.unfinished_before && r.unfinished_before.length ? " " + r.unfinished_before.length + " item(s) from an earlier run were started and not finished; they were tried again." : "")
       + (r.dependency_tables && r.dependency_tables.length ? " Empty record type(s) for linked table(s): " + r.dependency_tables.join(", ") + "." : "") + (bad ? " Fix the cause shown in the detail column and run it again; only what failed is tried again." : ""), bad || r.cancelled ? "warn" : "ok");
-    fillGrid("structGrid", "structWin", r.items || [], (x) => [td(KIND[x.kind] || x.kind), td(x.airtable_field_id), td(x.name), td(OUTCOME[x.outcome] || x.outcome), td(x.detail)]);
+    fillGrid("structGrid", "structWin", r.items || [], (x) => [td(KIND[x.kind] || x.kind), td(x.airtable_field_id), td(x.name), td(OUTCOME[x.outcome] || x.outcome), td(x.detail)], (x) => OUTCOME_ROW[x.outcome] || null);
   } else if (j.step === "records") {
     if (j.status === "failed") return setMsg("recMsg", failMsg(j), "err");
     if (r.dry_run) setMsg("recMsg", "Dry run (nothing was sent): " + fmt(r.in_file) + " record(s) in the saved file; " + fmt(r.registered) + " registered, " + fmt(r.done) + " already loaded; would send " + fmt(r.would_send) + " in " + fmt(r.batches) + " call(s) of up to " + fmt(r.batch_size) + ".", "ok");

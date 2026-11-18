@@ -73,6 +73,25 @@ check("after the last try it stops with the status", isinstance(e, wh.HttpError)
 h, w = http([Resp(400, ('{"error":"bad Authorization: Bearer abc.def.ghi token=%s"}' % SECRET).encode())])
 e = raises(h.request, "POST", "/param", {})
 check("a refusal is not tried again, and no secret survives in its message", e.status == 400 and not w and SECRET not in str(e) and "abc.def.ghi" not in str(e) and "[removed]" in str(e), str(e))
+# ---- an error body that is compressed, in another charset or binary is still shown as readable text (a 400 once showed only replacement characters)
+import gzip
+class HOpener(Opener):
+    def __init__(self, status, body, heads): Opener.__init__(self, []); self.s, self.b, self.hd = status, body, heads
+    def open(self, req, timeout=None):
+        self.reqs.append(req)
+        raise urllib.error.HTTPError(req.full_url, self.s, "x", self.hd, io.BytesIO(self.b))
+def refused(body, heads):
+    hh = wh.Http(c1, opener=HOpener(400, body, heads), sleep=lambda s: None)
+    return str(raises(hh.request, "POST", "/x", {})), hh.opener
+msg, op = refused(gzip.compress(b'{"error":{"code":"FIELD_VALUE_NOT_UNIQUE"}}'), {"Content-Encoding": "gzip"})
+check("a call asks for an uncompressed reply, and a gzip error body is still read", op.reqs[0].get_header("Accept-encoding") == "identity" and "FIELD_VALUE_NOT_UNIQUE" in msg and "�" not in msg, msg)
+msg, _ = refused("{\"message\": \"Option café is not valid\"}".encode("cp1252"), {"Content-Type": "application/json; charset=windows-1252"})
+check("an error body in another charset is decoded with it", "café" in msg and "�" not in msg, msg)
+msg, _ = refused(bytes([0x1f, 0x8b, 0x08, 0x00, 0x91, 0x92, 0x93, 0x00, 0xfe, 0xfd] * 20), {"Content-Type": "application/json"})
+check("a body that is only binary is described (size, type, first bytes), never shown as replacement or control characters",
+      "could not be read" in msg and "200 bytes" in msg and "1f8b0800" in msg and "�" not in msg and all(ord(c) >= 32 for c in msg), msg)
+check("a refusal's message still holds no secret when the body was compressed", SECRET not in refused(gzip.compress(("token=%s" % SECRET).encode()), {"Content-Encoding": "gzip"})[0])
+
 h, w = http([urllib.error.URLError("no route"), Resp(200, {"a": 1})])
 check("a dropped connection is tried again", h.request("GET", "/x") == {"a": 1} and w == [1])
 h, w = http([Resp(302, b"")])

@@ -123,6 +123,9 @@ try:
         wait_text("#structMsg", "failed 1")
         rows = pg.eval_on_selector_all("#structGrid tbody tr", "rs => rs.map(r => Array.from(r.cells).map(c => c.textContent))")
         check("a failed field is listed as failed with its reason, without the token; the dependency record type was created empty", any(r[2] == "Order Name" and r[3] == "failed" and TOKEN not in r[4] for r in rows) and "Empty record type" in text("#structMsg") and TOKEN not in pg.content(), rows)
+        cls = pg.eval_on_selector_all("#structGrid tbody tr", "rs => rs.map(r => [r.cells[3].textContent, r.className])")
+        want = {"failed": "out-fail", "created": "out-ok", "already created": "out-ok", "on hold": "out-hold"}
+        check("result rows are coloured by outcome (failed red, created green, on hold yellow, waiting for its parent plain)", any(o == "failed" for o, _ in cls) and all(c == want.get(o, "") for o, c in cls), cls)
         check("a failed step keeps step 3 closed", "done" not in text("#pill2") and not enabled("#btnFile") and not enabled("#btnRecDry"))
         fake.refuse_fields = set()
         pg.click("#btnStructDry"); wait_text("#structMsg", "Dry run"); pg.click("#btnStructSend"); pg.wait_for_selector("#confirmDlg[open]"); pg.click("#confirmYes")

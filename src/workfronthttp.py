@@ -8,13 +8,53 @@ Rules:
   * A busy server (429, 502, 503, 504) or a dropped connection is tried again a few times with a growing wait. A refusal (400, 401, 403, 404, 409) is not tried again.
   * The caller can give its own `opener` and `sleep`, so tests run without a network and without waiting.
 """
-import json, os, time, urllib.error, urllib.parse, urllib.request, uuid
+import json, os, re, time, urllib.error, urllib.parse, urllib.request, uuid, zlib
 
 import loadconfig as lc
 import loadrun as lr
 
 RETRY_STATUS = (429, 502, 503, 504)
 WAITS = (1, 2, 4)           # seconds before the 2nd, 3rd and 4th try
+
+
+MAX_BODY = 1 << 20          # a reply is read no further than this once decompressed (a small error text is all that is ever needed)
+
+
+def read_text(raw, headers=None):
+    """(text, readable). A reply body turned into text without ever showing replacement or control characters: it is un-compressed when the server compressed it
+    anyway, decoded as the Content-Type's charset (else UTF-8, a UTF-16 byte order mark, then Windows-1252), and judged unreadable when it is still mostly binary."""
+    get = (lambda k: headers.get(k)) if headers is not None and hasattr(headers, "get") else (lambda k: None)
+    enc = str(get("Content-Encoding") or "").strip().lower()
+    body = raw or b""
+    try:
+        if enc in ("gzip", "x-gzip"):
+            body = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body, MAX_BODY)
+        elif enc == "deflate":
+            try:
+                body = zlib.decompressobj().decompress(body, MAX_BODY)
+            except zlib.error:
+                body = zlib.decompressobj(-zlib.MAX_WBITS).decompress(body, MAX_BODY)
+    except zlib.error:
+        pass                                    # not really compressed after all: read it as it came
+    m = re.search(r"charset\s*=\s*[\"']?([A-Za-z0-9_.:-]+)", str(get("Content-Type") or ""))
+    tries = []
+    if body[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        tries.append("utf-16")
+    tries += ["utf-8-sig"] + ([m.group(1)] if m else []) + ["cp1252"]
+    text, guessed = None, False
+    for cs in tries:
+        try:
+            text = body.decode(cs)
+            guessed = cs == "cp1252"            # the last resort decodes almost any bytes, so it proves nothing: the text must then look like plain text
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        text, guessed = body.decode("utf-8", "replace"), True
+    bad = sum(1 for ch in text if ch == "\ufffd" or (ord(ch) < 32 and ch not in "\t\n\r") or 0x7f <= ord(ch) < 0xa0)
+    if guessed:
+        bad += sum(1 for ch in text if ord(ch) >= 0xa0) * 2     # a plain error text is mostly ASCII; mostly accented letters means the bytes were not text
+    return text, bad * 10 <= max(len(text), 1)
 
 
 class HttpError(Exception):
@@ -79,26 +119,27 @@ class Http(object):
         data = None if body is None else json.dumps(body).encode("utf-8")
         last = None
         for attempt in range(len(WAITS) + 1):
-            req = urllib.request.Request(self.url(path, query), data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json", name: value})
+            req = urllib.request.Request(self.url(path, query), data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json", "Accept-Encoding": "identity", name: value})
             self.calls += 1
             try:
                 with self.opener.open(req, timeout=self.timeout) as r:
                     raw = r.read()
                     status = r.status
+                    heads = getattr(r, "headers", None)
             except urllib.error.HTTPError as e:
                 status, raw = e.code, e.read()
                 if 300 <= status < 400:
                     raise HttpError("The server answered with a redirect (%d), which is not followed so the credentials stay with the configured address." % status, status)
                 if status not in RETRY_STATUS:
-                    raise HttpError(self._failure(status, raw), status)
-                last = HttpError(self._failure(status, raw), status)
+                    raise HttpError(self._failure(status, raw, e.headers), status)
+                last = HttpError(self._failure(status, raw, e.headers), status)
             except (urllib.error.URLError, OSError) as e:
                 last = HttpError(self.clean("Could not reach the server: %s" % getattr(e, "reason", e)), None)
             else:
                 if not raw.strip():
                     return None
                 try:
-                    return json.loads(raw.decode("utf-8"))
+                    return json.loads(read_text(raw, heads)[0])
                 except ValueError:
                     raise HttpError("The server's answer (HTTP %d) was not JSON." % status, status)
             if attempt < len(WAITS):
@@ -119,35 +160,37 @@ class Http(object):
         for attempt in range(len(WAITS) + 1):
             with open(file_path, "rb") as fh:
                 req = urllib.request.Request(self.url(path, query), data=_Multipart(head, fh, tail), method="POST",
-                                             headers={"Content-Type": "multipart/form-data; boundary=" + boundary, "Content-Length": str(len(head) + size + len(tail)), "Accept": "application/json", name: value})
+                                             headers={"Content-Type": "multipart/form-data; boundary=" + boundary, "Content-Length": str(len(head) + size + len(tail)), "Accept": "application/json", "Accept-Encoding": "identity", name: value})
                 self.calls += 1
                 try:
                     with self.opener.open(req, timeout=self.timeout) as r:
-                        raw, status = r.read(), r.status
+                        raw, status, heads = r.read(), r.status, getattr(r, "headers", None)
                 except urllib.error.HTTPError as e:
                     status, raw = e.code, e.read()
                     if 300 <= status < 400:
                         raise HttpError("The server answered with a redirect (%d), which is not followed so the credentials stay with the configured address." % status, status)
                     if status not in RETRY_STATUS:
-                        raise HttpError(self._failure(status, raw), status)
-                    last = HttpError(self._failure(status, raw), status)
+                        raise HttpError(self._failure(status, raw, e.headers), status)
+                    last = HttpError(self._failure(status, raw, e.headers), status)
                 except (urllib.error.URLError, OSError) as e:
                     last = HttpError(self.clean("Could not reach the server: %s" % getattr(e, "reason", e)), None)
                 else:
                     if not raw.strip():
                         return None
                     try:
-                        return json.loads(raw.decode("utf-8"))
+                        return json.loads(read_text(raw, heads)[0])
                     except ValueError:
                         raise HttpError("The server's answer (HTTP %d) was not JSON." % status, status)
             if attempt < len(WAITS):
                 self.sleep(WAITS[attempt])
         raise last
 
-    def _failure(self, status, raw):
-        """HTTP status plus a short, cleaned excerpt of the error body (the error code is what a person needs)."""
-        try:
-            text = raw.decode("utf-8", "replace")
-        except Exception:
-            text = ""
+    def _failure(self, status, raw, headers=None):
+        """HTTP status plus a short, cleaned excerpt of the error body (the error code is what a person needs). A body that cannot be read as text is described instead
+        (size, Content-Type, Content-Encoding and its first bytes in hex, which show a compressed or binary reply), never shown as replacement characters."""
+        text, ok = read_text(raw, headers)
+        if not ok:
+            get = (lambda k: headers.get(k)) if headers is not None and hasattr(headers, "get") else (lambda k: None)
+            return self.clean("HTTP %d: the error text could not be read (%d bytes; Content-Type %s; Content-Encoding %s; starts with hex %s)."
+                              % (status, len(raw or b""), get("Content-Type") or "none", get("Content-Encoding") or "none", (raw or b"")[:8].hex() or "none"))
         return self.clean("HTTP %d: %s" % (status, " ".join(text.split())))

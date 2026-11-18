@@ -109,7 +109,7 @@ Each is an undocumented or unconfirmed behavior to prove once in a sandbox befor
 1. The **description length limit** for a field.
 2. The **write-once calculated field** pattern in Core (the calculation returns the native value when the field is blank and the stored value otherwise, and the stored value is pushed once through the API or Fusion), **once per Core object type** (project, request, task).
 3. Whether a **Planning formula can output a clickable link**. The design builds the Core object link as plain text in a single-line text field and does not rely on this; test it only if you want that route.
-4. Whether **select options can be added, renamed and reordered** after creation, and whether their IDs come back at creation.
+4. Whether **select options can be added, renamed and reordered** after creation, and whether their IDs come back at creation. A multiple-select field with about 540 options (a location list) was refused with HTTP 400 on 18 November 2026; the reason was not readable at the time (see the error-text fix), so whether Planning caps the options of one create call is still unknown. Do not split the options across calls until the reason is read.
 5. The **500-field limits** (Planning record type, Core form) against the largest table.
 
 ## Risks
