@@ -31,7 +31,8 @@ function renderDbResult(r) {
   } else if (r.ready) {
     let msg = "Connected. All " + Object.keys(r.counts).length + " expected tables are present. Foreign keys are " + (r.foreign_keys ? "on." : "OFF.");
     if (r.created_tables && r.created_tables.length) msg = "Created " + r.created_tables.length + " table(s). " + msg;
-    setMsg("dbMessage", msg, "ok");
+    if (r.pending_message) setMsg("dbMessage", msg + " " + r.pending_message, "warn");
+    else setMsg("dbMessage", msg, "ok");
   }
   applyReady();
 }

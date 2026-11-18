@@ -36,6 +36,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import draftmigrations
 import fieldcompare as names_compare
 import fieldwriters
 import postmantests
@@ -958,8 +959,10 @@ def inspect_db(conn):
     counts = {t: conn.execute('SELECT COUNT(*) FROM "%s"' % t).fetchone()[0]
               for t in EXPECTED_TABLES if t in present}
     fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    pend = draftmigrations.pending(conn) if "field_names" in present else []   # drafts 021 to 023: reported, never blocking
     return {"missing_tables": missing, "column_problems": column_problems,
-            "counts": counts, "foreign_keys": bool(fk)}
+            "counts": counts, "foreign_keys": bool(fk),
+            "pending_migrations": pend, "pending_message": draftmigrations.describe(pend)}
 
 
 def _connect_result(path, info):
