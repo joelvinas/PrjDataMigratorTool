@@ -26,6 +26,7 @@ import planlimits as pl
 import typemap as tm
 from workfronthttp import HttpError
 
+_GONE_RE = re.compile(r"(?i)NOT_FOUND")
 _CONFLICT = re.compile(r"(?i)NOT_UNIQUE|already exists|must be unique|duplicate")
 DATE_FORMAT = "locale"      # the example value in the v2 reference; unverified for other values
 MAX_PAGES = 100
@@ -215,3 +216,52 @@ class PlanningTransport(object):
         else:
             return []
         return sorted(str(r["id"]) for r in self._pages(path) if isinstance(r, dict) and r.get("displayName") == item["name"] and r.get("id"))
+
+    # ---- reading and deleting records, for a wipe (route and body from docs/WF_Planning_v2_API_simplified.yaml; not yet run against a real Workfront)
+    def get_record_type(self, record_type_id):
+        if not record_type_id:
+            raise ValueError("A record type ID is needed.")
+        reply = self.http.request("GET", "/v2/record-types/%s" % record_type_id)
+        return reply if isinstance(reply, dict) else {}
+
+    def list_record_ids(self, record_type_id, size=100):
+        """(the first page's record IDs, total records in the record type). Only IDs are kept: the record values in the reply are dropped at once. GET /v2/record-types/{id}/records?page=0&size=N."""
+        if not record_type_id:
+            raise ValueError("A record type ID is needed.")
+        reply = self.http.request("GET", "/v2/record-types/%s/records" % record_type_id, None, {"page": 0, "size": int(size)})
+        rows = reply.get("content") if isinstance(reply, dict) else None
+        if not isinstance(rows, list):
+            raise HttpError("The record list reply has no content list, so the wipe stops rather than guess.")
+        ids = [str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")]
+        total = reply.get("totalElements")
+        return ids, (total if isinstance(total, int) and not isinstance(total, bool) else len(ids))
+
+    def delete_records(self, record_type_id, ids):
+        """Bulk delete, at most 100 IDs: DELETE /v2/record-types/{id}/records/bulk with {"ids": [...]}. Answers 200 (all deleted) or 207 (some failed): results[] with requestIndex.
+        Returns one dict per ID, in order: {"deleted": True} (a record that was already gone counts) or {"error": "short reason"} (the error CODE only, never Planning's message).
+        A reply that cannot be matched fails every ID in it, so nothing is assumed deleted."""
+        ids = [str(i) for i in ids]
+        if not record_type_id or not ids or len(ids) > 100:
+            raise ValueError("A bulk delete needs a record type and 1 to 100 record IDs.")
+        reply = self.http.request("DELETE", "/v2/record-types/%s/records/bulk" % record_type_id, {"ids": ids})
+        rows = reply.get("results") if isinstance(reply, dict) else None
+        if not isinstance(rows, list):
+            return [{"error": "the reply has no results list; check Planning"} for _ in ids]
+        seen = {}
+        for r in rows:
+            i = r.get("requestIndex") if isinstance(r, dict) else None
+            if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(ids):
+                seen.setdefault(i, []).append(r)
+        out = []
+        for i in range(len(ids)):
+            got = seen.get(i) or []
+            if len(got) != 1:
+                out.append({"error": "the reply has no single result for this record"})
+                continue
+            r = got[0]
+            if r.get("error") or str(r.get("status") or "").lower() == "error":
+                code = (r.get("error") or {}).get("code") if isinstance(r.get("error"), dict) else None
+                out.append({"deleted": True} if code and _GONE_RE.search(str(code)) else {"error": "Planning refused the delete (%s)" % (str(code)[:40] if code else "no error code")})
+            else:
+                out.append({"deleted": True})
+        return out

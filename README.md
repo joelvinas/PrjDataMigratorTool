@@ -66,7 +66,7 @@ airtable-migration-control/
 │   ├── loadrun.py               runs a plan: sandbox by default, idempotent, dry run, one failure never stops it
 │   ├── loadstate.py             the runner's state in load_id_map
 │   ├── loadconfig.py            reads the Workfront credentials and settings from config.json; never shows or stores a secret
-│   ├── loader.py                the loader command line: plan, dry-run, run --send and records
+│   ├── loader.py                the loader command line: plan, dry-run, run --send, records and reset
 │   ├── typemap.py  workfronthttp.py  coretransport.py  planningtransport.py   the target type mapping, the HTTP layer and the two Workfront transports
 │   ├── recordmap.py             the record ID map: surrogate IDs, targets, pass markers, attachment map and the views behind the Stage 4 screens
 │   ├── recordload.py            the Planning record load: the records pass and the links pass
@@ -584,6 +584,22 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
   ```
 
   It reads the saved record files (`data_extract`) in memory, registers each Airtable record ID, sends records in small batches, and writes each new Planning ID and a pass marker to the database straight away, so a stopped run carries on and a finished record is never sent again. One bad record never holds up the rest: when Planning answers a batch with some records failed (207), the successes are kept and only the failed ones are listed (never sent again in that run); when a whole call is refused, the batch is split and only the bad record fails; it is listed by Airtable ID with a scrubbed reason in `record_load_failures.csv` and tried again next run. **No record value goes into the database, the reports or the log**, and a value that does not fit its field is left out and counted, never described. A link whose target record is not loaded yet waits for a later run. Known limit: a stop between Workfront's answer and writing it can send that batch twice, so keep `record_batch_size` small. The bulk call (route, body and reply) matches Postman test 5; **unverified:** the value formats and the link update route (see docs/LOADER_PLAN.md). Core objects and attachments are not part of this command yet.
+- **One table at a time (`--table TABLE_ID`, repeatable)** on `plan`, `dry-run`, `run` and `records` limits the run to those tables' record types, fields and select options, so one table can be rehearsed in a dummy DEV Workspace. It is a **run filter only**: the scope decisions are never changed. A record type a chosen table's link field points to is created as a **dependency only** (empty: no fields, no records) so the link field can be built; with `records`, links to tables that are not in the run stay on hold and the report says which (`links to table(s) not in this run stay on hold`). A table ID that is not in the base, or is out of scope, is refused. Repeated and unordered values give the same plan.
+
+  ```
+  python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --table tblXXXXXXXXXXXXXX --env dev
+  python src/loader.py run     --db db/migration.db --base appXXXXXXXXXXXXXX --only planning --planning-stage dev --table tblXXXXXXXXXXXXXX --send
+  python src/loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX --planning-stage dev --table tblXXXXXXXXXXXXXX --send
+  ```
+
+- **`reset`** wipes ONE table so it can be reloaded: it deletes the table's records in the Planning Workspace and clears what this tool remembers about them. The record type and its fields stay. A dry run is the default and sends nothing at all.
+
+  ```
+  python src/loader.py reset --db db/migration.db --base appXXXXXXXXXXXXXX --table tblXXXXXXXXXXXXXX --planning-stage dev                    (dry run: counts only)
+  python src/loader.py reset --db db/migration.db --base appXXXXXXXXXXXXXX --table tblXXXXXXXXXXXXXX --planning-stage dev --send --confirm "DELETE RECORDS IN DEV"
+  ```
+
+  It refuses unless the `workspace_id` in `config.json` is the Workspace that stage was loaded into (and, when Planning reports one, the record type's own Workspace), and a real run needs the typed phrase for the stage (`DELETE RECORDS IN DEV` or `... UAT`). It lists the record type's records page by page and deletes them 100 per call (`DELETE /v2/record-types/{id}/records/bulk` with `{"ids": [...]}`), so records this tool never mapped (for example after a stop) go too. Only when the record type lists empty does it remove that table's rows from `target_mappings` and `record_pass_markers` for that stage and Workspace; if any delete is refused the memory is kept and you run it again. `load_id_map` (the record type and fields stay created) and `source_records` are never touched. The next `records --send --table ...` loads the table from scratch. The report holds counts and Planning's error codes only, never a record value. **Unverified:** the delete route and reply come from Adobe's reference (`docs/WF_Planning_v2_API_simplified.yaml`), not from a call; a delete is permanent.
 - **`core-objects`** creates one Workfront Core object per registered record, under the parent decided for its table (see the next item): a project (`/proj`), a request (`/optask`) or a task (`/task`). The name is the record's Airtable primary field (or `Untitled <record ID>` when it is empty; a name over 255 characters fails that record and is never cut).
 
   ```
