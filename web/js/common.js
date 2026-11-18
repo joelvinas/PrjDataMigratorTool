@@ -144,6 +144,7 @@ const NAV_PAGES = [
   { key: "stage3", href: "/stage3", label: "Stage 3: Automations", sub: "Automation recorder" },
   { key: "names", href: "/names", label: "Field names", sub: "Naming rules and review" },
   { key: "datatypes", href: "/datatypes", label: "Data types", sub: "Planning and Core types per field" },
+  { key: "lookups", href: "/lookups", label: "Lookup lists", sub: "Long option lists as record types" },
   { key: "postman", href: "/postman", label: "Postman tests", sub: "Planning API checks" },
   { key: "load", href: "/load", label: "Stage 4: Map and load", sub: "Record map and attachments" },
   { key: "loadtable", href: "/loadtable", label: "Load a table", sub: "One table into Planning, step by step" },

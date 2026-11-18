@@ -19,6 +19,12 @@ def apply_migrations(conn):
     conn.commit()
 
 
+def apply_lookup_migration(conn):
+    """Apply draft migration 024 (lookup lists) to a database built from DatabaseSchemaLibrary.sql, which does not hold it until the owner has applied it live."""
+    conn.executescript(open(os.path.join(SQL, "migration_024_add_lookup_lists.sql"), encoding="utf-8").read())
+    conn.commit()
+
+
 def fill_defaults(conn, base_id, actor="JV"):
     """Apply the default Planning and Core types to every field that has no valid one. Returns {system: changed}."""
     apply_migrations(conn)

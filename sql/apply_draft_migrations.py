@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Apply the DRAFT data type migrations (021, 022, 023) to an existing database. Standard library only.
+"""Apply the DRAFT migrations (021, 022, 023: data types; 024: lookup lists) to an existing database. Standard library only.
 
     python sql/apply_draft_migrations.py path/to/your.db
 
-Run python sql/apply_migrations.py first (001 to 020). This adds only what is missing (three tables, one column, one view, seeded defaults), so it is safe to
+Run python sql/apply_migrations.py first (001 to 020). This adds only what is missing (tables, one column, one view, seeded defaults), so it is safe to
 run more than once, and it never changes existing data. Back up the file first if it matters to you. It is separate from apply_migrations.py until the
-owner confirms 021 to 023 are applied; see CLAUDE.md."""
+owner confirms 021 to 024 are applied; see CLAUDE.md."""
 import os
 import sqlite3
 import sys
