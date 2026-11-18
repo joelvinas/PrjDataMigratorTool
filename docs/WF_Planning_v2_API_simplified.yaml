@@ -1,0 +1,1041 @@
+# ============================================================================
+# Workfront Planning API v2 — SIMPLIFIED SPEC (compact context file for Claude/agents)
+# Source: Redoc page https://developer.adobe.com/wf-planning/api/v2/ (browser snapshot saved 2026-11-14).
+# Built by parsing that page. It is NOT Adobe's official OpenAPI file (none is published on the page).
+#
+# HOW TO READ
+#  route_index = one line per endpoint; operations = detail by tag; schemas = named shapes; parameters = shared query params.
+#  Provenance tags on schemas:
+#   [table]  from the documented request-body table (authoritative: types, required, limits, enums, descriptions).
+#   [sample] INFERRED from the page's JSON example: keys + JSON types only. Enums / required-ness / limits are NOT known.
+#  The page collapses nested objects and renders no response-body tables, so ALL response schemas and all nested
+#  *Dto option objects are [sample]. "example:" is one sample value, not an enum (enum: is a documented enum).
+#  Prop keys: type, ref (named schema), items, format, enum, default, example, min*/max*, nonEmpty, pattern, desc.
+#  Request bodies list required props under "required". Bulk record bodies are JSON ARRAYS of the schema.
+# ============================================================================
+spec: wf-planning-api-v2-simplified/1.0
+info: {title: Workfront Planning API, version: v2, description: "WF Planning Service API: manage workspaces, record types, fields, records, views and permissions across Workfront and Adobe DX infrastructure."}
+servers:
+  - {url: "https://{customer-domain}/maestro/api", note: "Route paths below are appended to this base, e.g. https://{customer-domain}/maestro/api/v2/workspaces"}
+auth: "NOT documented on the saved page (it shows only the base URL). Confirm the auth scheme from Adobe Developer Console / Workfront docs."
+conventions:
+  update_semantics: {PUT: "full replacement; omitted fields are set to null", PATCH: "merge-patch; omitted fields unchanged; JSON null clears a field"}
+  patch_record_list_fields: "PATCH of list-type record fields (connections, multi-select) accepts operational updates: [{\"op\":\"add\",\"value\":[...]},{\"op\":\"remove\",\"value\":[...]}]"
+  pagination_cursor: {request: "cursor (from previous response) + limit (default 20; max 50 for getWorkspaces/getHistory, 100 elsewhere)", response: "{content: [...], cursor: {hasMore, nextCursor}}", used_by: [getWorkspaces, getRecordTypesByWorkspace, getGlobalRecordTypes, getRecordTypesUsingField, getFieldsByRecordType, getViewsByRecordType, getHistory]}
+  pagination_page: {request: "page (0-based), size (default 20 for getRecordsByRecordType, 100 for search), sort=property,(asc|desc) repeatable", response: "Spring-style Page<T> (schemas.Page)", used_by: [getRecordsByRecordType, searchRecordsGet, searchRecordsPost]}
+  ids: "Samples show ID prefixes Ws=workspace, Rt=record type, F=field, Rc=record (one record-type sample id has no prefix). Record values live in data{fieldId: value}; aliased=true makes data keys field aliases instead of IDs."
+  bulk: "Bulk record endpoints take a JSON ARRAY (max 100 items) and return BulkResult; HTTP 207 = mixed success. bulkDelete takes {ids:[...]}."
+  global_record_types: "Global record types are shared across workspaces; attached to a workspace as a dynamic usage. scopeWorkspaceId(s) / globalRecordTypeWorkspaceFieldId params scope calls to a workspace."
+  errors: "Error body = schemas.ProblemDetail. Every op can return 401 Unauthorized, 403 Forbidden, 500 Internal Server Error; ops list only additional/annotated codes under errors:."
+  sample_caveat: "List-endpoint sample items omit keys that the single-item sample shows: getRecordTypesByWorkspace: authorizedToCreateDynamicRecordType, dynamicWorkspaceIds, externalOptions, globalRecordTypeWorkspaceFieldId, isGlobal, linkableWithAllWorkspaces, linkableWithWorkspaceIds, primaryWorkspaceId. May be sample truncation, not real behaviour: verify against a live call."
+limits:
+  "Workspaces per tenant": 100000
+  "Record types per workspace": 100
+  "Records per record type": 25000
+  "Records per bulk request": 100
+  "Total references per bulk create/update request": 1000000
+  "Fields per record type": 500
+  "long-text fields per record type": 20
+  "formula fields per record type": 20
+  "reference fields per record type": 30
+  "Connections per reference field": 500
+  "Connections per hierarchy field": 10
+  "Personal views per record type": 100
+  "Lookup depth": 5
+  "Hierarchy depth": 4
+  "Hierarchy count per workspace": 5
+  "Formula expression length": "50,000 characters"
+  "Display name length": "256 characters"
+  over_limit: "Most limit violations return HTTP 403 with errorCode (e.g. RECORD_TYPE_LIMIT_EXCEEDED, FIELD_LIMIT_EXCEEDED, VIEW_LIMIT_EXCEEDED). Bulk reference-count limit returns HTTP 400 BULK_REFERENCE_COUNT_EXCEEDED."
+tags:
+  Workspaces: "Workspace management. Limits: max 100,000 workspaces per tenant; max 256 characters for workspace name."
+  Record-Types: "Record type management. Limits: max 100 record types per workspace; max 255 characters for display name."
+  Records: "Record management. Limits: max 25,000 records per record type; max 100 records per bulk operation; max 1,000,000 total references per bulk create/update request (default; configurable; returns 400 BULK_REFERENCE_COUNT_EXCEEDED); max 500 connections per reference field; max 10 connections per hierarchy field."
+  Fields: "Field management. Per-record-type quotas: max 500 fields total; max 20 long-text fields; max 20 formula fields; max 30 reference fields. Field display names must be unique within a record type and capped at 256 characters. Formula expressions: max 50,000 characters; lookup depth: max 5."
+  Views: "View management. Limits: max 100 personal views per record type; max 255 characters for view name."
+  Permissions: "Resource permissions, member management, and access requests."
+
+route_index:
+  # Workspaces
+  - "GET /v2/workspaces/{id}  # getWorkspace — Get Workspace"
+  - "PUT /v2/workspaces/{id}  # updateWorkspace — Update Workspace"
+  - "DELETE /v2/workspaces/{id}  # deleteWorkspace — Delete Workspace"
+  - "PATCH /v2/workspaces/{id}  # patchWorkspace — Patch Workspace"
+  - "GET /v2/workspaces  # getWorkspaces — Get All Workspaces"
+  - "POST /v2/workspaces  # createWorkspace — Create Workspace"
+  # Record-Types
+  - "GET /v2/record-types/{id}  # getRecordType — Get Record Type"
+  - "PUT /v2/record-types/{id}  # updateRecordType — Update Record Type"
+  - "DELETE /v2/record-types/{id}  # deleteRecordType — Permanently delete record type"
+  - "PATCH /v2/record-types/{id}  # patchRecordType — Patch Record Type"
+  - "GET /v2/workspaces/{workspaceId}/record-types  # getRecordTypesByWorkspace — Get Record Types by Workspace"
+  - "POST /v2/workspaces/{workspaceId}/record-types  # createRecordType — Create Record Type"
+  - "POST /v2/workspaces/{workspaceId}/record-types/{recordTypeId}/detach  # detachRecordTypeFromWorkspace — Detach record type from workspace"
+  - "GET /v2/workspaces/{workspaceId}/global-record-types  # getGlobalRecordTypes — Get Global Record Types"
+  # Records
+  - "GET /v2/records/{id}  # getRecord — Get Record"
+  - "PUT /v2/records/{id}  # updateRecord — Update Record"
+  - "DELETE /v2/records/{id}  # deleteRecord — Delete Record"
+  - "PATCH /v2/records/{id}  # patchRecord — Patch Record"
+  - "PUT /v2/record-types/{recordTypeId}/records/bulk  # bulkUpdateRecords — Bulk Update Records"
+  - "POST /v2/record-types/{recordTypeId}/records/bulk  # bulkCreateRecords — Bulk Create Records"
+  - "DELETE /v2/record-types/{recordTypeId}/records/bulk  # bulkDeleteRecords — Bulk Delete Records"
+  - "PATCH /v2/record-types/{recordTypeId}/records/bulk  # bulkPatchRecords — Bulk Patch Records"
+  - "POST /v2/records/{id}/thumbnail  # uploadThumbnail — Upload thumbnail on record"
+  - "DELETE /v2/records/{id}/thumbnail  # deleteThumbnail — Delete thumbnail on record"
+  - "GET /v2/record-types/{recordTypeId}/records  # getRecordsByRecordType — Get Records by Record Type"
+  - "POST /v2/record-types/{recordTypeId}/records  # createRecord — Create Record"
+  - "GET /v2/record-types/{recordTypeId}/records/search  # searchRecordsGet — Search Records (GET)"
+  - "POST /v2/record-types/{recordTypeId}/records/search  # searchRecordsPost — Search Records (POST)"
+  - "POST /v2/record-types/{recordTypeId}/records/move  # moveRecords — Move Records"
+  - "GET /v2/records/{id}/history  # getHistory — Get Record Field Change History"
+  - "GET /v2/record-types/{recordTypeId}/records/export  # exportRecords — Export Records"
+  # Fields
+  - "GET /v2/fields/{id}  # getField — Get Field"
+  - "PUT /v2/fields/{id}  # updateField — Update Field"
+  - "DELETE /v2/fields/{id}  # deleteField — Delete Field"
+  - "PATCH /v2/fields/{id}  # patchField — Patch Field"
+  - "GET /v2/record-types/{recordTypeId}/fields  # getFieldsByRecordType — Get Fields by Record Type"
+  - "POST /v2/record-types/{recordTypeId}/fields  # createField — Create Field"
+  - "GET /v2/fields/{name}/record-types  # getRecordTypesUsingField — Get Record Types using a Field"
+  # Views
+  - "GET /v2/views/{id}  # getView — Get View"
+  - "PUT /v2/views/{id}  # updateView — Update View"
+  - "DELETE /v2/views/{id}  # deleteView — Delete View"
+  - "PATCH /v2/views/{id}  # patchView — Patch View"
+  - "GET /v2/record-types/{recordTypeId}/views  # getViewsByRecordType — Get Views by Record Type"
+  - "POST /v2/record-types/{recordTypeId}/views  # createView — Create View"
+  - "GET /v2/views/{id}/restriction  # getViewRestriction — Get view field-restriction status"
+  # Permissions
+  - "GET /v2/permissions/{resourceType}/{resourceId}/requests  # getAccessRequests — List pending access requests for a resource"
+  - "POST /v2/permissions/{resourceType}/{resourceId}/requests  # createAccessRequest — Request access to a resource"
+  - "DELETE /v2/permissions/{resourceType}/{resourceId}/requests  # deleteAccessRequests — Dismiss access requests"
+  - "PATCH /v2/permissions/{resourceType}/{resourceId}/members/bulk  # updateMembers — Bulk grant, update, or revoke member permissions"
+  - "GET /v2/permissions/{resourceType}/{resourceId}  # getMyPermissions — Get current user's effective permissions on a resource"
+  - "GET /v2/permissions/{resourceType}/{resourceId}/members  # getMembers — Get all members and sharing settings for a resource"
+  - "GET /v2/permissions/{resourceType}/{resourceId}/inheritance  # getInheritance — Get inheritance members for a resource"
+
+schemas:
+  # ---- common ----
+  UserRef:  # [sample]
+    props:
+      id: {type: string}
+      name: {type: string}
+  CursorInfo:  # [sample]
+    props:
+      hasMore: {type: boolean}
+      nextCursor: {type: string}
+  ProblemDetail:  # [sample]
+    desc: "Error body. errorCode examples seen on the page: ENTITY_WITH_ATTRIBUTE_NOT_FOUND, RECORD_TYPE_LIMIT_EXCEEDED, FIELD_LIMIT_EXCEEDED, VIEW_LIMIT_EXCEEDED, BULK_REFERENCE_COUNT_EXCEEDED, FIELD_REQUIRED_VALUE_MISSING, FIELD_VALUE_NOT_UNIQUE, FIELD_DISPLAY_NAME_NOT_UNIQUE, RECORD_TYPE_IN_HIERARCHY, RECORD_CONNECTION_LIMIT_EXCEEDED, INVALID_DATA, THUMBNAIL_*, UPLOAD_SIZE_EXCEEDED"
+    props:
+      title: {type: string}
+      status: {type: integer}
+      detail: {type: string}
+      errorCode: {type: string}
+      messageArguments: {type: object, props: {recordTypeId: {type: string}}}
+      requestId: {type: string}
+      errors: {type: array, items: {type: object, props: {field: {type: string, example: name}, message: {type: string}, code: {type: string, example: NotBlank}}}}
+  CursorPage:  # [sample]
+    desc: "Generic cursor page CursorPage<T>; content is T[]"
+    props:
+      content: {type: array, items: {ref: T}}
+      cursor: {ref: CursorInfo}
+  Page:  # [sample]
+    desc: "Generic Spring-style page Page<T>; content is T[]"
+    props:
+      content: {type: array, items: {ref: T}}
+      totalPages: {type: integer}
+      totalElements: {type: integer}
+      size: {type: integer}
+      number: {type: integer}
+      sort: {type: object, props: {sorted: {type: boolean}, empty: {type: boolean}, unsorted: {type: boolean}}}
+      pageable: {type: object, props: {paged: {type: boolean}, pageSize: {type: integer}, pageNumber: {type: integer}, offset: {type: integer}, sort: {type: object, props: {sorted: {type: boolean}, empty: {type: boolean}, unsorted: {type: boolean}}}, unpaged: {type: boolean}}}
+      numberOfElements: {type: integer}
+      first: {type: boolean}
+      last: {type: boolean}
+      empty: {type: boolean}
+  SortDto:  # [sample]
+    desc: "Also used as GroupDto (identical keys). direction: asc|desc"
+    props:
+      fieldId: {type: string}
+      direction: {type: string, example: asc}
+  FilterNodeDto:  # [sample]
+    desc: "oneOf FilterConditionDto{fieldId, condition, value, matchExternalId} | FilterGroupDto{operator AND|OR, conditions[FilterNodeDto]} (keys merged from the search sample). condition values seen: CONTAINS, IS. In searchRecordsGet the filter is this JSON passed as a string."
+    props:
+      fieldId: {type: string}
+      condition: {type: string, example: CONTAINS}
+      value: {type: string}
+      matchExternalId: {type: boolean}
+      operator: {type: string, example: AND}
+      conditions: {type: array, items: {ref: FilterNodeDto}}
+  # ---- resource responses ----
+  Workspace:  # [sample]
+    desc: "Returned by get/create/update/patch workspace"
+    props:
+      id: {type: string}
+      createdBy: {ref: UserRef}
+      createdAt: {type: string, format: date-time}
+      updatedBy: {ref: UserRef}
+      updatedAt: {type: string, format: date-time}
+      alias: {type: string, example: marketing-workspace}
+      name: {type: string}
+      description: {type: string}
+      color: {type: string, example: blue}
+      icon: {type: string, example: briefcase}
+      ownerId: {type: string}
+      recordTypeSections: {type: array, items: {ref: RecordTypeSectionDto}}
+  RecordType:  # [sample]
+    desc: "Returned by get/create/update/patch record type"
+    props:
+      id: {type: string}
+      createdBy: {ref: UserRef}
+      createdAt: {type: string, format: date-time}
+      updatedBy: {ref: UserRef}
+      updatedAt: {type: string, format: date-time}
+      alias: {type: string, example: campaigns}
+      displayName: {type: string}
+      description: {type: string}
+      primaryFieldId: {type: string}
+      icon: {type: string, example: diamond}
+      color: {type: string, example: purple}
+      isExternal: {type: boolean}
+      permissionSettings: {ref: RecordTypePermissionSettingsDto}
+      defaultRecordPermissions: {ref: DefaultRecordPermissionsDto}
+      externalOptions: {ref: RecordTypeExternalOptionsDto}
+      linkableWithAllWorkspaces: {type: boolean}
+      linkableWithWorkspaceIds: {type: array, items: {type: string}}
+      globalRecordTypeWorkspaceFieldId: {type: string}
+      isGlobal: {type: boolean}
+      authorizedToCreateDynamicRecordType: {type: array, items: {ref: AuthzSubjectDtoV2}}
+      primaryWorkspaceId: {type: string}
+      dynamicWorkspaceIds: {type: array, items: {type: string}}
+  Record:  # [sample]
+    desc: "Returned by get/create/update/patch record, uploadThumbnail; embedded in Page, BulkResult, SearchResult. data = {fieldId: value}"
+    props:
+      id: {type: string}
+      createdBy: {ref: UserRef}
+      createdAt: {type: string, format: date-time}
+      updatedBy: {ref: UserRef}
+      updatedAt: {type: string, format: date-time}
+      recordTypeId: {type: string}
+      data: {type: object, desc: "map of fieldId -> value"}
+      thumbnailUrl: {type: string}
+      coverImage: {type: object, props: {url: {type: string}, position: {type: integer}}}
+      metadata: {ref: RecordMetadataDto}
+      recordTypeAlias: {type: string, example: campaigns}
+  Field:  # [sample]
+    desc: "Returned by get/create/update/patch field. FieldDto (linkedField/backField/sourceField) = this same shape, recursive"
+    props:
+      id: {type: string}
+      createdBy: {ref: UserRef}
+      createdAt: {type: string, format: date-time}
+      updatedBy: {ref: UserRef}
+      updatedAt: {type: string, format: date-time}
+      alias: {type: string, example: campaign_name}
+      displayName: {type: string}
+      type: {type: string, enum: [text, long-text, number, percentage, currency, date, single-select, multi-select, boolean, reference, user, formula, created-by, created-at, updated-by, updated-at, record-id]}
+      description: {type: string}
+      linkedField: {ref: FieldDto}
+      options: {type: array, items: {ref: FieldOptionDto}}
+      defaultOptions: {type: array, items: {type: string}}
+      dateOptions: {ref: FieldDateOptionsDto}
+      numberOptions: {ref: FieldNumberOptionsDto}
+      referenceOptions: {ref: FieldReferenceOptionsDto}
+      lookupOptions: {ref: FieldLookupOptionsDto}
+      formulaOptions: {ref: FieldFormulaOptionsDto}
+      userOptions: {ref: FieldUserOptionsDto}
+      defaultUsers: {type: array, items: {type: string}}
+      documentOptions: {ref: FieldDocumentOptionsDto}
+      hasError: {type: boolean}
+      isHtmlNative: {type: boolean}
+      restricted: {type: boolean}
+      metadata: {ref: FieldMetadataDto}
+  View:  # [sample]
+    desc: "Returned by get/create/update/patch view"
+    props:
+      id: {type: string}
+      createdBy: {ref: UserRef}
+      createdAt: {type: string, format: date-time}
+      updatedBy: {ref: UserRef}
+      updatedAt: {type: string, format: date-time}
+      name: {type: string}
+      type: {type: string, enum: [table, timeline, calendar, list, gallery]}
+      recordTypeId: {type: string}
+      filter: {type: array, items: {ref: FilterNodeDto}}
+      grouping: {type: array, items: {ref: GroupDto}}
+      sorting: {type: array, items: {ref: SortDto}}
+      metadata: {ref: ViewMetadataDto}
+      isHidden: {type: boolean}
+      isPublicShared: {type: boolean}
+      isRestricted: {type: boolean}
+      restrictionStatus: {type: string, example: INACCESSIBLE}
+  # ---- other responses ----
+  BulkResult:  # [sample]
+    desc: "bulk create/update/patch/delete and moveRecords (200 all ok, 207 mixed)"
+    props:
+      status: {type: string, example: success}
+      total: {type: integer}
+      succeeded: {type: integer}
+      failed: {type: integer}
+      requestId: {type: string}
+      errors: {type: array, items: {type: object, props: {code: {type: string, example: RATE_LIMIT_EXCEEDED}, message: {type: string}, affectedIds: {type: array, items: {type: string}}}}}
+      results: {type: array, items: {type: object, props: {requestIndex: {type: integer}, id: {type: string}, status: {type: string, example: success}, error: {type: object, props: {code: {type: string}, message: {type: string}, details: {type: object, desc: "free-form map"}}}, record: {ref: Record}}}}
+  SearchResult:  # [sample]
+    desc: "searchRecords GET/POST; groups populated only when grouping requested"
+    props:
+      records: {ref: Page<Record>}
+      groups: {type: array, items: {type: object, props: {fieldId: {type: string}, value: {type: string}, recordIds: {type: array, items: {type: string}}, count: {type: integer}}}}
+  HistoryEvent:  # [sample]
+    desc: "item of getHistory CursorPage content[]"
+    props:
+      id: {type: string}
+      recordId: {type: string}
+      createdBy: {type: string}
+      createdAt: {type: string, format: date-time}
+      fieldId: {type: string}
+      before: {ref: HistoryValue}
+      after: {ref: HistoryValue}
+  AccessRequest:  # [sample]
+    desc: "getAccessRequests returns a bare ARRAY of these"
+    props:
+      id: {type: string}
+      message: {type: string}
+      requester: {type: object, props: {id: {type: string}, name: {type: string}, email: {type: string}}}
+  AccessRequestCreated:  # [sample]
+    props:
+      id: {type: string}
+  EffectivePermissions:  # [sample]
+    props:
+      canView: {type: boolean}
+      canEdit: {type: boolean}
+      canDelete: {type: boolean}
+      canAdd: {type: boolean}
+  MembersInfo:  # [sample]
+    desc: "getMembers; wildcard applies to records, inheritViewOnly to record-types (per endpoint description)"
+    props:
+      members: {type: array, items: {ref: Member}}
+      wildcard: {type: string, example: SELECTED_USERS_ONLY}
+      inheritViewOnly: {type: boolean}
+  Member:  # [sample]
+    desc: "item of MembersInfo.members; getInheritance returns a bare ARRAY of these"
+    props:
+      subjectId: {type: string}
+      subjectType: {type: string, example: user}
+      name: {type: string}
+      avatarUrl: {type: string}
+      role: {type: string, example: viewer}
+  ViewRestriction:  # [sample]
+    props:
+      restrictionStatus: {type: string, example: INACCESSIBLE}
+  HistoryValue:  # [sample]
+    props:
+      value: {type: any}
+      fieldSnapshot: {ref: Field, desc: "subset of Field keys (id,type,displayName,description,hasError,options,dateOptions,numberOptions,userOptions)"}
+  # ---- nested DTOs: collapsed in the source UI; shapes inferred from request/response samples ----
+  AuthzSubjectDtoV2:  # [sample]
+    props:
+      type: {type: string}
+      id: {type: string}
+  DefaultRecordPermissionsDto:  # [sample]
+    props:
+      wildcard: {type: string, example: EVERYONE_IN_WORKSPACE}
+      inheritViewOnly: {type: boolean}
+      subjects: {type: array, items: {type: object, props: {id: {type: string}, type: {type: string, example: USER}, role: {type: string, example: EDITOR}}}}
+  FieldDateOptionsDto:  # [sample]
+    props:
+      dateFormat: {type: string, example: locale}
+      timeFormat: {type: string}
+      useSameTimezoneForAllCollaborators: {type: boolean}
+      timezoneId: {type: string}
+  FieldDocumentOptionsDto:  # [sample]
+    props:
+      showThumbnail: {type: boolean}
+      showTitle: {type: boolean}
+  FieldFormulaOptionsDto:  # [sample]
+    props:
+      formula: {type: string}
+      returnType: {type: string, example: DATE}
+      numberOptions: {ref: FieldNumberOptionsDto}
+      dateOptions: {ref: FieldDateOptionsDto}
+  FieldLookupOptionsDto:  # [sample]
+    props:
+      referenceFieldId: {type: string}
+      rollup: {type: string}
+      sourceField: {ref: FieldDto}
+  FieldMetadataDto:  # [sample]
+    props:
+      originType: {type: string}
+      extendedRollup: {type: string}
+  FieldNumberOptionsDto:  # [sample]
+    props:
+      precision: {type: integer}
+      allowNegatives: {type: boolean}
+      currency: {type: string, example: AED}
+      visualizationType: {type: string, example: TEXT}
+      financeType: {type: string, example: GENERAL}
+  FieldOptionDto:  # [sample]
+    props:
+      name: {type: any}
+      displayName: {type: string}
+      color: {type: string}
+      groupId: {type: string}
+  FieldReferenceOptionsDto:  # [sample]
+    props:
+      multiple: {type: boolean}
+      showThumbnail: {type: boolean}
+      showTitle: {type: boolean}
+      showColor: {type: boolean}
+      recordTypeId: {type: string}
+      isExternal: {type: boolean}
+      createBackReference: {type: boolean}
+      backField: {ref: FieldDto}
+      externalOptions: {type: object, props: {connectionName: {type: string}, objectName: {type: string}, connectionOptions: {type: object, desc: "free-form map"}}}
+      filters: {type: object, desc: "free-form map"}
+      connectionFilters: {type: array, items: {type: any}}
+      workfrontFilterIds: {type: array, items: {type: string}}
+      lookupFields: {type: array, items: {type: object, props: {fieldId: {type: string}, rollup: {type: string}}}}
+      scopeWorkspaceIds: {type: array, items: {type: string}}
+      globalRecordTypeWorkspaceFieldId: {type: string}
+      isControlled: {type: boolean}
+  FieldUserOptionsDto:  # [sample]
+    props:
+      multipleUsersAllowed: {type: boolean}
+  GroupDto:  # [sample]
+    props:
+      fieldId: {type: string}
+      direction: {type: string, example: asc}
+  MemberGrantDto:  # [sample]
+    props:
+      subjectId: {type: string}
+      subjectType: {type: string, example: user}
+      role: {type: string, example: viewer}
+  MemberRevokeDto:  # [sample]
+    props:
+      subjectId: {type: string}
+      subjectType: {type: string, example: user}
+  RecordMetadataDto:  # [sample]
+    props:
+      catalyzeId: {type: string}
+  RecordTypeExternalOptionsDto:  # [sample]
+    props:
+      connection: {type: string, example: WORKFRONT}
+      object: {type: string, example: PROJECT}
+      fields: {type: object, desc: "free-form map"}
+  RecordTypePermissionSettingsDto:  # [sample]
+    props:
+      mode: {type: string, example: OPEN}
+      subjects: {type: array, items: {type: object, props: {id: {type: string}, type: {type: string, example: USER}}}}
+  RecordTypeSectionDto:  # [sample]
+    props:
+      displayName: {type: string}
+      recordTypeIds: {type: array, items: {type: string}}
+  ViewMetadataDto:  # [sample]
+    props:
+      type: {type: string, example: TABLE}
+      showThumbnail: {type: boolean}
+      showRecordColoring: {type: boolean}
+      columnMetadata: {type: array, items: {type: object, props: {width: {type: integer}, fieldId: {type: string}, visibility: {type: boolean}, aggregationFunction: {type: string, example: SUM}}}}
+      newColumnMetadata: {type: array, items: {type: object, props: {width: {type: integer}, fieldId: {type: string}, visibility: {type: boolean}, aggregationFunction: {type: string, example: SUM}}}}
+      rowOrder: {type: array, items: {type: string}}
+      startDateKey: {type: string}
+      endDateKey: {type: string}
+      timelineScale: {type: string, example: YEAR}
+      cardFieldIds: {type: array, items: {type: string}}
+      coloring: {type: object, props: {record: {type: object, props: {selected: {type: string, example: RECORD_TYPE}, fieldId: {type: string}, highlightFullRow: {type: boolean}, filterColoringRules: {type: array, items: {type: object, props: {id: {type: string}, color: {type: string}, appliedFilters: {type: array, items: {type: any}}}}}}}, group: {type: object, props: {selected: {type: string, example: DEFAULT}}}}}
+      rowHeight: {type: string, example: SHORT}
+      truncateRecordContent: {type: boolean}
+      timelineLayout: {type: string, example: stacked}
+      dynamicFieldMetadata: {type: object, props: {scopeWorkspaceId: {type: string}, dynamicFieldIds: {type: array, items: {type: string}}}}
+  GroupDto: {same_as: SortDto}
+  FieldDto: {same_as: Field}
+  # ---- request bodies: top-level props from the docs table ----
+  WorkspaceInput:  # [table] used by: updateWorkspace, patchWorkspace, createWorkspace
+    sample_only_keys: [createdBy, updatedBy]  # in the page example but not in the documented table (likely read-only/ignored)
+    props:
+      name: {type: string, maxLength: 256, pattern: "(?s)^\\s*\\S.*$", desc: "Display name of the workspace. Maximum 256 characters; cannot be blank."}
+      description: {type: string, maxLength: 1024, desc: "Description of the workspace purpose and content. Maximum 1024 characters."}
+      color: {type: string, desc: "Color theme for the workspace"}
+      icon: {type: string, desc: "Icon identifier for the workspace"}
+      ownerId: {type: string, desc: "User ID of the workspace owner"}
+      recordTypeSections: {type: array, items: {ref: RecordTypeSectionDto}, desc: "List of record type sections for organizing record types"}
+  RecordTypeUpdateInput:  # [table] used by: updateRecordType, patchRecordType
+    required: [displayName]
+    sample_only_keys: [createdBy, updatedBy]  # in the page example but not in the documented table (likely read-only/ignored)
+    props:
+      displayName: {required: true, type: string, maxLength: 255, desc: "Display name of the record type. Maximum 255 characters; cannot be blank."}
+      description: {type: string, maxLength: 1024, desc: "Description of the record type purpose. Maximum 1024 characters."}
+      primaryFieldId: {type: string, desc: "ID of the primary field for this record type"}
+      icon: {type: string, desc: "Icon identifier for the record type"}
+      color: {type: string, desc: "Color theme for the record type"}
+      isExternal: {type: boolean, desc: "Indicates if this is an external record type"}
+      sourceRecordTypeId: {type: string, desc: "ID of an existing global record type to attach to the workspace (used only on create). When provided, the record type is not created but attached as a dynamic usage."}
+      permissionSettings: {ref: RecordTypePermissionSettingsDto, desc: "Default record-level permission rule for this record type. On read, the resolved rule for the current workspace context (defaulted to OPEN when never configured); omitted when the default-record-permissions feature is disabled. On PATCH/PUT, set this to configure the rule — for global record types it applies to the workspace given by the scopeWorkspaceId query param (defaulting to the primary workspace)."}
+      defaultRecordPermissions: {ref: DefaultRecordPermissionsDto, desc: "Record-sharing-aligned default permission rule (wildcard + inheritance + per-subject role). On read, the resolved rule for the current workspace context; omitted when the wf-planning-default-permission-enhancements feature is disabled. On PATCH/PUT, set this to configure the rule — for global record types it applies to the workspace given by the scopeWorkspaceId query param (defaulting to the primary workspace). Supersedes permissionSettings, which is rejected on write while enhancements are enabled."}
+      externalOptions: {ref: RecordTypeExternalOptionsDto, desc: "External options for external record types"}
+      linkableWithAllWorkspaces: {type: boolean, desc: "Indicates if this record type can be linked with all workspaces"}
+      linkableWithWorkspaceIds: {type: array, items: string, desc: "List of workspace IDs that this record type can be linked with"}
+      authorizedToCreateDynamicRecordType: {type: array, items: {ref: AuthzSubjectDtoV2}, desc: "List of subjects authorized to create dynamic record types from this global record type"}
+  RecordTypeCreateInput:  # [table] used by: createRecordType
+    required: [displayName]
+    sample_only_keys: [createdBy, updatedBy]  # in the page example but not in the documented table (likely read-only/ignored)
+    props:
+      displayName: {required: true, type: string, maxLength: 255, desc: "Display name of the record type. Maximum 255 characters; cannot be blank."}
+      description: {type: string, maxLength: 1024, desc: "Description of the record type purpose. Maximum 1024 characters."}
+      primaryFieldId: {type: string, desc: "ID of the primary field for this record type"}
+      icon: {type: string, desc: "Icon identifier for the record type"}
+      color: {type: string, desc: "Color theme for the record type"}
+      isExternal: {type: boolean, desc: "Indicates if this is an external record type"}
+      sourceRecordTypeId: {type: string, desc: "ID of an existing global record type to attach to the workspace (used only on create). When provided, the record type is not created but attached as a dynamic usage."}
+      permissionSettings: {ref: RecordTypePermissionSettingsDto, desc: "Default record-level permission rule for this record type. On read, the resolved rule for the current workspace context (defaulted to OPEN when never configured); omitted when the default-record-permissions feature is disabled. On PATCH/PUT, set this to configure the rule — for global record types it applies to the workspace given by the scopeWorkspaceId query param (defaulting to the primary workspace)."}
+      defaultRecordPermissions: {ref: DefaultRecordPermissionsDto, desc: "Record-sharing-aligned default permission rule (wildcard + inheritance + per-subject role). On read, the resolved rule for the current workspace context; omitted when the wf-planning-default-permission-enhancements feature is disabled. On PATCH/PUT, set this to configure the rule — for global record types it applies to the workspace given by the scopeWorkspaceId query param (defaulting to the primary workspace). Supersedes permissionSettings, which is rejected on write while enhancements are enabled."}
+  RecordInput:  # [table] used by: updateRecord, patchRecord, bulkUpdateRecords, bulkCreateRecords, bulkPatchRecords, createRecord
+    sample_only_keys: [coverImage, createdBy, updatedBy]  # in the page example but not in the documented table (likely read-only/ignored)
+    props:
+      recordTypeId: {type: string, desc: "ID of the record type this record belongs to"}
+      data: {type: object, desc: "Field data for the record as key-value pairs where keys are field IDs"}
+      metadata: {ref: RecordMetadataDto, desc: "Additional metadata associated with the record"}
+  BulkDeleteInput:  # [table] used by: bulkDeleteRecords
+    required: [ids]
+    props:
+      ids: {required: true, type: array, items: string, maxItems: 100, desc: "List of record IDs to delete (max 100)"}
+  ThumbnailUpload:  # [table] used by: uploadThumbnail
+    contentType: multipart/form-data
+    required: [file]
+    props:
+      file: {required: true, type: string, format: binary, desc: "PNG or JPEG image file"}
+  SearchInput:  # [table] used by: searchRecordsPost
+    props:
+      recordTypeId: {type: string, desc: "ID of the record type to search within"}
+      recordTypeAlias: {type: string, desc: "Alias of the record type to search within"}
+      filter: {ref: FilterNodeDto, desc: "Filter criteria using the composite filter pattern. Supports recursive AND/OR nesting with strongly-typed conditions."}
+      sort: {type: array, items: {ref: SortDto}, desc: "Sorting configuration for records"}
+      group: {type: array, items: {ref: GroupDto}, desc: "Grouping configuration for records"}
+      scopeWorkspaceIds: {type: array, items: string, desc: "List of workspace IDs to scope the search to (for global record types)"}
+      globalRecordTypeWorkspaceFieldId: {type: string, desc: "ID of the global record type workspace field (for global record types)"}
+  MoveRecordsInput:  # [table] used by: moveRecords
+    required: [recordIds]
+    props:
+      recordIds: {required: true, type: array, items: string, maxItems: 100, nonEmpty: true, desc: "IDs of the records to move, in the order they should appear at the destination."}
+      putAfterRecordId: {type: string, desc: "Place the moved records immediately AFTER this record. Mutually exclusive with putBeforeRecordId."}
+      putBeforeRecordId: {type: string, desc: "Place the moved records immediately BEFORE this record. Mutually exclusive with putAfterRecordId."}
+  FieldInput:  # [table] used by: updateField, patchField, createField
+    sample_only_keys: [createdBy, updatedBy]  # in the page example but not in the documented table (likely read-only/ignored)
+    props:
+      displayName: {type: string, maxLength: 256, desc: "Display name of the field. Maximum 256 characters; must be unique within the parent record type."}
+      type: {type: string, enum: [text, long-text, number, percentage, currency, date, single-select, multi-select, boolean, reference, user, formula, created-by, created-at, updated-by, updated-at, record-id], desc: "Type of the field. Subject to per-record-type quotas: max 20 long-text, max 20 formula, max 30 reference. lookup and document are not directly creatable."}
+      description: {type: string, maxLength: 512, desc: "Description of the field. Maximum 512 characters."}
+      linkedField: {ref: FieldDto, recursive: true, desc: "Linked field for reference and lookup fields"}
+      options: {type: array, items: {ref: FieldOptionDto}, desc: "Field options for single-select and multi-select fields. Required (non-empty) on create/PUT for those types; every option needs a non-blank displayName, and both displayName (case-insensitive) and non-null name values must be unique within the list."}
+      defaultOptions: {type: array, items: string, desc: "Default options for single-select and multi-select fields"}
+      dateOptions: {ref: FieldDateOptionsDto, desc: "Date field options. Required on create/PUT for date fields (dateOptions.dateFormat must be set); not required on PATCH."}
+      numberOptions: {ref: FieldNumberOptionsDto, desc: "Number field options for number, percentage, and currency fields. Required on create/PUT for number/percentage/currency fields (numberOptions.currency is additionally required for currency); not required on PATCH."}
+      referenceOptions: {ref: FieldReferenceOptionsDto, desc: "Reference field options"}
+      lookupOptions: {ref: FieldLookupOptionsDto, desc: "Lookup field options"}
+      formulaOptions: {ref: FieldFormulaOptionsDto, desc: "Formula field options"}
+      userOptions: {ref: FieldUserOptionsDto, desc: "User field options. Required on create/PUT for user fields (userOptions.multipleUsersAllowed must be set); not required on PATCH."}
+      defaultUsers: {type: array, items: string, desc: "Default user option"}
+      documentOptions: {ref: FieldDocumentOptionsDto, desc: "Document field options. Document fields are not directly creatable; on PUT of an existing document field these options are required. Not required on PATCH."}
+      hasError: {type: boolean, desc: "Indicates if the field has an error"}
+      isHtmlNative: {type: boolean, desc: "Indicates if the long text field is HTML native"}
+      metadata: {ref: FieldMetadataDto, desc: "Field metadata"}
+  ViewInput:  # [table] used by: updateView, patchView, createView
+    required: [name, type]
+    sample_only_keys: [createdBy, updatedBy]  # in the page example but not in the documented table (likely read-only/ignored)
+    props:
+      name: {required: true, type: string, maxLength: 255, desc: "Name of the view. Maximum 255 characters; cannot be blank. Each record type allows up to 100 personal views."}
+      type: {required: true, type: string, enum: [table, timeline, calendar, list, gallery], nonEmpty: true, desc: "Type of the view. Must be the exact canonical lowercase value; no other casing is accepted, consistent with the internal API."}
+      recordTypeId: {type: string, desc: "ID of the record type this view belongs to"}
+      filter: {type: array, items: {ref: FilterNodeDto}, desc: "Filter conditions applied to records in this view"}
+      grouping: {type: array, items: {ref: GroupDto}, desc: "Grouping configuration for records in this view"}
+      sorting: {type: array, items: {ref: SortDto}, desc: "Sorting configuration for records in this view"}
+      metadata: {ref: ViewMetadataDto, desc: "View-specific metadata (column widths, date fields, etc.)"}
+      isHidden: {type: boolean, desc: "Whether this view is hidden from the view list"}
+  AccessRequestInput:  # [table] used by: createAccessRequest
+    props:
+      message: {type: string, maxLength: 2000, desc: "Optional message to include with the access request"}
+  DismissAccessRequestsInput:  # [table] used by: deleteAccessRequests
+    required: [requestIds]
+    props:
+      requestIds: {required: true, type: array, items: string, nonEmpty: true, desc: "IDs of access requests to dismiss"}
+  MemberChangesInput:  # [table] used by: updateMembers
+    props:
+      grant: {type: array, items: {ref: MemberGrantDto}, desc: "Members to grant new access to"}
+      update: {type: array, items: {ref: MemberGrantDto}, desc: "Members whose existing role should be changed"}
+      revoke: {type: array, items: {ref: MemberRevokeDto}, desc: "Members to revoke all access from"}
+      inheritViewOnly: {type: boolean, desc: "Inheritance mode: true = downgrade inherited access to view-only, false = fully inherited. Valid for record-types, records, and fields; ignored when a record's/field's wildcard is SELECTED_USERS_ONLY (that state isn't inheriting)."}
+      wildcard: {type: string, enum: [SELECTED_USERS_ONLY, EVERYONE_IN_WORKSPACE], desc: "Set wildcard access mode. Valid for records and fields (not record-types); defaults to EVERYONE_IN_WORKSPACE if never set. SELECTED_USERS_ONLY additionally requires the record-level no-access feature."}
+
+parameters:  # shared query params (referenced by operations via uses:)
+  cursor: {in: query, type: string, desc: "Cursor from the previous page response for fetching the next page"}
+  aliased: {in: query, type: boolean, default: false, desc: "Flag to include alias support in response (field keys will be aliases instead of IDs)"}
+  limit: {in: query, type: integer, format: int32, default: 20, minimum: 1, maximum: 100, desc: "Maximum number of items to return per page (1-100, default 20)"}
+  recordTypeId: {in: query, type: string, desc: "The record type the field belongs to. Required for fields, ignored otherwise."}
+  page: {in: query, type: integer, default: 0, minimum: 0, desc: "Zero-based page index (0..N)"}
+
+operations:
+  Workspaces:
+    - id: getWorkspace
+      route: "GET /v2/workspaces/{id}"
+      summary: "Get Workspace"
+      desc: "Retrieve a workspace by its ID."
+      path: {id: "ID of the workspace to be retrieved"}
+      responses: {200: Workspace}
+      errors: {404: "Not Found"}
+    - id: updateWorkspace
+      route: "PUT /v2/workspaces/{id}"
+      summary: "Update Workspace"
+      desc: "Update an existing workspace using PUT (full replacement). All fields not provided in the request will be set to null."
+      path: {id: "ID of the workspace to be updated"}
+      body: {contentType: application/json, schema: WorkspaceInput}
+      responses: {200: Workspace}
+      errors: {400: "Bad Request (validation failure)", 404: "Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: deleteWorkspace
+      route: "DELETE /v2/workspaces/{id}"
+      summary: "Delete Workspace"
+      desc: "Delete a workspace by its ID."
+      path: {id: "ID of the workspace to be deleted"}
+      responses: {204: "No Content"}
+      errors: {404: "Not Found"}
+    - id: patchWorkspace
+      route: "PATCH /v2/workspaces/{id}"
+      summary: "Patch Workspace"
+      desc: "Partially update a workspace using PATCH (merge-patch semantics). Only provided fields will be updated; omitted fields remain unchanged."
+      path: {id: "ID of the workspace to be patched"}
+      body: {contentType: application/json, schema: WorkspaceInput}
+      responses: {200: Workspace}
+      errors: {400: "Bad Request (validation failure)", 404: "Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: getWorkspaces
+      route: "GET /v2/workspaces"
+      summary: "Get All Workspaces"
+      desc: "Retrieve a cursor-paginated list of all workspaces."
+      uses: [cursor]
+      query:
+        limit: {type: integer, format: int32, default: 20, minimum: 1, maximum: 50, desc: "Maximum number of items to return per page (1-50, default 20)"}
+      responses: {200: CursorPage<Workspace>}
+    - id: createWorkspace
+      route: "POST /v2/workspaces"
+      summary: "Create Workspace"
+      desc: "Create a new workspace."
+      body: {contentType: application/json, schema: WorkspaceInput}
+      responses: {201: Workspace}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (admin only, or WORKSPACE_LIMIT_EXCEEDED)"}
+  Record-Types:
+    - id: getRecordType
+      route: "GET /v2/record-types/{id}"
+      summary: "Get Record Type"
+      desc: "Retrieve a record type by its ID."
+      path: {id: "ID of the record type to be retrieved"}
+      query:
+        scopeWorkspaceId: {type: string, desc: "ID of the workspace to scope dynamic field resolution for global/dynamic record types"}
+      responses: {200: RecordType}
+      errors: {404: "Not Found"}
+    - id: updateRecordType
+      route: "PUT /v2/record-types/{id}"
+      summary: "Update Record Type"
+      desc: "Update an existing record type using PUT (full replacement). All fields not provided in the request will be set to null."
+      path: {id: "ID of the record type to be updated"}
+      query:
+        scopeWorkspaceId: {type: string, desc: "For global record types, the workspace whose default-permission rule is set when permissionSettings is provided. Defaults to the primary workspace; ignored for regular record types."}
+      body: {contentType: application/json, schema: RecordTypeUpdateInput}
+      responses: {200: RecordType}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (RECORD_TYPE_IN_HIERARCHY)", 404: "Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: deleteRecordType
+      route: "DELETE /v2/record-types/{id}"
+      summary: "Permanently delete record type"
+      desc: "Delete a record type and all its associated data, fields, and records. This action is irreversible."
+      path: {id: "ID of the record type to be deleted"}
+      responses: {204: "No Content"}
+      errors: {403: "Forbidden (RECORD_TYPE_IN_HIERARCHY)", 404: "Not Found"}
+    - id: patchRecordType
+      route: "PATCH /v2/record-types/{id}"
+      summary: "Patch Record Type"
+      desc: "Partially update a record type using PATCH (merge-patch semantics). Only provided fields will be updated; omitted fields remain unchanged."
+      path: {id: "ID of the record type to be patched"}
+      query:
+        scopeWorkspaceId: {type: string, desc: "For global record types, the workspace whose default-permission rule is set when permissionSettings is provided. Defaults to the primary workspace; ignored for regular record types."}
+      body: {contentType: application/json, schema: RecordTypeUpdateInput}
+      responses: {200: RecordType}
+      errors: {400: "Bad Request (validation failure)", 404: "Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: getRecordTypesByWorkspace
+      route: "GET /v2/workspaces/{workspaceId}/record-types"
+      summary: "Get Record Types by Workspace"
+      desc: "Retrieve a cursor-paginated list of record types for a specific workspace."
+      path: {workspaceId: "ID of the workspace"}
+      uses: [cursor, limit]
+      responses: {200: CursorPage<RecordType>}
+      errors: {404: "Workspace Not Found"}
+    - id: createRecordType
+      route: "POST /v2/workspaces/{workspaceId}/record-types"
+      summary: "Create Record Type"
+      desc: "Create a new record type in a workspace. Subject to limits: max 100 record types per workspace."
+      path: {workspaceId: "ID of the workspace"}
+      query:
+        sectionIndex: {type: integer, format: int32, default: 0, minimum: 0, desc: "Zero-based index of the section to add the record type to. Defaults to 0 (first section)."}
+      body: {contentType: application/json, schema: RecordTypeCreateInput}
+      responses: {201: RecordType}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (RECORD_TYPE_LIMIT_EXCEEDED)", 404: "Workspace Not Found"}
+    - id: detachRecordTypeFromWorkspace
+      route: "POST /v2/workspaces/{workspaceId}/record-types/{recordTypeId}/detach"
+      summary: "Detach record type from workspace"
+      desc: "Remove a dynamic (global) record type usage from a workspace. The underlying global record type and its data are preserved; only the workspace association is removed."
+      path: {workspaceId: "ID of the workspace", recordTypeId: "ID of the record type to detach"}
+      responses: {204: "No Content"}
+      errors: {404: "Not Found"}
+    - id: getGlobalRecordTypes
+      route: "GET /v2/workspaces/{workspaceId}/global-record-types"
+      summary: "Get Global Record Types"
+      desc: "Retrieve a cursor-paginated list of global record types available to attach to a specific workspace."
+      path: {workspaceId: "ID of the workspace"}
+      uses: [cursor, limit]
+      responses: {200: CursorPage<RecordType>}
+      errors: {404: "Workspace Not Found"}
+  Records:
+    - id: getRecord
+      route: "GET /v2/records/{id}"
+      summary: "Get Record"
+      desc: "Retrieve a record by its ID."
+      path: {id: "ID of the record to be retrieved"}
+      uses: [aliased]
+      responses: {200: Record}
+      errors: {404: "Not Found"}
+    - id: updateRecord
+      route: "PUT /v2/records/{id}"
+      summary: "Update Record"
+      desc: "Update an existing record using PUT (full replacement). All fields not provided in the request will be set to null."
+      path: {id: "ID of the record to be updated"}
+      body: {contentType: application/json, schema: RecordInput}
+      responses: {200: Record}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (RECORD_CONNECTION_LIMIT_EXCEEDED, HIERARCHY_RECORD_CONNECTION_LIMIT_EXCEEDED)", 404: "Not Found", 409: "Conflict (write conflict, retry)", 422: "Unprocessable Entity (back-reference conflict)"}
+    - id: deleteRecord
+      route: "DELETE /v2/records/{id}"
+      summary: "Delete Record"
+      desc: "Delete a record by its ID."
+      path: {id: "ID of the record to be deleted"}
+      responses: {204: "No Content"}
+      errors: {404: "Not Found"}
+    - id: patchRecord
+      route: "PATCH /v2/records/{id}"
+      summary: "Patch Record"
+      desc: "Partially update an existing record using PATCH (merge-patch semantics). Only provided fields will be updated; omitted fields remain unchanged. Setting a field value to JSON null (e.g. {\"data\":{\"F123\":null}}) explicitly clears that field; omitting the key leaves the field untouched. For list-type fields (connections, multi-select), you can use operational updates: [{\"op\": \"add\", \"value\": [...]}, {\"op\": \"remove\", \"value\": [...]}]."
+      path: {id: "ID of the record to be patched"}
+      body: {contentType: application/json, schema: RecordInput}
+      responses: {200: Record}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (RECORD_CONNECTION_LIMIT_EXCEEDED, HIERARCHY_RECORD_CONNECTION_LIMIT_EXCEEDED)", 404: "Not Found", 409: "Conflict (write conflict, retry)", 422: "Unprocessable Entity (back-reference conflict)"}
+    - id: bulkUpdateRecords
+      route: "PUT /v2/record-types/{recordTypeId}/records/bulk"
+      summary: "Bulk Update Records"
+      desc: "Update multiple records using PUT semantics (full replacement). All fields not provided will be set to null. Each record must include an id. Limited to 100 records per request."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [aliased]
+      body: {contentType: application/json, schema: RecordInput}
+      responses: {200: {desc: "All items updated successfully", returns: BulkResult}, 207: {desc: "Mixed results — some items succeeded, some failed", returns: BulkResult}}
+      errors: {400: "Bad Request", 404: "Record Type Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: bulkCreateRecords
+      route: "POST /v2/record-types/{recordTypeId}/records/bulk"
+      summary: "Bulk Create Records"
+      desc: "Create multiple records in a record type in a single request. Limited to 100 records per request."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [aliased]
+      query:
+        scopeWorkspaceId: {type: string, desc: "ID of the workspace to scope global record type access and record creation"}
+      body: {contentType: application/json, schema: RecordInput}
+      responses: {201: {desc: "All items created successfully", returns: BulkResult}, 207: {desc: "Mixed results — some items succeeded, some failed", returns: BulkResult}}
+      errors: {400: "Bad Request", 404: "Record Type Not Found"}
+    - id: bulkDeleteRecords
+      route: "DELETE /v2/record-types/{recordTypeId}/records/bulk"
+      summary: "Bulk Delete Records"
+      desc: "Delete multiple records by their IDs in a single request. Limited to 100 records per request."
+      path: {recordTypeId: "ID of the record type"}
+      body: {contentType: application/json, schema: BulkDeleteInput}
+      responses: {200: {desc: "All items deleted successfully", returns: BulkResult}, 207: {desc: "Mixed results — some items succeeded, some failed", returns: BulkResult}}
+      errors: {400: "Bad Request (empty ids list)", 404: "Record Type Not Found"}
+    - id: bulkPatchRecords
+      route: "PATCH /v2/record-types/{recordTypeId}/records/bulk"
+      summary: "Bulk Patch Records"
+      desc: "Partially update multiple records using PATCH semantics (merge-patch). Only provided fields are updated; omitted fields remain unchanged. Each record must include an id. Limited to 100 records per request."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [aliased]
+      body: {contentType: application/json, schema: RecordInput}
+      responses: {200: {desc: "All items patched successfully", returns: BulkResult}, 207: {desc: "Mixed results — some items succeeded, some failed", returns: BulkResult}}
+      errors: {400: "Bad Request", 404: "Record Type Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: uploadThumbnail
+      route: "POST /v2/records/{id}/thumbnail"
+      summary: "Upload thumbnail on record"
+      desc: "Replace the record's thumbnail with the uploaded image. Each successful upload produces a new URL, even for identical content."
+      path: {id: "ID of the record"}
+      body: {contentType: multipart/form-data, schema: ThumbnailUpload}
+      responses: {201: {desc: "Thumbnail uploaded", returns: Record}}
+      errors: {400: "Invalid image (THUMBNAIL_EMPTY, THUMBNAIL_INVALID_FORMAT, THUMBNAIL_INVALID_CONTENT, THUMBNAIL_SIZE_EXCEEDED)", 404: "Record not found", 413: "Upload too large (UPLOAD_SIZE_EXCEEDED)"}
+    - id: deleteThumbnail
+      route: "DELETE /v2/records/{id}/thumbnail"
+      summary: "Delete thumbnail on record"
+      desc: "Remove the record's thumbnail. Idempotent — succeeds with 204 even when no thumbnail is set."
+      path: {id: "ID of the record"}
+      responses: {204: "Thumbnail removed"}
+      errors: {404: "Record not found"}
+    - id: getRecordsByRecordType
+      route: "GET /v2/record-types/{recordTypeId}/records"
+      summary: "Get Records by Record Type"
+      desc: "Retrieve a page-based paginated list of records for a specific record type. Uses standard page/size query parameters (default page=0, size=20, sorted by createdAt)."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [page]
+      query:
+        size: {type: integer, default: 20, minimum: 1, desc: "The size of the page to be returned"}
+        sort: {type: array, items: string, default: ["createdAt,ASC"], desc: "Sorting criteria in the format: property,(asc|desc). Default sort order is ascending. Multiple sort criteria are supported."}
+      responses: {200: Page<Record>}
+      errors: {404: "Record Type Not Found"}
+    - id: createRecord
+      route: "POST /v2/record-types/{recordTypeId}/records"
+      summary: "Create Record"
+      desc: "Create a new record in a record type. Subject to limits: max 25,000 records per record type."
+      path: {recordTypeId: "ID of the record type"}
+      query:
+        scopeWorkspaceId: {type: string, desc: "ID of the workspace to scope global record type access and record creation"}
+      body: {contentType: application/json, schema: RecordInput}
+      responses: {201: Record}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (RECORD_TYPE_RECORD_LIMIT_EXCEEDED)", 404: "Record Type Not Found", 422: "Unprocessable Entity (back-reference conflict)"}
+    - id: searchRecordsGet
+      route: "GET /v2/record-types/{recordTypeId}/records/search"
+      summary: "Search Records (GET)"
+      desc: "Search records using query parameters. Accepts a JSON filter string using the composite filter pattern, field projection, and alias-based field access. Returns page-based paginated records along with group information."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [aliased, page]
+      query:
+        recordTypeAlias: {type: string, desc: "Alias of the record type"}
+        filter: {type: string, desc: "JSON filter using the composite filter pattern. Example: {\"operator\":\"AND\",\"conditions\":[{\"fieldId\":\"status\",\"condition\":\"IS\",\"value\":\"Active\"}]}"}
+        groupingFieldIds: {type: array, items: string, example: "groupingFieldIds=F693ab1c96f11ea3f4175e000,F693ab1c96f11ea3f4175e001", desc: "List of field IDs to group results by"}
+        scopeWorkspaceIds: {type: array, items: string, example: "scopeWorkspaceIds=Ws123,Ws456", desc: "List of workspace IDs to scope the search to (for global record types)"}
+        globalRecordTypeWorkspaceFieldId: {type: string, example: "globalRecordTypeWorkspaceFieldId=F693ab1c96f11ea3f4175e717", desc: "ID of the global record type workspace field (for global record types)"}
+        fieldIds: {type: array, items: string, default: ["*"], example: "fieldIds=F693ab1c96f11ea3f4175e710,F693ab1c96f11ea3f4175e711", desc: "List of field IDs to include in the record's data"}
+        fieldAliases: {type: array, items: string, default: ["*"], example: "fieldAliases=name,description", desc: "List of field aliases to include in the record's data"}
+        size: {type: integer, default: 100, minimum: 1, desc: "The size of the page to be returned"}
+        sort: {type: array, items: string, desc: "Sorting criteria in the format: property,(asc|desc). Default sort order is ascending. Multiple sort criteria are supported."}
+      responses: {200: SearchResult}
+      errors: {400: "Bad Request (invalid filter parameter)", 404: "Record Type Not Found"}
+    - id: searchRecordsPost
+      route: "POST /v2/record-types/{recordTypeId}/records/search"
+      summary: "Search Records (POST)"
+      desc: "Search records using the composite filter pattern with strongly-typed conditions. Supports recursive AND/OR filter nesting, sorting, grouping, field projection, and alias-based field access. Returns page-based paginated records along with group information."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [aliased, page]
+      query:
+        fieldIds: {type: array, items: string, default: ["*"], example: "fieldIds=F693ab1c96f11ea3f4175e710,F693ab1c96f11ea3f4175e711", desc: "List of field IDs to include in the record's data"}
+        fieldAliases: {type: array, items: string, default: ["*"], example: "fieldAliases=name,description", desc: "List of field aliases to include in the record's data"}
+        size: {type: integer, default: 100, minimum: 1, desc: "The size of the page to be returned"}
+        sort: {type: array, items: string, desc: "Sorting criteria in the format: property,(asc|desc). Default sort order is ascending. Multiple sort criteria are supported."}
+      body: {contentType: application/json, schema: SearchInput}
+      responses: {200: SearchResult}
+      errors: {400: "Bad Request (invalid filter / sort / group)", 404: "Record Type Not Found"}
+    - id: moveRecords
+      route: "POST /v2/record-types/{recordTypeId}/records/move"
+      summary: "Move Records"
+      desc: "Reorder one or more records within a record type by specifying where to place them. Provide exactly one of putAfterRecordId (place after) or putBeforeRecordId (place before). Maximum 100 records per request. Requires EDIT permission on the record type. Move is all-or-nothing: on failure, no records are reordered."
+      path: {recordTypeId: "ID of the record type"}
+      body: {contentType: application/json, schema: MoveRecordsInput}
+      responses: {200: {desc: "All items moved successfully", returns: BulkResult}, 207: {desc: "Move failed — all records remain in original positions", returns: BulkResult}}
+      errors: {400: "Bad Request (invalid move request)", 404: "Record Type or anchor record not found"}
+    - id: getHistory
+      route: "GET /v2/records/{id}/history"
+      summary: "Get Record Field Change History"
+      desc: "Retrieve a cursor-paginated list of field change events for a specific record."
+      path: {id: "ID of the record"}
+      uses: [cursor]
+      query:
+        limit: {type: integer, format: int32, default: 20, minimum: 1, maximum: 50, desc: "Maximum number of items to return per page (1-50, default 20)"}
+        scopeWorkspaceId: {type: string, desc: "Workspace context for dynamic record types"}
+      responses: {200: CursorPage<HistoryEvent>}
+      errors: {400: "Bad Request (invalid cursor or limit)", 404: "Record Not Found"}
+    - id: exportRecords
+      route: "GET /v2/record-types/{recordTypeId}/records/export"
+      summary: "Export Records"
+      desc: "Stream ALL records the user can VIEW for a record type as a CSV or Excel (.xlsx) file. Columns and their order come from the given view (viewId); otherwise from fieldIds, otherwise all fields. Supports the same filter/grouping parameters as search, plus a single scopeWorkspaceId to scope global record types, so the export matches the on-screen table. The response is streamed to bound memory usage."
+      path: {recordTypeId: "ID of the record type"}
+      query:
+        type: {required: true, type: string, desc: "Export format: CSV or EXCEL"}
+        viewId: {type: string, desc: "ID of the table view whose visible columns/order to export"}
+        recordTypeAlias: {type: string, desc: "Alias of the record type"}
+        filter: {type: string, desc: "JSON filter using the composite filter pattern (same as search)"}
+        groupingFieldIds: {type: array, items: string, desc: "List of field IDs to group results by"}
+        scopeWorkspaceId: {type: string, desc: "ID of the workspace to scope the search to (for global record types); the workspace-link field is resolved automatically from the record type"}
+        fieldIds: {type: array, items: string, default: ["*"], desc: "List of field IDs to include as columns (fallback when no viewId)"}
+        fieldAliases: {type: array, items: string, default: ["*"], desc: "List of field aliases to include as columns (fallback when no viewId)"}
+      responses: {200: "file stream (CSV or XLSX)"}
+      errors: {400: "Bad Request (invalid filter / too many records)", 404: "Record Type Not Found"}
+  Fields:
+    - id: getField
+      route: "GET /v2/fields/{id}"
+      summary: "Get Field"
+      desc: "Retrieve a field by its ID."
+      path: {id: "ID of the field to be retrieved"}
+      responses: {200: Field}
+      errors: {404: "Not Found"}
+    - id: updateField
+      route: "PUT /v2/fields/{id}"
+      summary: "Update Field"
+      desc: "Update an existing field using PUT (full replacement). All fields not provided in the request will be set to null. The type-specific options object must meet the same requiredness bar as on create (see Create Field), even for fields that were persisted without one previously."
+      path: {id: "ID of the field to be updated"}
+      body: {contentType: application/json, schema: FieldInput}
+      responses: {200: Field}
+      errors: {400: "Bad Request (validation failure; FIELD_REQUIRED_VALUE_MISSING when a required type-specific option is missing, FIELD_VALUE_NOT_UNIQUE when select option displayNames/names are duplicated)", 403: "Forbidden (FIELD_DISPLAY_NAME_NOT_UNIQUE)", 404: "Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: deleteField
+      route: "DELETE /v2/fields/{id}"
+      summary: "Delete Field"
+      desc: "Delete a field by its ID."
+      path: {id: "ID of the field to be deleted"}
+      responses: {204: "No Content"}
+      errors: {404: "Not Found"}
+    - id: patchField
+      route: "PATCH /v2/fields/{id}"
+      summary: "Patch Field"
+      desc: "Partially update a field using PATCH (merge-patch semantics). Only provided fields will be updated; omitted fields remain unchanged. Unlike create/PUT, PATCH does not require the type-specific options object to be (re-)supplied; an already-valid persisted options object is left as-is when omitted from the request."
+      path: {id: "ID of the field to be patched"}
+      body: {contentType: application/json, schema: FieldInput}
+      responses: {200: Field}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (FIELD_DISPLAY_NAME_NOT_UNIQUE)", 404: "Not Found", 409: "Conflict (write conflict, retry)"}
+    - id: getFieldsByRecordType
+      route: "GET /v2/record-types/{recordTypeId}/fields"
+      summary: "Get Fields by Record Type"
+      desc: "Retrieve a cursor-paginated list of fields for a specific record type."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [cursor, limit]
+      responses: {200: CursorPage<Field>}
+      errors: {404: "Record Type Not Found"}
+    - id: createField
+      route: "POST /v2/record-types/{recordTypeId}/fields"
+      summary: "Create Field"
+      desc: "Create a new field in a record type. Subject to limits: max 500 fields per record type, max 20 long-text fields, max 20 formula fields, max 30 reference fields per record type. The type-specific options object is required and validated against the field's type: dateOptions.dateFormat for date; numberOptions for number/percentage/currency (numberOptions.currency is additionally required for currency); userOptions.multipleUsersAllowed for user; and a non-empty options list with unique, non-blank displayNames for single-select/multi-select. The lookup and document types are not directly creatable and are rejected with 400 INVALID_DATA."
+      path: {recordTypeId: "ID of the record type"}
+      body: {contentType: application/json, schema: FieldInput}
+      responses: {201: Field}
+      errors: {400: "Bad Request (validation failure; FIELD_REQUIRED_VALUE_MISSING when a required type-specific option is missing, FIELD_VALUE_NOT_UNIQUE when select option displayNames/names are duplicated)", 403: "Forbidden (FIELD_LIMIT_EXCEEDED, LONG_TEXT_FIELD_LIMIT_EXCEEDED, FORMULA_FIELD_COUNT_LIMIT_EXCEEDED, REFERENCE_FIELDS_COUNT_LIMIT_EXCEEDED, FIELD_DISPLAY_NAME_NOT_UNIQUE)", 404: "Record Type Not Found"}
+    - id: getRecordTypesUsingField
+      route: "GET /v2/fields/{name}/record-types"
+      summary: "Get Record Types using a Field"
+      desc: "Retrieve a cursor-paginated list of record types that have a field whose linked field (e.g. a reference or lookup field's linked field) has the given alias. Only record types the caller has VIEW access to are included. Returns an empty list (not an error) both when no field has that alias and when the caller cannot view any matching field."
+      path: {name: "alias of the field"}
+      uses: [cursor, limit]
+      responses: {200: CursorPage<RecordType>}
+  Views:
+    - id: getView
+      route: "GET /v2/views/{id}"
+      summary: "Get View"
+      desc: "Retrieve a view by its ID."
+      path: {id: "ID of the view to be retrieved"}
+      responses: {200: View}
+      errors: {404: "Not Found"}
+    - id: updateView
+      route: "PUT /v2/views/{id}"
+      summary: "Update View"
+      desc: "Update an existing view using PUT (full replacement). All fields not provided in the request will be set to null."
+      path: {id: "ID of the view to be updated"}
+      body: {contentType: application/json, schema: ViewInput}
+      responses: {200: View}
+      errors: {400: "Bad Request (validation failure)", 404: "Not Found", 409: "Conflict (write conflict — retry; or the view references a field you cannot view — do not retry)"}
+    - id: deleteView
+      route: "DELETE /v2/views/{id}"
+      summary: "Delete View"
+      desc: "Delete a view by its ID."
+      path: {id: "ID of the view to be deleted"}
+      responses: {204: "No Content"}
+      errors: {404: "Not Found"}
+    - id: patchView
+      route: "PATCH /v2/views/{id}"
+      summary: "Patch View"
+      desc: "Partially update a view using PATCH (merge-patch semantics). Only provided fields will be updated; omitted fields remain unchanged."
+      path: {id: "ID of the view to be patched"}
+      body: {contentType: application/json, schema: ViewInput}
+      responses: {200: View}
+      errors: {400: "Bad Request (validation failure)", 404: "Not Found", 409: "Conflict (write conflict — retry; or the view references a field you cannot view — do not retry)"}
+    - id: getViewsByRecordType
+      route: "GET /v2/record-types/{recordTypeId}/views"
+      summary: "Get Views by Record Type"
+      desc: "Retrieve a cursor-paginated list of views for a specific record type."
+      path: {recordTypeId: "ID of the record type"}
+      uses: [cursor, limit]
+      responses: {200: CursorPage<View>}
+      errors: {404: "Record Type Not Found"}
+    - id: createView
+      route: "POST /v2/record-types/{recordTypeId}/views"
+      summary: "Create View"
+      desc: "Create a new view for a record type. Subject to limits: max 100 personal views per record type."
+      path: {recordTypeId: "ID of the record type"}
+      body: {contentType: application/json, schema: ViewInput}
+      responses: {201: View}
+      errors: {400: "Bad Request (validation failure)", 403: "Forbidden (VIEW_LIMIT_EXCEEDED)", 404: "Record Type Not Found", 409: "Conflict (view references a field you cannot view)"}
+    - id: getViewRestriction
+      route: "GET /v2/views/{id}/restriction"
+      summary: "Get view field-restriction status"
+      desc: "Manager-only: reports whether the view is restricted (or has restricted content) for anyone, not just the caller."
+      path: {id: "ID of the view to check"}
+      responses: {200: ViewRestriction}
+      errors: {404: "Not Found"}
+  Permissions:
+    - id: getAccessRequests
+      route: "GET /v2/permissions/{resourceType}/{resourceId}/requests"
+      summary: "List pending access requests for a resource"
+      desc: "Returns all pending access requests for the given resource. Requires MANAGE permission."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views)", resourceId: "ID of the resource"}
+      responses: {200: "AccessRequest[]"}
+      errors: {400: "Bad Request"}
+    - id: createAccessRequest
+      route: "POST /v2/permissions/{resourceType}/{resourceId}/requests"
+      summary: "Request access to a resource"
+      desc: "Creates or updates an access request for the current user on the given resource."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views)", resourceId: "ID of the resource"}
+      body: {contentType: application/json, schema: AccessRequestInput}
+      responses: {201: AccessRequestCreated}
+      errors: {400: "Bad Request"}
+    - id: deleteAccessRequests
+      route: "DELETE /v2/permissions/{resourceType}/{resourceId}/requests"
+      summary: "Dismiss access requests"
+      desc: "Dismisses the specified access requests by ID. Requires MANAGE permission."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views)", resourceId: "ID of the resource"}
+      body: {contentType: application/json, schema: DismissAccessRequestsInput}
+      responses: {204: "No Content"}
+      errors: {400: "Bad Request"}
+    - id: updateMembers
+      route: "PATCH /v2/permissions/{resourceType}/{resourceId}/members/bulk"
+      summary: "Bulk grant, update, or revoke member permissions"
+      desc: "Grants new roles, changes existing roles, or revokes access for the provided subjects. Requires MANAGE permission."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views, fields)", resourceId: "ID of the resource"}
+      uses: [recordTypeId]
+      query:
+        scopeWorkspaceId: {type: string, desc: "The workspace the caller is operating from. For record-types: when the record-type is a global record-type genuinely attached dynamically to this workspace, every operation in the request (grants/revokes, inheritance, wildcard) is resolved against that dynamic-use context instead of the record-type's own (home) context. For records and views: has no effect on how the request is applied — grants/revokes/wildcard always act on the resource's own single set of members. The value is validated against the resource's real dynamic-use context (via its parent global record-type), and the request fails with 400 if it doesn't correspond to a genuine dynamic attachment. Ignored for workspace resources."}
+      body: {contentType: application/json, schema: MemberChangesInput}
+      responses: {204: "No Content"}
+      errors: {400: "Bad Request"}
+    - id: getMyPermissions
+      route: "GET /v2/permissions/{resourceType}/{resourceId}"
+      summary: "Get current user's effective permissions on a resource"
+      desc: "Returns the current user's effective canView, canEdit, canDelete, and canAdd flags for the given resource."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views, fields)", resourceId: "ID of the resource"}
+      uses: [recordTypeId]
+      query:
+        scopeWorkspaceId: {type: string, desc: "The workspace the caller is operating from. For record-types: when the record-type is a global record-type genuinely attached dynamically to this workspace, the effective permissions returned reflect that dynamic-use context instead of the record-type's own (home) context. For records and views: has no effect on the result — the value is validated against the resource's real dynamic-use context (via its parent global record-type), and the request fails with 400 if it doesn't correspond to a genuine dynamic attachment. Ignored for workspace resources."}
+      responses: {200: EffectivePermissions}
+      errors: {400: "Bad Request"}
+    - id: getMembers
+      route: "GET /v2/permissions/{resourceType}/{resourceId}/members"
+      summary: "Get all members and sharing settings for a resource"
+      desc: "Lists all subjects (users, groups, teams) that have an explicit sharing relation on the resource, together with its wildcard access mode (records only) and inheritance setting (record-types only). Requires MANAGE permission."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views, fields)", resourceId: "ID of the resource"}
+      uses: [recordTypeId]
+      query:
+        scopeWorkspaceId: {type: string, desc: "The workspace the caller is operating from. For record-types: when the record-type is a global record-type genuinely attached dynamically to this workspace, the members and settings returned are those of that dynamic-use context instead of the record-type's own (home) context. For records and views: has no effect on the result — the value is validated against the resource's real dynamic-use context (via its parent global record-type), and the request fails with 400 if it doesn't correspond to a genuine dynamic attachment. Ignored for workspace resources."}
+      responses: {200: MembersInfo}
+      errors: {400: "Bad Request"}
+    - id: getInheritance
+      route: "GET /v2/permissions/{resourceType}/{resourceId}/inheritance"
+      summary: "Get inheritance members for a resource"
+      desc: "Returns the members that inherit access onto the resource. For record-types: the members of its workspace. For records: the union of its parent record-type's own members and its workspace's members. Views and workspaces don't inherit through this chain and always return an empty list. Whether that inheritance is currently downgraded to view-only is reported separately, as inheritViewOnly on GET .../members. Requires MANAGE permission."
+      path: {resourceType: "Type of resource (workspaces, record-types, records, views, fields)", resourceId: "ID of the resource"}
+      uses: [recordTypeId]
+      query:
+        scopeWorkspaceId: {type: string, desc: "The workspace the caller is operating from. For record-types: when the record-type is a global record-type genuinely attached dynamically to this workspace, the members returned reflect that dynamic-use context instead of the record-type's own (home) context. For records: selects whether the dynamic-use workspace's or the home workspace's members are returned as part of the inherited set — the value is validated against the resource's real dynamic-use context (via its parent global record-type), and the request fails with 400 if it doesn't correspond to a genuine dynamic attachment. Ignored for views and workspaces."}
+      responses: {200: "Member[]"}
+      errors: {400: "Bad Request"}
+
+notes:
+  - "Bulk update/patch: the description says each record must include an id, but the documented body table and the page example do not list id."
+  - "Record request examples include createdBy/updatedBy/coverImage keys that are absent from the documented body table (see RecordInput.sample_only_keys)."
+  - "Field type enum includes record-id, but lookup and document types are not directly creatable (400 INVALID_DATA). On create, the matching options object is required: date->dateOptions.dateFormat; number/percentage/currency->numberOptions (currency also needs numberOptions.currency); user->userOptions.multipleUsersAllowed; single-select/multi-select->non-empty options[] with unique, non-blank displayNames."
