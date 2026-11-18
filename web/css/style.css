@@ -60,6 +60,11 @@ td.bad { color: var(--err); font-weight: 600; } td.good { color: var(--ok); }
 .schema details details { margin: 4px 10px; }
 .schema details details summary { font-weight: 500; }
 .schema .inner { padding: 0 10px 8px; }
+.tblrow { display: flex; align-items: flex-start; gap: 8px; }
+.tblrow .keepbox { margin-top: 5px; flex: none; }
+.tblrow .tblbody { flex: 1; min-width: 0; }
+.tblrow.discarded summary { text-decoration: line-through; opacity: .7; }
+.tblrow .discardnote { width: 100%; max-width: 520px; margin: 2px 0 6px 18px; }
 .tag { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 9px; margin-left: 6px; background: #e9ecf3; color: #3b4559; font-weight: 500; }
 .tag.stale { background: var(--warnbg); color: #6b3d00; } .tag.cap { background: var(--warnbg); color: #6b3d00; }
 .tag.fail { background: var(--errbg); color: var(--err); } .tag.done { background: var(--okbg); color: var(--ok); }

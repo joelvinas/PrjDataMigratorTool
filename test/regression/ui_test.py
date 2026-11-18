@@ -37,6 +37,18 @@ with sync_playwright() as p:
     for sel in ["#scopeBase","#resBase","#csvBase","#exBase"]:
         l=labels(sel); check("%s uses Name - ID"%sel, "Sample Shop - appSampleBase001" in l, l)
     check("table dropdown carries the base label", any(o.startswith("Sample Shop - appSampleBase001 / ") for o in labels("#resTable")), labels("#resTable")[:3])
+    # step 3: keep or discard tables, applied with a button
+    nrows=len(pg.query_selector_all("#schemaView .tblrow")); check("every table has a keep checkbox, all ticked, nothing to apply", nrows>=2 and len(pg.query_selector_all("#schemaView .tblrow input.keepbox:checked"))==nrows and pg.is_disabled("#btnDiscardApply"))
+    pg.click("#schemaView .tblrow:first-child input.keepbox"); first=pg.query_selector("#schemaView .tblrow:first-child")
+    check("unticking shows a note box and enables Apply without redrawing", first.query_selector("input.discardnote").is_visible() and not pg.is_disabled("#btnDiscardApply") and "1 unapplied" in pg.inner_text("#discardPending"))
+    pg.click("#btnDiscardApply"); pg.wait_for_timeout(300)
+    check("applying needs initials", "initials" in pg.inner_text("#discardMessage").lower())
+    pg.fill("#discardActor","JV"); pg.click("#btnDiscardApply"); pg.wait_for_timeout(300)
+    check("applying needs a note for each discarded table", "note" in pg.inner_text("#discardMessage").lower())
+    pg.fill("#schemaView .tblrow:first-child input.discardnote","fabricated test reason"); pg.click("#btnDiscardApply"); pg.wait_for_timeout(1500)
+    check("after Apply the table is shown discarded, with its note, and nothing is pending", "discarded" in pg.inner_text("#schemaView .tblrow:first-child summary") and pg.input_value("#schemaView .tblrow:first-child input.discardnote")=="fabricated test reason" and pg.is_disabled("#btnDiscardApply"))
+    pg.click("#schemaView .tblrow:first-child input.keepbox"); pg.click("#btnDiscardApply"); pg.wait_for_timeout(1500)
+    check("ticking it again and applying brings it back", "discarded" not in pg.inner_text("#schemaView .tblrow:first-child summary"))
     # a base in db but not config: ingest base 2
     pg.fill("#baseId","appSampleBase002"); pg.click("#btnIngest"); pg.wait_for_timeout(1500)
     check("db-only base listed by ID", "appSampleBase002" in labels("#resBase"), labels("#resBase"))

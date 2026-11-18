@@ -51,6 +51,15 @@
     <a id="lnkFieldCsv" class="btnlink" href="/api/export/field_options.csv">Download fields and settings .csv</a>
     <a id="lnkTableCsv" class="btnlink" href="/api/export/tables.csv">Download tables .csv</a>
     <a id="lnkViewCsv" class="btnlink" href="/api/export/views.csv">Download views .csv</a></div>
+  <p class="hint">Untick a table to <b>discard</b> it and say why. A discarded table is ignored from here on: it is left out of the load order, the dependency graph, the load order report, link directions, profiling and attachment downloads, and the links to it are dropped. It still appears in the tables download, marked discarded with your note. Nothing is saved until you press <b>Apply</b>; tick it again and apply to bring it back.</p>
+  <div class="row">
+    <label for="discardActor">Your initials</label>
+    <input id="discardActor" type="text" class="short" maxlength="40" placeholder="e.g. JV" autocomplete="off">
+    <button id="btnDiscardApply" type="button" class="primary" disabled>Apply keep/discard choices</button>
+    <button id="btnDiscardReset" type="button" disabled>Reset</button>
+    <span id="discardPending" class="hint">No unapplied changes</span>
+  </div>
+  <div id="discardMessage" class="msg"></div>
   <div id="schemaView" class="schema"></div>
 </section>
 
