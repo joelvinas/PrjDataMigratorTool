@@ -46,19 +46,30 @@ def state(t, stage="dev"): return post("/api/loadtable/check", {"base_id": BASE,
 
 # ------------------------------------------------------------------ nothing configured yet
 s, r = call("GET", "/api/loadtable/setup?base_id=" + BASE)
-check("with no Workfront settings the page is told so plainly, and the picker still lists the in-scope tables", s == 200 and r["configured"] is False and "not configured" in (r["problem"] or "") and [t["table_id"] for t in r["tables"]] == ["tB", "tC", "tA", "tE"], r)
+check("with no Workfront settings the page is told so plainly, and the picker still lists the in-scope tables", s == 200 and r["configured"] is False and "No Planning stage is configured" in (r["problem"] or "") and [t["table_id"] for t in r["tables"]] == ["tB", "tC", "tA", "tE"], r)
 s, r = post("/api/loadtable/check", {"base_id": BASE, "table_id": "tC", "stage": "dev"})
 check("a check without settings is refused with the reason, and no job exists", s == 400 and "not configured" in r["error"] and call("GET", "/api/loadtable/status")[1] == {"job": None}, r)
 
 orig = fx.set_config()
 try:
     s, r = call("GET", "/api/loadtable/setup?base_id=" + BASE)
-    check("setup shows the Workspace ID, the stages and the typed reset phrases, and says configured; the token is not in it", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["stages"] == ["dev", "uat"]
-          and r["phrases"] == {"dev": "DELETE RECORDS IN DEV", "uat": "DELETE RECORDS IN UAT"} and TOKEN not in json.dumps(r), r)
+    check("setup shows the stages the user defined in config.json (lower case) with their Workspace IDs and the typed phrases, and says configured; no token", s == 200 and r["configured"] and r["stages"] == ["dev", "uat", "production"]
+          and r["stage_info"] == {"dev": {"workspace_id": "wsDev"}, "uat": {"workspace_id": "wsMissing"}, "production": {"workspace_id": "wsProd"}} and r["phrases"]["production"] == "DELETE RECORDS IN PRODUCTION"
+          and r["production_phrase"] == "CREATE IN PRODUCTION" and TOKEN not in json.dumps(r), r)
     check("the picker rows carry scope, target and name approval, in-scope tables only (Hidden is absent)", all(t["scope"] == "in" and t["target"] == "planning_only" and t["name_approved"] for t in r["tables"]) and "tD" not in [t["table_id"] for t in r["tables"]])
     s, r = call("GET", "/api/loadtable/setup?base_id=appNoSuchBase1")
-    check("a base the database does not know still shows the Workspace ID and the settings, with the problem in plain words", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["tables"] == [], r)
-    check("a stage other than dev or uat is refused", post("/api/loadtable/check", {"base_id": BASE, "table_id": "tC", "stage": "production"})[0] == 400)
+    check("a base the database does not know still shows the stages and the settings, with the problem in plain words", s == 200 and r["configured"] and r["stages"] and r["tables"] == [], r)
+    s, r = post("/api/loadtable/check", {"base_id": BASE, "table_id": "tC", "stage": "qa"})
+    check("a stage that is not defined in config.json is refused and the defined ones are named", s == 400 and "not defined" in r["error"] and "dev, uat, production" in r["error"], r)
+    s, w = post("/api/loadtable/workspace", {"stage": "dev"})
+    check("the Workspace read proves the token and the Workspace ID and returns the Workspace's name", s == 200 and w["ok"] and w["name"] == "Rehearsal Workspace" and w["workspace_id"] == "wsDev" and TOKEN not in json.dumps(w), w)
+    s, w = post("/api/loadtable/workspace", {"stage": "uat"})
+    check("a Workspace ID Workfront does not know says to correct workspace_id in config.json", s == 200 and not w["ok"] and w["fix"] == "workspace_id" and "workspace_id" in w["problem"], w)
+    fake.reject = True
+    s, w = post("/api/loadtable/workspace", {"stage": "dev"})
+    fake.reject = False
+    check("a refused (expired) token says tokens last 24 hours and to paste a new bearer_token, without echoing it", s == 200 and not w["ok"] and w["fix"] == "token" and "24 hours" in w["problem"] and TOKEN not in json.dumps(w), w)
+    check("the Workspace read for an undefined stage is refused", post("/api/loadtable/workspace", {"stage": "qa"})[0] == 400)
     check("a bad table or base is refused", post("/api/loadtable/check", {"base_id": BASE, "table_id": "tZ", "stage": "dev"})[0] == 404 and post("/api/loadtable/check", {"base_id": "x y", "table_id": "tC"})[0] == 400
           and post("/api/loadtable/check", {"base_id": BASE, "table_id": "", "stage": "dev"})[0] == 400)
 
@@ -162,6 +173,20 @@ try:
           and not fake.store[state("tC")["steps"]["structure"]["record_type"]], j)
     sC = state("tC")
     check("afterwards the table can be loaded again from step 3", sC["gates"]["can_records"] and not sC["steps"]["records"]["complete"] and sC["steps"]["structure"]["done"], sC["steps"])
+
+    # ---- the production stage: its own Workspace, and a typed phrase on top of the confirmation
+    n0 = len(fake.reqs)
+    s, r, j = run("structure", "tC", stage="production")
+    check("a dry run at the production stage needs no phrase and sends nothing", s == 200 and j["result"]["dry_run"] and j["workspace_id"] == "wsProd" and len(fake.reqs) == n0, (s, r))
+    for label, body in (("only the confirmation", {"confirm": conf("tC", "production", "wsProd")}), ("a wrong phrase", {"confirm": conf("tC", "production", "wsProd"), "phrase": "create in production"}), ("the dev Workspace", {"confirm": conf("tC", "production", "wsDev"), "phrase": "CREATE IN PRODUCTION"})):
+        s, r = start("structure", "tC", True, "production", **body)
+        check("a send to production with %s is refused and sends nothing" % label, s == 400 and len(fake.reqs) == n0, (s, r))
+    rts = len(fake.posts("/record-types"))
+    s, r = start("structure", "tC", True, "production", confirm=conf("tC", "production", "wsProd"), phrase="CREATE IN PRODUCTION")
+    j = poll()
+    check("with the phrase and the matching confirmation the production stage creates its own record type, separate from dev", s == 200 and j["status"] == "done" and j["result"]["counts"] == {"created": 2} and len(fake.posts("/record-types")) == rts + 1, j)
+    s, r = start("reset", "tC", True, "production", confirm=conf("tC", "production", "wsProd"), phrase="DELETE RECORDS IN DEV")
+    check("a production reset needs its own phrase", s == 400 and "DELETE RECORDS IN PRODUCTION" in r["error"], r)
 
     # ---- what must never leave
     text = "\n".join(seen)

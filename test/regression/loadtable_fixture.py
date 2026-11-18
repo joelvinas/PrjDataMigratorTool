@@ -16,15 +16,21 @@ class Fake(object):
         self.lock = threading.Lock()
         self.reset()
     def reset(self):
-        self.reqs, self.n, self.r, self.store, self.refuse_fields, self.delay, self.bad_auth = [], 0, 0, {}, set(), 0.0, 0
+        self.reqs, self.n, self.r, self.store, self.refuse_fields, self.delay, self.bad_auth, self.reject = [], 0, 0, {}, set(), 0.0, 0, False
+        self.workspaces = {"wsDev": "Rehearsal Workspace", "wsProd": "Live Workspace"}      # a Workspace ID that is not here answers 404
     def handle(self, m, path, body, auth):
         with self.lock:
             self.reqs.append((m, path, body))
+            if self.reject:                                               # an expired token: refused, and not counted as a mistake of the app
+                return 401, {"error": "token expired"}
             if auth != "Bearer " + TOKEN:
                 self.bad_auth += 1
                 return 401, {"error": "no"}
             u = path.split("?")[0]
             self.n += 1
+            if m == "GET" and u.rsplit("/", 2)[-2] == "workspaces":
+                wid = u.rsplit("/", 1)[-1]
+                return (200, {"id": wid, "name": self.workspaces[wid]}) if wid in self.workspaces else (404, {"error": "NOT_FOUND"})
             if m == "POST" and u.endswith("/record-types"): return 201, {"id": "RT%d" % self.n, "displayName": body["displayName"]}
             if m == "POST" and u.endswith("/fields"):
                 if body["displayName"] in self.refuse_fields: return 400, {"error": "VALIDATION_FAILED for Bearer " + TOKEN}
@@ -69,7 +75,8 @@ def set_config():
     """Add the Planning settings (pointing at the fake) to config.json; returns the original text so the caller can put it back."""
     orig = open("config.json", encoding="utf-8").read()
     cfg = json.loads(orig)
-    cfg["workfront"] = {"planning": {"base_url": "http://127.0.0.1:%d" % PORT, "bearer_token": TOKEN, "workspace_id": "wsDev", "record_batch_size": 2}}
+    one = lambda ws: {"base_url": "http://127.0.0.1:%d" % PORT, "bearer_token": TOKEN, "workspace_id": ws, "record_batch_size": 2}
+    cfg["workfront"] = {"planning": {"DEV": one("wsDev"), "UAT": one("wsMissing"), "production": one("wsProd")}}      # the user's own stage blocks; UAT points at a Workspace that does not exist
     json.dump(cfg, open("config.json", "w"))
     return orig
 

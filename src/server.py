@@ -5353,12 +5353,19 @@ def _lt_args(body):
 def api_loadtable_setup(q):
     """What the page needs before a table is chosen: whether Planning is configured (yes or no, never a secret), the Workspace ID to show, the stages, the typed reset phrases and
     the in-scope tables for the base."""
-    out = {"configured": False, "problem": None, "workspace_id": "", "stages": list(loadrun.PLANNING_STAGES), "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "tables": []}
-    try:
-        out["workspace_id"] = tableload.planning_context(CONFIG_PATH, "dev", False).ws
-        out["configured"] = True
-    except tableload.LoadError as e:
-        out["problem"] = e.message
+    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
+    try:                                      # the stages are the ones the user defined in config.json (workfront.planning); only their Workspace IDs are shown, never a token
+        data = loadconfig.read_config(CONFIG_PATH)
+        for st in loadconfig.planning_blocks(data):
+            c = loadconfig.credentials(data, "planning", st)
+            if c is not None and c.workspace_id:
+                out["stages"].append(st)
+                out["stage_info"][st] = {"workspace_id": c.workspace_id}
+        out["configured"] = bool(out["stages"])
+        if not out["configured"]:
+            out["problem"] = "No Planning stage is configured in config.json (section workfront.planning: one block each for dev, uat or production, with base_url, bearer_token and workspace_id)."
+    except loadconfig.ConfigError as e:
+        out["problem"] = str(e)
     base = (q.get("base_id") or [""])[0]
     if base:
         try:
@@ -5375,6 +5382,14 @@ def api_loadtable_check(body):
     ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
     with db() as conn:
         return _lt_out(_lt_call(tableload.check_table, conn, base, table, ctx, extract_dir()))
+
+
+def api_loadtable_workspace(body):
+    """Prove the chosen stage's token and Workspace ID with one read of the Workspace, and return its name. A failure says which value in config.json to change."""
+    stage = str(body.get("stage") or "dev").strip().lower()
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
+    tr = _lt_call(tableload.transport, ctx)
+    return _lt_out(tableload.workspace_status(ctx, tr))
 
 
 def api_loadtable_mapping(body):
@@ -5401,6 +5416,7 @@ class LoadJob:
         self.status, self.error, self.result, self.progress = "running", None, None, {}
         self.started_at, self.finished_at = utc_now(), None
         self.cancel = threading.Event()
+        self.confirm = None
 
     def set_progress(self, p):
         self.progress = dict(p)
@@ -5413,7 +5429,7 @@ _loadjob_lock = threading.Lock()
 def _run_load_job(job):
     secrets = _lt_secrets()
     try:
-        ctx = tableload.planning_context(CONFIG_PATH, job.stage, job.send)
+        ctx = tableload.planning_context(CONFIG_PATH, job.stage, job.send, job.confirm)
         tr = tableload.transport(ctx)
         stop = job.cancel.is_set
         with db(job.db_path) as conn:
@@ -5444,7 +5460,13 @@ def api_loadtable_start(body):
     if step not in LT_GATE:
         raise AppError("Unknown step.")
     send = body.get("send") is True
-    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, send)
+    confirm = None
+    if send and stage == "production":          # a real send to the production stage needs a typed phrase on top of the confirmation
+        want = loadreset.phrase(stage) if step == "reset" else loadrun.PRODUCTION_PHRASE
+        if body.get("phrase") != want:
+            raise AppError("Sending to the production stage needs the exact phrase: %s" % want)
+        confirm = loadrun.PRODUCTION_PHRASE
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, send, confirm)
     with db() as conn:
         st = _lt_call(tableload.check_table, conn, base, table, ctx, extract_dir())
     _lt_call(tableload.need, st["gates"], LT_GATE[step], tableload.GATE_MESSAGE[LT_GATE[step]])
@@ -5461,6 +5483,7 @@ def api_loadtable_start(body):
         if cur and cur.status == "running":
             raise AppError("A load step is already running (%s, table %s). Wait for it to finish or cancel it." % (cur.step, cur.table_id), 409)
         job = LoadJob(step, send, base, table, stage, ctx.ws, STATE["db_path"])
+        job.confirm = confirm
         LOADJOB["current"] = job
     threading.Thread(target=_run_load_job, args=(job,), daemon=True).start()
     return {"started": True, "job_id": job.id, "step": step, "send": send}
@@ -5517,7 +5540,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
-               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel,
+               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/names/settings": api_names_settings,

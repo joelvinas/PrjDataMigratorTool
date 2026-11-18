@@ -49,21 +49,52 @@ class Ctx(object):
         self.secrets = lc.secret_values(data)
 
 
-def planning_context(config_path, stage, send):
+def planning_context(config_path, stage, send, confirm=None):
+    """The settings for one Planning stage. The stages are the ones the user defined in config.json (workfront.planning, one block each); a real send to `production` also needs
+    the exact confirmation phrase (`confirm`)."""
     try:
         data = lc.read_config(config_path)
     except lc.ConfigError as e:
         raise LoadError(str(e))
-    creds = lc.credentials(data, "planning")
+    stage = str(stage or "").strip().lower()
+    defined = list(lc.planning_blocks(data))
+    if defined and stage not in defined:
+        raise LoadError("The stage %s is not defined in %s (section workfront.planning). Defined stages: %s." % (stage or "(none)", config_path, ", ".join(defined)))
+    creds = lc.credentials(data, "planning", stage)
     if creds is None or not creds.workspace_id:
         raise LoadError("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % config_path)
     try:
-        env = lr.resolve_environment(stage, None, dry_run=not send, workspace_id=creds.workspace_id)
+        env = lr.resolve_environment(stage, confirm, dry_run=not send, workspace_id=creds.workspace_id)
     except ValueError as e:
         raise LoadError(str(e))
     if env.name not in lr.PLANNING_STAGES:
         raise LoadError("The Planning stage must be one of: %s." % ", ".join(lr.PLANNING_STAGES))
     return Ctx(data, creds, stage, env)
+
+
+def workspace_status(ctx, tr):
+    """Prove the stage's token and Workspace ID with one read of the Workspace. Returns {ok, name, workspace_id, problem, fix}; `fix` says which config.json value to change:
+    'token' (refused: tokens last 24 hours), 'workspace_id' (not found) or 'base_url' (cannot be reached). Never raises, never echoes a secret."""
+    out = {"ok": False, "name": None, "workspace_id": ctx.ws, "stage": ctx.stage, "problem": None, "fix": None}
+    try:
+        w = tr.get_workspace(ctx.ws)
+    except wh.HttpError as e:
+        st = e.status
+        if st in (401, 403):
+            out.update(fix="token", problem="Workfront refused the bearer token for stage %s. Tokens last 24 hours: paste a new bearer_token for this stage into config.json." % ctx.stage)
+        elif st == 404:
+            out.update(fix="workspace_id", problem="Workfront has no Workspace with the workspace_id for stage %s. Correct workspace_id in config.json." % ctx.stage)
+        elif st is None:
+            out.update(fix="base_url", problem="Could not reach Workfront for stage %s. Check base_url in config.json and your connection." % ctx.stage)
+        else:
+            out.update(fix="token", problem="Workfront answered the Workspace check for stage %s with an error (HTTP %s). Check bearer_token and workspace_id in config.json." % (ctx.stage, st))
+        return out
+    except Exception as e:
+        out.update(fix="base_url", problem="The Workspace check for stage %s failed: %s" % (ctx.stage, lr.scrub(e)))
+        return out
+    name = w.get("name") or w.get("displayName")
+    out.update(ok=True, name=str(name) if name else "(no name returned)")
+    return out
 
 
 def transport(ctx, opener=None):

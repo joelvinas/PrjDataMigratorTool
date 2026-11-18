@@ -24,8 +24,8 @@ import re
 
 SANDBOX, PRODUCTION = "sandbox1", "production"
 CORE_ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core: Sandbox 1 (SB01), Sandbox 2 (SB02), Preview, Production (my)
-PLANNING_STAGES = ("dev", "uat")                                          # Planning has no environments, only Workspaces: Dev is wiped and recreated as UAT, or promoted
-ENVIRONMENTS = CORE_ENVIRONMENTS + PLANNING_STAGES
+PLANNING_STAGES = ("dev", "uat", "production")                                          # Planning has no environments, only Workspaces: Dev is wiped and recreated as UAT, or promoted
+ENVIRONMENTS = CORE_ENVIRONMENTS + tuple(s for s in PLANNING_STAGES if s not in CORE_ENVIRONMENTS)   # "production" is both a Core environment and a Planning stage; rows also carry their system and Workspace
 PRODUCTION_PHRASE = "CREATE IN PRODUCTION"
 ENV_COLUMN = {"sandbox1": "DEV", "sandbox2": "DEV", "preview": "DEV", "production": "PROD", "dev": "DEV", "uat": "UAT"}        # the environment names used by workfront_fields and field_crosswalk
 _SECRET = re.compile(r"(?i)(authorization\s*[=:]\s*(?:bearer\s+|basic\s+)?\S+|bearer\s+\S+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}"

@@ -22,6 +22,7 @@ import json, os
 
 SYSTEMS = ("core", "planning")
 ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core only (SB01, SB02, Preview, my); Planning uses Workspaces
+PLANNING_STAGES = ("dev", "uat", "production")   # the stage names Planning rows can be stored under (the database allows these); config.json decides which exist
 SECRET_KEYS = ("bearer_token", "api_key")
 PLACEHOLDERS = ("PASTE", "REPLACE", "XXXX", "YOURCOMPANY")
 PLANNING_DEFAULT_API_PATH = "/maestro/api"      # the documented base pattern https://{customer-domain}/maestro/api
@@ -72,13 +73,36 @@ def read_config(path):
     return data
 
 
+def planning_blocks(data):
+    """{stage: settings block} for Workfront Planning, stages in the order dev, uat, production. The user defines them in config.json under workfront.planning, one block per
+    stage ("DEV", "dev" and "Dev" are the same), each with its own base_url, bearer_token and workspace_id. An older config whose planning block holds base_url directly is one
+    block that serves dev and uat."""
+    p = (data.get("workfront") or {}).get("planning")
+    if not isinstance(p, dict):
+        return {}
+    if "base_url" in p:
+        return {"dev": p, "uat": p}
+    out = {}
+    for k, v in p.items():
+        if isinstance(v, dict) and str(k).strip().lower() in PLANNING_STAGES:
+            out[str(k).strip().lower()] = v
+    return {s: out[s] for s in PLANNING_STAGES if s in out}
+
+
 def credentials(data, system, environment=None):
     """SystemCredentials, or None when the block is missing, incomplete or still holds a placeholder. Core needs an environment (sandbox1, sandbox2,
-    preview or production); Planning has none (it uses a Workspace), so its block is read as it is and carries the workspace_id."""
+    preview or production). Planning takes its STAGE (dev, uat or production) as `environment`; with none given the first stage defined in config.json is used. A Planning
+    block carries its own base_url, bearer_token and workspace_id."""
     if system not in SYSTEMS or (system == "core" and environment not in ENVIRONMENTS):
         raise ConfigError("Unknown system or environment.")
     wf = data.get("workfront") or {}
-    block = ((wf.get("core") or {}).get(environment) if system == "core" else wf.get("planning"))
+    if system == "planning":
+        blocks = planning_blocks(data)
+        stage = str(environment).strip().lower() if environment else (next(iter(blocks), None))
+        block = blocks.get(stage)
+        environment = stage
+    else:
+        block = (wf.get("core") or {}).get(environment)
     if not isinstance(block, dict):
         return None
     url = str(block.get("base_url") or "").strip().rstrip("/")
@@ -98,8 +122,9 @@ def credentials(data, system, environment=None):
 def status(data):
     """What is configured, as yes/no only. Safe to print or log: {"core": {"<environment>": bool, ...}, "planning": bool,
     "planning_workspace": bool}."""
-    p = credentials(data, "planning")
-    return {"core": {e: credentials(data, "core", e) is not None for e in ENVIRONMENTS}, "planning": p is not None, "planning_workspace": bool(p and p.workspace_id)}
+    ps = {s: credentials(data, "planning", s) for s in planning_blocks(data)}
+    return {"core": {e: credentials(data, "core", e) is not None for e in ENVIRONMENTS}, "planning": any(c is not None for c in ps.values()), "planning_workspace": any(c is not None and bool(c.workspace_id) for c in ps.values()),
+            "planning_stages": {s: (c is not None and bool(c.workspace_id)) for s, c in ps.items()}}
 
 
 def secret_values(data):
@@ -107,7 +132,7 @@ def secret_values(data):
     out = set()
     if _real(data.get("token") or data.get("airtable_pat")):
         out.add(str(data.get("token") or data.get("airtable_pat")).strip())
-    for c in [credentials(data, "core", e) for e in ENVIRONMENTS] + [credentials(data, "planning")]:
+    for c in [credentials(data, "core", e) for e in ENVIRONMENTS] + [credentials(data, "planning", s) for s in planning_blocks(data)]:
         if c:
             out.add(c.secret())
     return out

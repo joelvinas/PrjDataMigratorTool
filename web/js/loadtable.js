@@ -3,7 +3,8 @@
    Everything shown is an ID, a schema name, a count, a status or a short scrubbed reason: never a record value and never a token (the token never leaves the server).
    Nothing runs when the page opens. Every send goes through a confirmation that names the table, the stage and the Workspace ID. */
 const lt = {
-  setup: null,        // {configured, problem, workspace_id, stages, phrases, tables}
+  setup: null,        // {configured, problem, stages, stage_info, phrases, production_phrase, tables}
+  wsOk: false,        // the Workspace read succeeded for the chosen stage: the steps stay locked until it does
   st: null,           // the last check: {check, steps, gates}
   dry: {},            // which dry runs were done in this visit (a send needs its dry run first); cleared when the choice changes
   job: null,          // the job being followed
@@ -12,6 +13,7 @@ const lt = {
 };
 const baseNow = () => $("baseId").value.trim();
 const stageNow = () => $("stageSel").value;
+const wsNow = () => ((lt.setup && lt.setup.stage_info && lt.setup.stage_info[stageNow()]) || {}).workspace_id || "";
 const tableNow = () => $("tableSel").value;
 const tableRow = () => ((lt.setup && lt.setup.tables) || []).find((t) => t.table_id === tableNow());
 const tableName = () => { const t = tableRow(); return t ? t.name : tableNow(); };
@@ -35,8 +37,9 @@ function pill(n, text, cls) { const p = $("pill" + n); p.textContent = text; p.c
 function applyGates() {
   const g = lt.st ? lt.st.gates : {}, s = lt.st ? lt.st.steps : null;
   const busy = !!(lt.job && lt.job.status === "running");
-  const on = (id, v) => { $(id).disabled = !v; };
-  on("btnCheck", !!baseNow() && !!tableNow() && !!lt.setup && lt.setup.configured && !busy);
+  const set = (id, v) => { $(id).disabled = !v; };
+  const on = (id, v) => set(id, !!v && lt.wsOk);          // every step except Check waits for the Workspace read
+  set("btnCheck", !!baseNow() && !!tableNow() && !!lt.setup && lt.setup.configured && !busy);
   on("btnStructDry", g.can_structure && !busy);
   on("btnStructSend", g.can_structure && lt.dry.structure && !busy);
   on("btnFile", g.can_records && !busy);
@@ -75,7 +78,12 @@ async function loadSetup() {
   const d = await api("GET", "/api/loadtable/setup?base_id=" + encodeURIComponent(baseNow()));
   lt.setup = d;
   showGlobalError("");
-  $("wsId").textContent = d.workspace_id || "(not configured)";
+  const sel0 = $("stageSel"), keepStage = sel0.value;
+  clear(sel0);
+  if (!d.stages.length) sel0.appendChild(el("option", { value: "", text: "(none defined)" }));
+  d.stages.forEach((s) => sel0.appendChild(el("option", { value: s, text: s })));
+  sel0.value = d.stages.includes(keepStage) ? keepStage : (d.stages[0] || "");
+  $("wsId").textContent = wsNow() || "(not configured)";
   setMsg("pageMessage", d.configured ? (d.tables_problem || "") : d.problem + " Add the Planning settings to config.json (see config.example.json), then reload this page.", d.configured && !d.tables_problem ? "" : d.configured ? "warn" : "err");
   const sel = $("tableSel"), keep = sel.value;
   clear(sel);
@@ -83,7 +91,24 @@ async function loadSetup() {
   d.tables.forEach((t) => sel.appendChild(el("option", { value: t.table_id, text: t.name + " (" + t.table_id + ") - " + (t.name_approved ? "name approved" : "name NOT approved") })));
   sel.value = d.tables.some((t) => t.table_id === keep) ? keep : "";
   resetChoice();
+  await checkWorkspace();
   await followRunningJob();
+}
+
+/* ---------- the Workspace badge: one read of the Workspace proves the token and the Workspace ID ---------- */
+function setBadge(text, cls) { const b = $("wsBadge"); b.textContent = text; b.className = "badge" + (cls ? " " + cls : ""); }
+async function checkWorkspace() {
+  lt.wsOk = false;
+  $("wsId").textContent = wsNow() || "(not configured)";
+  if (!lt.setup || !lt.setup.configured || !stageNow()) { setBadge("Workspace: not configured", "bad"); applyGates(); return; }
+  setBadge("Workspace: checking...", "");
+  applyGates();
+  let w;
+  try { w = await api("POST", "/api/loadtable/workspace", { stage: stageNow() }); } catch (e) { setBadge("Workspace: not checked", "bad"); setMsg("pageMessage", e.message, "err"); applyGates(); return; }
+  lt.wsOk = !!w.ok;
+  setBadge(w.ok ? "Workspace: " + w.name : "Workspace: not reachable", w.ok ? "ok" : "bad");
+  setMsg("pageMessage", w.ok ? "" : w.problem, w.ok ? "" : "err");
+  applyGates();
 }
 
 /* ---------- step 1 and the state of every step ---------- */
@@ -133,13 +158,19 @@ async function loadMap() {
 function askConfirm(what, step) {
   return new Promise((resolve) => {
     const dlg = $("confirmDlg");
+    const prod = stageNow() === "production" && step !== "reset";       // the reset already needs its own typed phrase
+    $("confirmPhraseRow").hidden = !prod;
+    $("confirmPhrase").value = "";
+    $("confirmPhraseShown").textContent = lt.setup.production_phrase;
+    $("confirmYes").disabled = prod;
+    $("confirmPhrase").oninput = () => { $("confirmYes").disabled = prod && $("confirmPhrase").value !== lt.setup.production_phrase; };
     $("confirmTitle").textContent = step === "reset" ? "Delete records in Workfront" : "Send to Workfront";
     $("confirmText").textContent = what;
     $("confirmTable").textContent = tableName() + " (" + tableNow() + ")";
     $("confirmStage").textContent = stageNow().toUpperCase();
-    $("confirmWs").textContent = lt.setup.workspace_id;
+    $("confirmWs").textContent = wsNow() + ($("wsBadge").textContent.startsWith("Workspace: ") && lt.wsOk ? " (" + $("wsBadge").textContent.slice(11) + ")" : "");
     const done = (v) => { dlg.close(); $("confirmYes").onclick = null; $("confirmNo").onclick = null; dlg.onclose = null; resolve(v); };
-    $("confirmYes").onclick = () => done(true);
+    $("confirmYes").onclick = () => done(prod ? $("confirmPhrase").value : true);
     $("confirmNo").onclick = () => done(false);
     dlg.onclose = () => resolve(false);
     dlg.showModal();
@@ -155,10 +186,12 @@ const WHAT = {
 };
 
 async function startJob(step, send, extra) {
-  if (send && !(await askConfirm(WHAT[step], step))) return;
+  let typed = null;
+  if (send) { typed = await askConfirm(WHAT[step], step); if (!typed) return; }
   setMsg("pageMessage", "", "");
   const b = body({ step, send });
-  if (send) b.confirm = { table_id: tableNow(), stage: stageNow(), workspace_id: lt.setup.workspace_id };
+  if (send) b.confirm = { table_id: tableNow(), stage: stageNow(), workspace_id: wsNow() };
+  if (typeof typed === "string") b.phrase = typed;
   Object.assign(b, extra || {});
   const r = await api("POST", "/api/loadtable/start", b);
   lt.job = { id: r.job_id, status: "running", step, send, progress: {} };
@@ -259,7 +292,7 @@ startPage("loadtable", { afterConnect }, () => {
   initBaseCombo();
   ["reasonGrid", "depGrid", "structGrid", "mapGrid", "recFailGrid", "waitGrid", "linkFailGrid"].forEach(watchSort);
   $("baseId").addEventListener("input", guarded(loadSetup));
-  $("stageSel").addEventListener("change", () => { resetChoice(); });
+  $("stageSel").addEventListener("change", () => { resetChoice(); guarded(checkWorkspace)(); });
   $("tableSel").addEventListener("change", () => { resetChoice(); });
   $("btnCheck").addEventListener("click", guarded(async () => { showGlobalError(""); await refreshState(true); if (lt.st.steps.structure.record_type || lt.st.steps.structure.created) await loadMap(); }));
   $("btnStructDry").addEventListener("click", guarded(() => startJob("structure", false)));

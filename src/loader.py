@@ -128,7 +128,7 @@ def _run(a, opener=None):
         data = lc.read_config(a.config)
     except lc.ConfigError as e:
         sys.exit(str(e))
-    creds = {s: lc.credentials(data, s, a.core_env if s == "core" else None) for s in systems}
+    creds = {s: lc.credentials(data, s, a.core_env if s == "core" else a.planning_stage) for s in systems}
     missing = [("Core (%s)" % a.core_env) if s == "core" else "Planning" for s in systems if creds[s] is None]
     if missing:
         sys.exit("Not configured in %s: %s. Run 'config' to see what is set (yes or no only)." % (a.config, ", ".join(missing)))
@@ -188,11 +188,11 @@ def _records(a, opener=None):
         data = lc.read_config(a.config)
     except lc.ConfigError as e:
         sys.exit(str(e))
-    creds = lc.credentials(data, "planning")
+    creds = lc.credentials(data, "planning", a.planning_stage)
     if creds is None or not creds.workspace_id:
-        sys.exit("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % a.config)
+        sys.exit("Planning is not configured for stage %s in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % (a.planning_stage, a.config))
     try:
-        env = lr.resolve_environment(a.planning_stage, None, dry_run=not a.send, workspace_id=creds.workspace_id)
+        env = lr.resolve_environment(a.planning_stage, a.confirm, dry_run=not a.send, workspace_id=creds.workspace_id)
     except ValueError as e:
         sys.exit(str(e))
     secrets = lc.secret_values(data)
@@ -252,11 +252,11 @@ def _reset(a, opener=None):
         data = lc.read_config(a.config)
     except lc.ConfigError as e:
         sys.exit(str(e))
-    creds = lc.credentials(data, "planning")
+    creds = lc.credentials(data, "planning", a.planning_stage)
     if creds is None or not creds.workspace_id:
-        sys.exit("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % a.config)
+        sys.exit("Planning is not configured for stage %s in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % (a.planning_stage, a.config))
     try:
-        env = lr.resolve_environment(a.planning_stage, None, dry_run=not a.send, workspace_id=creds.workspace_id)
+        env = lr.resolve_environment(a.planning_stage, lr.PRODUCTION_PHRASE if a.confirm == rs.phrase(a.planning_stage) else None, dry_run=not a.send, workspace_id=creds.workspace_id)
     except ValueError as e:
         sys.exit(str(e))
     need = rs.phrase(env.name)
@@ -437,7 +437,8 @@ def main(argv=None, opener=None):
     pr.add_argument("--send", action="store_true", help="actually create records in Workfront. Without it nothing is sent")
     pr.add_argument("--config", default="config.json")
     pr.add_argument("--extract-dir", default="data_extract", help="where the saved record files are (default: data_extract)")
-    pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
+    pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES, help="a stage defined in config.json (workfront.planning)")
+    pr.add_argument("--confirm", default=None, help="the exact phrase a real send to the production stage needs: %s" % lr.PRODUCTION_PHRASE)
     pr.add_argument("--table", dest="tables", action="append", metavar="TABLE_ID", help="limit the run to this table (repeatable); a run filter only, scope is not changed")
     pr.add_argument("--pass", dest="pass_name", default="both", choices=("both", "records", "links"))
     pr.add_argument("--batch", type=int, default=None, help="records per call (default: record_batch_size in config.json, else %d)" % rl.BATCH_DEFAULT)
@@ -483,7 +484,7 @@ def main(argv=None, opener=None):
         except lc.ConfigError as e:
             sys.exit(str(e))
         yn = lambda b: "configured" if b else "not configured"
-        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  Core %-12s %s" % (e, yn(st["core"][e])) for e in lc.ENVIRONMENTS] +                 ["  Planning              %s" % yn(st["planning"]), "  Planning workspace ID %s" % yn(st["planning_workspace"])]
+        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  Core %-12s %s" % (e, yn(st["core"][e])) for e in lc.ENVIRONMENTS] +                 ["  Planning %-10s   %s (token, address and Workspace ID)" % (s, yn(ok)) for s, ok in sorted(st["planning_stages"].items())] + ([] if st["planning_stages"] else ["  Planning              not configured"])
         print("\n".join(lines))
         return st
     if a.cmd == "run":

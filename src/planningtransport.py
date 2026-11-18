@@ -217,6 +217,11 @@ class PlanningTransport(object):
             return []
         return sorted(str(r["id"]) for r in self._pages(path) if isinstance(r, dict) and r.get("displayName") == item["name"] and r.get("id"))
 
+    def get_workspace(self, workspace_id=None):
+        """The Workspace record (GET /v2/workspaces/{id}, from the reference): used to prove the token works and that the Workspace ID exists, and to show its name."""
+        reply = self.http.request("GET", "/v2/workspaces/%s" % (workspace_id or self.workspace_id))
+        return reply if isinstance(reply, dict) else {}
+
     # ---- reading and deleting records, for a wipe (route and body from docs/WF_Planning_v2_API_simplified.yaml; not yet run against a real Workfront)
     def get_record_type(self, record_type_id):
         if not record_type_id:

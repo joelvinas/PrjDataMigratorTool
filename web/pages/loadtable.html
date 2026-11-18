@@ -12,6 +12,7 @@
   <div class="badges">
     <span id="tokenBadge" class="badge">Token: checking...</span>
     <span id="dbBadge" class="badge">Database: not connected</span>
+    <span id="wsBadge" class="badge" title="Proven with one read of the Workspace in Workfront Planning">Workspace: not checked</span>
   </div>
 </header>
 <div class="shell">
@@ -30,7 +31,7 @@
       <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
     </div>
     <label for="stageSel">Planning stage</label>
-    <select id="stageSel"><option value="dev">dev</option><option value="uat">uat</option></select>
+    <select id="stageSel"><option value="">(none defined)</option></select>
     <label for="wsId">Workspace ID</label>
     <output id="wsId" class="wsid" aria-live="polite">(not read yet)</output>
   </div>
@@ -39,7 +40,7 @@
     <select id="tableSel"><option value="">Choose a table...</option></select>
     <span id="tableInfo" class="hint"></span>
   </div>
-  <p class="hint">Loads <strong>one table</strong> into Workfront Planning, one step at a time. Each step opens only when the one before is done, and a step that sends anything asks you to confirm the table, the stage and the Workspace ID first. Nothing runs when this page opens. The Workspace ID is read from <code>config.json</code>; the token is never shown here. It uses the same code as <code>loader.py</code> (<code>run</code>, <code>records</code>, <code>reset</code> with <code>--table</code>), so a step done here and a step done from the command line leave the same record in the database.</p>
+  <p class="hint">Loads <strong>one table</strong> into Workfront Planning, one step at a time. Each step opens only when the one before is done, and a step that sends anything asks you to confirm the table, the stage and the Workspace ID first. Nothing is sent when this page opens; the only call it makes is one read of the Workspace to prove the token and Workspace ID work, and that unlocks the steps (the third green badge above). The stages (<code>dev</code>, <code>uat</code>, <code>production</code>) are the ones you define in <code>config.json</code> under <code>workfront.planning</code>, each with its own <code>base_url</code>, <code>bearer_token</code> and <code>workspace_id</code>; the Workspace name is fetched, not typed, and the token is never shown here. It uses the same code as <code>loader.py</code> (<code>run</code>, <code>records</code>, <code>reset</code> with <code>--table</code>), so a step done here and a step done from the command line leave the same record in the database.</p>
   <div id="pageMessage" class="msg"></div>
 </section>
 
@@ -127,6 +128,7 @@
   <form method="dialog">
     <h2 id="confirmTitle">Confirm</h2>
     <p id="confirmText"></p>
+    <div class="row" id="confirmPhraseRow" hidden><label for="confirmPhrase">Production: type <code id="confirmPhraseShown"></code></label><input id="confirmPhrase" type="text" maxlength="40" autocomplete="off"></div>
     <dl class="facts"><dt>Table</dt><dd id="confirmTable"></dd><dt>Stage</dt><dd id="confirmStage"></dd><dt>Workspace ID</dt><dd id="confirmWs"></dd></dl>
     <div class="row"><button id="confirmNo" type="button" value="cancel">Cancel</button><button id="confirmYes" type="button" class="primary">Confirm and send</button></div>
   </form>
