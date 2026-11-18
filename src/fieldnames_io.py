@@ -6,7 +6,7 @@
 The database is opened READ-ONLY. Only schema metadata and profile counts are read; record values are never touched. The reports hold
 names and counts only. Nothing here changes a name: every repair is a proposal in the report for a person to approve.
 
-Import CSV headers (case does not matter): field_id, old_name, new_name, new_label, old_dataType, new_dataType.
+Import CSV headers (case does not matter): field_id, base_id (optional), old_name, new_name, new_label, old_dataType, new_dataType.
   field_id        the stable Airtable field ID (the key)
   old_name        the Airtable name, used to detect a stale spreadsheet
   new_name        validated as BOTH the Planning name and the Core name (they are separate rule sets)
@@ -34,10 +34,19 @@ def _norm_type(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-def parse_import(text, db_fields):
-    """Match the spreadsheet to the database by field ID. Returns {manual, target_types, problems, rows}.
+def parse_import(text, db_fields, other_base_ids=(), base_id=None):
+    """Match the spreadsheet to the database. Returns {manual, target_types, problems, rows}.
+    A row is matched on field_id first; only when the ID is blank or not in this base is the name used, compared after trimming spaces at both
+    ends and only when exactly one field has that trimmed name (an ambiguous name is reported, never guessed). Nothing is renamed: the database
+    name is shown untrimmed in the problem text so the difference is visible.
+    A row belongs to another base when its field_id is in other_base_ids (field IDs the database holds under other bases) or when an optional
+    base_id column names a different base than base_id. Those rows are set aside and counted in ONE summary line.
     problems: list of {kind, severity (error|warn|info), field_id, detail}."""
     by_id = {f["field_id"]: f for f in db_fields}
+    by_name = {}
+    for f in db_fields:
+        by_name.setdefault((f["field_name"] or "").strip(), []).append(f["field_id"])
+    other = set(other_base_ids)
     problems, manual, target_types, seen = [], {}, {}, set()
     def prob(kind, sev, fid, detail):
         problems.append({"kind": kind, "severity": sev, "field_id": fid or "", "detail": detail})
@@ -50,22 +59,42 @@ def parse_import(text, db_fields):
         if c not in cols:
             prob("MISSING_COLUMN", "warn", "", "No %s column." % c)
     get = lambda row, c: (row.get(cols[c]) or "").strip() if c in cols else ""
-    n = 0
+    n, other_rows = 0, 0
     for n, row in enumerate(reader, start=2):               # row 1 is the header
         fid = get(row, "field_id")
-        if not fid:
-            prob("BLANK_FIELD_ID", "error", "", "Row %d has no field_id." % n)
+        row_base = get(row, "base_id")
+        if (row_base and base_id and row_base != base_id) or (fid and fid not in by_id and fid in other):
+            other_rows += 1
             continue
+        f = by_id.get(fid)
+        if f is None:
+            wanted = get(row, "old_name")
+            hits = by_name.get(wanted, []) if wanted else []
+            hits = [h for h in hits if h not in seen]
+            if len(hits) == 1:
+                f = by_id[hits[0]]
+                fid_note = fid
+                fid = f["field_id"]
+                prob("NAME_MATCH_ONLY", "warn", fid, "Row %d: %smatched on the trimmed name '%s'; the database name is '%s'. Check it is the same field." % (
+                    n, ("field_id '%s' is not in this base, so it was " % fid_note) if fid_note else "no field_id, so it was ", wanted, f["field_name"]))
+            elif len(hits) > 1:
+                prob("AMBIGUOUS_NAME", "error", fid, "Row %d: the name '%s' fits %d fields (%s); add the field_id." % (n, wanted, len(hits), ", ".join(sorted(hits))))
+                continue
+            elif not fid:
+                prob("BLANK_FIELD_ID", "error", "", "Row %d has no field_id and its name matches no field." % n)
+                continue
+            else:
+                prob("UNMATCHED_ID", "error", fid, "Row %d: this field_id is not in the database for the chosen base." % n)
+                continue
         if fid in seen:
             prob("DUPLICATE_ID", "error", fid, "Row %d repeats a field_id already seen; the first row is used." % n)
             continue
         seen.add(fid)
-        f = by_id.get(fid)
-        if f is None:
-            prob("UNMATCHED_ID", "error", fid, "Row %d: this field_id is not in the database for the chosen base." % n)
-            continue
         if "old_name" in cols and get(row, "old_name") != f["field_name"]:
-            prob("OLD_NAME_MISMATCH", "warn", fid, "Spreadsheet says '%s'; the database has '%s'. The field may have been renamed in Airtable." % (get(row, "old_name"), f["field_name"]))
+            if get(row, "old_name") == (f["field_name"] or "").strip():
+                prob("NAME_HAS_EDGE_SPACES", "info", fid, "The Airtable name is '%s' (with spaces at an end); the spreadsheet has it trimmed. They match." % f["field_name"])
+            else:
+                prob("OLD_NAME_MISMATCH", "warn", fid, "Spreadsheet says '%s'; the database has '%s'. The field may have been renamed in Airtable." % (get(row, "old_name"), f["field_name"]))
         if "old_datatype" in cols and get(row, "old_datatype") and _norm_type(get(row, "old_datatype")) != _norm_type(f["data_type"]):
             prob("OLD_TYPE_MISMATCH", "warn", fid, "Spreadsheet says '%s'; the database has '%s'." % (get(row, "old_datatype"), f["data_type"]))
         nm, lb = get(row, "new_name"), get(row, "new_label")
@@ -79,6 +108,8 @@ def parse_import(text, db_fields):
             target_types[fid] = get(row, "new_datatype")
     for fid in sorted(set(by_id) - seen):
         prob("MISSING_FROM_IMPORT", "warn", fid, "'%s' is in the database but not in the spreadsheet." % by_id[fid]["field_name"])
+    if other_rows:
+        prob("OTHER_BASE", "info", "", "%d row%s belong%s to another base and %s ignored." % (other_rows, "" if other_rows == 1 else "s", "s" if other_rows == 1 else "", "was" if other_rows == 1 else "were"))
     return {"manual": manual, "target_types": target_types, "problems": problems, "rows": len(seen)}
 
 
@@ -98,7 +129,8 @@ def load_db(path, base_id):
             saved = {r[0]: r[1] for r in c.execute("SELECT airtable_field_id, description FROM field_names WHERE description IS NOT NULL")}
         except sqlite3.OperationalError:
             notes.append("Migration 007 is not applied in this database: no approved table names, abandon decisions or saved descriptions were read.")
-        return {"fields": data["fields"], "tables": data["tables"], "approved_tables": approved, "abandoned": abandoned, "saved_descriptions": saved, "groups": groups, "notes": notes}
+        other = [r[0] for r in c.execute("SELECT DISTINCT field_id FROM airtable_fields WHERE base_id<>? ORDER BY field_id", (base_id,))]
+        return {"other_base_ids": other, "fields": data["fields"], "tables": data["tables"], "approved_tables": approved, "abandoned": abandoned, "saved_descriptions": saved, "groups": groups, "notes": notes}
     finally:
         c.close()
 
@@ -232,7 +264,7 @@ def main(argv=None):
     imp, notes = None, list(db["notes"])
     if a.imp:
         text, note = decode_csv(open(a.imp, "rb").read())
-        imp = parse_import(text, db["fields"])
+        imp = parse_import(text, db["fields"], db["other_base_ids"], a.base)
         notes += [note] if note else []
     merged = {m: g["survivor_id"] for g in db["groups"] for m in g["member_ids"][1:]}
     res = fn.run(db["fields"], db["tables"], st, manual=(imp or {}).get("manual"), approved_tables=db["approved_tables"],

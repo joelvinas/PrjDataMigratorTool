@@ -692,7 +692,8 @@ def import_names(conn, base_id, actor, csv_base64=None, csv_text=None):
     else:
         raise StoreError("Choose a CSV file to import.")
     fields = load_fields(conn, base_id)["fields"]
-    imp = fio.parse_import(text, fields)
+    other = [r[0] for r in conn.execute("SELECT DISTINCT field_id FROM airtable_fields WHERE base_id<>? ORDER BY field_id", (base_id,))]
+    imp = fio.parse_import(text, fields, other, base_id)
     _, names = _stored(conn, base_id)
     batch = "import-" + _now().replace(" ", "T").replace(":", "")
     now, applied, kept = _now(), 0, 0
