@@ -1578,6 +1578,7 @@ def api_schema_view(_q=None):
                                ORDER BY f.base_id, lower(f.table_name), f.table_id, lower(f.field_name), f.field_id"""
                             % STALE_SQL).fetchall()
         tinfo, vmap = load_tables_and_views(conn)
+        scope = {r["table_id"]: r for r in conn.execute("SELECT table_id, decision, decided_by, decided_at, reason FROM table_scope")}
     fname = {r["field_id"]: r["field_name"] for r in rows}
     names = {r["table_id"]: r["table_name"] for r in rows if not r["stale"]}
     for r in rows:
@@ -1608,6 +1609,11 @@ def api_schema_view(_q=None):
             t["primary_field_id"] = info.get("primary_field_id")
             t["primary_field_name"] = fname.get(info.get("primary_field_id"))
             t["details_captured"] = bool(info)
+            sc = scope.get(t["table_id"])
+            t["discarded"] = bool(sc and sc["decision"] == "out")
+            t["discard_note"] = sc["reason"] if t["discarded"] else None
+            t["discarded_by"] = sc["decided_by"] if t["discarded"] else None
+            t["discarded_at"] = sc["decided_at"] if t["discarded"] else None
             t["views"] = []
             for v in vmap.get(t["table_id"], []):
                 ids = view_field_ids(v)
@@ -1617,6 +1623,29 @@ def api_schema_view(_q=None):
             tables.append(t)
         out.append({"base_id": b, "tables": tables})
     return {"bases": out}
+
+
+def api_schema_discard(body):
+    """Step 3: discard tables (or bring them back) in one batch. A discarded table is recorded as OUT of scope (who, when and why), which every
+    later step already honours: no load order, graph, links, profiling or attachments. items: [{table_id, discard: bool, note}]; a note is
+    required to discard. Nothing changes until this is called, so the page can collect many checkboxes first."""
+    base = _names_base(body)
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        raise AppError("Tick or untick at least one table first.")
+    conv = []
+    for it in items:
+        if not isinstance(it, dict):
+            raise AppError("Unknown table change.")
+        discard = bool(it.get("discard"))
+        note = str(it.get("note") or "").strip()
+        if discard and not note:
+            raise AppError("Enter a short note for every table you discard (it is kept with the decision and shown in the tables download).")
+        conv.append({"table_id": str(it.get("table_id") or ""), "decision": "out" if discard else "in",
+                     "reason": note if discard else (note or "Brought back at the ingest step")})
+    with db() as conn:
+        r = _names(names_store.set_scope, conn, base, body.get("actor"), conv)
+    return {"changed": r["updated"]}
 
 
 # --------------------------------------------------------------------------
@@ -1688,7 +1717,8 @@ def compute_graph(conn, mode="literal", detail=None):
         tables[r["table_id"]] = r["table_name"]
         base_of[r["table_id"]] = r["base_id"]
     by_field = {r["field_id"]: r for r in rows}
-    links = [r for r in rows if r["linked_table_id"]]
+    # A link to a discarded table is dropped with it: it is not listed, ordered or drawn.
+    links = [r for r in rows if r["linked_table_id"] and r["linked_table_id"] not in out_ids]
 
     # inverse pair detection (always computed; only used for ordering in 'collapse' mode)
     paired, oriented, pair_list, pair_other = set(), set(), {}, {}
@@ -2043,8 +2073,9 @@ _job_lock = threading.Lock()
 
 
 def eligible_tables(conn):
+    """Tables that can be profiled (and whose attachments are pulled): not stale, and not discarded (scope 'out')."""
     rows = conn.execute("SELECT f.base_id, f.table_id, f.table_name, f.field_id, f.data_type FROM airtable_fields f "
-                        "WHERE NOT %s ORDER BY f.base_id, lower(f.table_name), f.table_id, f.field_id" % STALE_SQL).fetchall()
+                        "WHERE NOT %s AND f.table_id NOT IN (SELECT table_id FROM table_scope WHERE decision='out') ORDER BY f.base_id, lower(f.table_name), f.table_id, f.field_id" % STALE_SQL).fetchall()
     out = {}
     for r in rows:
         t = out.setdefault(r["table_id"], {"base_id": r["base_id"], "table_id": r["table_id"],
@@ -3271,9 +3302,17 @@ def api_export_tables(q):
     with db() as conn:
         trows = conn.execute("SELECT * FROM airtable_tables" + (" WHERE base_id=?" if base else "") +
                              " ORDER BY base_id, lower(table_name), table_id", (base,) if base else ()).fetchall()
-    body = _csv_bytes(["base_id", "table_id", "table_name", "table_description", "primary_field_id"],
+        scope = {r["table_id"]: r for r in conn.execute("SELECT table_id, decision, decided_by, decided_at, reason FROM table_scope")}
+
+    def disc(t):
+        sc = scope.get(t["table_id"])
+        if sc and sc["decision"] == "out":
+            return ["discarded", sc["reason"] or "", sc["decided_by"] or "", sc["decided_at"] or ""]
+        return ["kept", "", "", ""]
+    body = _csv_bytes(["base_id", "table_id", "table_name", "table_description", "primary_field_id", "status", "discard_note",
+                       "discarded_by", "discarded_at"],
                       [[t["base_id"], t["table_id"], t["table_name"], t["table_description"] or "",
-                        t["primary_field_id"] or ""] for t in trows])
+                        t["primary_field_id"] or ""] + disc(t) for t in trows])
     return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="tables_%s.csv"' % _stamp()})
 
 
@@ -5574,7 +5613,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/review": api_names_review, "/api/datatypes/review": api_datatypes_review, "/api/names/report": api_names_report,
               "/api/names/import-template.csv": api_names_import_template, "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
-               "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
+               "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,

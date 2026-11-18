@@ -29,11 +29,41 @@ function typeLabel(f) {
     (f.prefers_single_record_link === 1 ? " [single link]" : "");
 }
 
+/* Keep-or-discard choices are collected here and sent only when "Apply" is pressed, so ticking boxes never redraws the list. */
+const discardDraft = new Map();   // table_id -> { base_id, keep: bool, note: string, was: bool (kept when loaded), wasNote }
+function updateDiscardSummary() {
+  let n = 0;
+  for (const d of discardDraft.values()) if (d.keep !== d.was || (!d.keep && d.note !== d.wasNote)) n++;
+  $("discardPending").textContent = n ? n + " unapplied change(s)" : "No unapplied changes";
+  $("btnDiscardApply").disabled = !n;
+  $("btnDiscardReset").disabled = !n;
+}
+async function applyDiscards() {
+  const actor = $("discardActor").value.trim();
+  if (!actor) { setMsg("discardMessage", "Enter your initials before applying (they are recorded with each decision).", "err"); return; }
+  const byBase = new Map();
+  for (const [tid, d] of discardDraft) {
+    if (d.keep === d.was && (d.keep || d.note === d.wasNote)) continue;
+    if (!d.keep && !d.note.trim()) { setMsg("discardMessage", "Every discarded table needs a short note. Add one, or tick the table again.", "err"); return; }
+    if (!byBase.has(d.base_id)) byBase.set(d.base_id, []);
+    byBase.get(d.base_id).push({ table_id: tid, discard: !d.keep, note: d.note });
+  }
+  $("btnDiscardApply").disabled = true;
+  setMsg("discardMessage", "Applying...", "");
+  try {
+    let n = 0;
+    for (const [base_id, items] of byBase) { const r = await api("POST", "/api/schema/discard", { base_id, actor, items }); n += r.changed; }
+    setMsg("discardMessage", n + " table decision(s) saved. Discarded tables now take no part in the load order, links, profiling or attachments; refresh those steps.", "ok");
+    await Promise.all([loadSchema(), loadDepgraph()]);
+  } catch (e) { setMsg("discardMessage", e.message, "err"); updateDiscardSummary(); }
+}
+
 async function loadSchema() {
   const data = await api("GET", "/api/schema");
   state.schema = data.bases;
   const box = $("schemaView");
   clear(box);
+  discardDraft.clear();
   if (!data.bases.length) box.appendChild(el("p", { class: "hint", text: "No schema ingested yet." }));
   for (const b of data.bases) {
     const nFields = b.tables.reduce((a, t) => a + t.fields.length, 0);
@@ -41,6 +71,7 @@ async function loadSchema() {
     const inner = el("div", { class: "inner" });
     for (const t of b.tables) {
       const sum = el("summary", {}, t.table_name, el("span", { class: "tag", text: t.fields.length + " fields" }),
+        t.discarded ? el("span", { class: "tag fail", text: "discarded" }) : null,
         t.stale ? el("span", { class: "tag stale", text: "no longer in source" }) : (t.stale_fields ? el("span", { class: "tag stale", text: t.stale_fields + " field(s) no longer in source" }) : null));
       const rows = t.fields.map((f) => el("tr", {}, el("td", { text: f.field_name }), el("td", { text: f.field_id }), el("td", { text: typeLabel(f) }),
         el("td", { class: "settings", text: f.settings || "" }),
@@ -51,13 +82,28 @@ async function loadSchema() {
       if (t.views && t.views.length) meta.push("Views (" + t.views.length + "): " + t.views.map((v) =>
         v.view_name + " [" + v.view_type + (v.visible_field_count === null ? "" : ", " + v.visible_field_count + " fields") + "]" + (v.stale ? " (no longer in source)" : "")).join("; "));
       else if (t.details_captured) meta.push("No views reported");
-      inner.appendChild(el("details", {}, sum, meta.length ? el("p", { class: "hint tablemeta", text: meta.join("  |  ") }) : null, el("table", { class: "grid compact" },
-        el("thead", {}, el("tr", {}, el("th", { text: "Field" }), el("th", { text: "Field ID" }), el("th", { text: "Type / linked table" }), el("th", { text: "Settings" }), el("th", { text: "" }))),
-        el("tbody", {}, rows))));
+      if (t.discarded) meta.push("Discarded by " + (t.discarded_by || "?") + (t.discarded_at ? " on " + t.discarded_at : ""));
+      const keep0 = !t.discarded;
+      const draft = { base_id: b.base_id, keep: keep0, note: t.discard_note || "", was: keep0, wasNote: t.discard_note || "" };
+      discardDraft.set(t.table_id, draft);
+      const noteIn = el("input", { type: "text", class: "discardnote", maxlength: "500", placeholder: "Why is this table discarded? (required)", value: draft.note, "aria-label": "Discard note for " + t.table_name });
+      noteIn.hidden = draft.keep;
+      noteIn.addEventListener("input", () => { draft.note = noteIn.value; updateDiscardSummary(); });
+      const cb = el("input", { type: "checkbox", class: "keepbox", "aria-label": "Keep " + t.table_name + " in the migration" });
+      cb.checked = draft.keep;
+      cb.addEventListener("change", () => { draft.keep = cb.checked; noteIn.hidden = cb.checked; row.classList.toggle("discarded", !cb.checked); updateDiscardSummary(); if (!cb.checked) noteIn.focus(); });
+      const row = el("div", { class: "tblrow" + (draft.keep ? "" : " discarded") }, cb,
+        el("div", { class: "tblbody" },
+          el("details", {}, sum, meta.length ? el("p", { class: "hint tablemeta", text: meta.join("  |  ") }) : null, el("table", { class: "grid compact" },
+            el("thead", {}, el("tr", {}, el("th", { text: "Field" }), el("th", { text: "Field ID" }), el("th", { text: "Type / linked table" }), el("th", { text: "Settings" }), el("th", { text: "" }))),
+            el("tbody", {}, rows))),
+          noteIn));
+      inner.appendChild(row);
     }
     d.appendChild(inner);
     box.appendChild(d);
   }
+  updateDiscardSummary();
   fillScopeSelectors();
   syncReportLinks();
 }
@@ -73,7 +119,7 @@ function fillScopeSelectors() {
   for (const b of state.schema) {
     for (const n of [sb, rb, cb, eb]) n.appendChild(el("option", { value: b.base_id, text: baseLabel(b.base_id) }));
     for (const t of b.tables) {
-      if (t.stale) continue;
+      if (t.stale || t.discarded) continue;
       for (const n of [st, rt]) n.appendChild(el("option", { value: t.table_id, text: baseLabel(b.base_id) + " / " + t.table_name }));
     }
   }
@@ -313,7 +359,7 @@ async function loadDepgraph() {
   if ((dr.automatic_chosen || []).length) notes.appendChild(note("warn", "Automatic pairs where nothing else settles the order: the tool picked one (the table that sorts first loads first). Confirm or change each.", dr.automatic_chosen.map((a) => a.table + " (" + a.fields.join(" / ") + ")")));
   if ((dr.automatic_loops || []).length) notes.appendChild(note("err", "Automatic pairs that form a loop no decided direction breaks: a person must choose a direction on one of them", dr.automatic_loops.map((a) => a.fields.join(" / "))));
   if (g.self_links.length) notes.appendChild(note("info", "Self-links (ignored for ordering)", g.self_links.map((s) => s.table_name + "." + s.field_name)));
-  if (g.out_of_scope_tables) notes.appendChild(note("info", g.out_of_scope_tables + " table(s) marked out of scope take no part in this order (scope is decided on the Field names page)."));
+  if (g.out_of_scope_tables) notes.appendChild(note("info", g.out_of_scope_tables + " table(s) marked out of scope take no part in this order (discarded in step 3, or marked out on the Field names page)."));
   if ((g.out_of_scope_links || []).length) notes.appendChild(note("warn", "Links to tables that are out of scope: a person decides whether to bring the table in or drop the field", g.out_of_scope_links.map((o) => o.table_name + "." + o.field_name + " → " + o.linked_table_name)));
   if (g.unresolved_links.length) notes.appendChild(note("warn", "Links to tables that are not in the database (ingest the other base?)", g.unresolved_links.map((u) => u.table_name + "." + u.field_name + " → " + u.linked_table_id)));
 
@@ -608,6 +654,8 @@ startPage("stage1", { onReadyChange, afterConnect }, () => {
   });
   $("btnIngest").addEventListener("click", ingest);
   $("btnReloadSchema").addEventListener("click", guard(loadSchema));
+  $("btnDiscardApply").addEventListener("click", guard(applyDiscards));
+  $("btnDiscardReset").addEventListener("click", guard(loadSchema));
   for (const id of ["linkTable", "regTable", "orderTable"]) sortableTable(id);
   $("linkTableFilter").addEventListener("change", () => { linkView.table = $("linkTableFilter").value; const d = $("linkTable")._data; if (d) renderLinkDirections(d); });
   $("linkHideDone").addEventListener("change", () => { linkView.hideDone = $("linkHideDone").checked; const d = $("linkTable")._data; if (d) renderLinkDirections(d); });
