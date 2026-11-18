@@ -24,8 +24,8 @@ import re
 
 SANDBOX, PRODUCTION = "sandbox1", "production"
 CORE_ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core: Sandbox 1 (SB01), Sandbox 2 (SB02), Preview, Production (my)
-PLANNING_STAGES = ("dev", "uat")                                          # Planning has no environments, only Workspaces: Dev is wiped and recreated as UAT, or promoted
-ENVIRONMENTS = CORE_ENVIRONMENTS + PLANNING_STAGES
+PLANNING_STAGES = ("dev", "uat", "production")                                          # Planning has no environments, only Workspaces: Dev is wiped and recreated as UAT, or promoted
+ENVIRONMENTS = CORE_ENVIRONMENTS + tuple(s for s in PLANNING_STAGES if s not in CORE_ENVIRONMENTS)   # "production" is both a Core environment and a Planning stage; rows also carry their system and Workspace
 PRODUCTION_PHRASE = "CREATE IN PRODUCTION"
 ENV_COLUMN = {"sandbox1": "DEV", "sandbox2": "DEV", "preview": "DEV", "production": "PROD", "dev": "DEV", "uat": "UAT"}        # the environment names used by workfront_fields and field_crosswalk
 _SECRET = re.compile(r"(?i)(authorization\s*[=:]\s*(?:bearer\s+|basic\s+)?\S+|bearer\s+\S+|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}"
@@ -115,9 +115,10 @@ def _find_one(tr, args):
     return str(found) if found else None
 
 
-def run_plan(items, state, transports, env, dry_run=True, log=None):
+def run_plan(items, state, transports, env, dry_run=True, log=None, should_stop=None):
     """Walk the plan in order. Returns {results: [{temp_id, outcome, detail}], counts}. outcomes: would_create, created, already_created, not_ready,
-    parent_missing, no_transport, adopted, failed. log(temp_id, outcome, detail) is called for each item (the caller decides where it goes)."""
+    parent_missing, no_transport, adopted, failed. log(temp_id, outcome, detail) is called for each item (the caller decides where it goes).
+    should_stop() is asked BEFORE each item (never in the middle of one), so a stop leaves no item half done; the result then says cancelled=True."""
     if not isinstance(env, Environment):
         raise ValueError("Give the runner an Environment from resolve_environment().")
     if not dry_run and env.name == PRODUCTION and not env.confirmed:
@@ -131,7 +132,11 @@ def run_plan(items, state, transports, env, dry_run=True, log=None):
         log(item["temp_id"], outcome, detail)
 
     placeholder = {}                                        # dry run: a parent that would be created stands in for its ID
+    cancelled = False
     for item in items:
+        if should_stop and should_stop():
+            cancelled = True
+            break
         tid = item["temp_id"]
         if item["status"] != "ready":
             done(item, "not_ready", "; ".join(item["reasons"]) or item["status"])
@@ -182,4 +187,4 @@ def run_plan(items, state, transports, env, dry_run=True, log=None):
             continue
         state.set(tid, env.name, wid)                       # written back at once, so a restart skips it
         done(item, "created", wid)
-    return {"results": results, "counts": counts, "environment": env.name, "dry_run": dry_run}
+    return {"results": results, "counts": counts, "environment": env.name, "dry_run": dry_run, "cancelled": cancelled}

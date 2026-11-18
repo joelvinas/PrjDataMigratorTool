@@ -41,7 +41,11 @@ import fieldwriters
 import postmantests
 import sandboxplan
 import linkdirections as ld
+import loadconfig
+import loadreset
+import loadrun
 import recordmap
+import tableload
 import coretargets
 import selectvalues
 import fieldnames_report as names_report
@@ -77,7 +81,7 @@ DEFAULT_CARDINALITY_CAP = 1_000
 PAGE_SIZE = 100
 # Bump when the API changes. The page compares it with its own expected version, so an old server process
 # left running after files were replaced is reported instead of failing with confusing 'Not found' errors.
-APP_VERSION = "1.15"
+APP_VERSION = "1.16"
 
 # --------------------------------------------------------------------------
 # The finalized DDL (sql/DatabaseSchemaLibrary.sql). Compared with the original file, airtable_fields has two
@@ -5310,21 +5314,213 @@ def api_names_report(q):
 
 
 # --------------------------------------------------------------------------
+# Load a table (Stage 4): ONE table into Workfront Planning, step by step. The steps are in tableload.py (the same code loader.py runs); this is only the HTTP and job layer.
+# The Workfront settings are read from config.json on every call by loadconfig and never reach a response: every payload and message below passes through _lt_out(), which
+# removes each configured secret from the text as a last line of defence. Record values are never read here: a result holds IDs, schema names, counts and scrubbed reasons.
+# --------------------------------------------------------------------------
+LT_GATE = {"structure": "can_structure", "records": "can_records", "links": "can_links", "reset": "can_reset"}
+
+
+def _lt_secrets():
+    try:
+        return loadconfig.secret_values(loadconfig.read_config(CONFIG_PATH))
+    except loadconfig.ConfigError:
+        return set()
+
+
+def _lt_out(payload):
+    secrets = _lt_secrets()
+    return json.loads(loadconfig.redact(json.dumps(payload), secrets)) if secrets else payload
+
+
+def _lt_call(fn_, *a, **k):
+    """Run a tableload function and turn its LoadError (or a reset refusal) into the app's AppError, with every secret removed from the message."""
+    try:
+        return fn_(*a, **k)
+    except (tableload.LoadError, loadreset.ResetError) as e:
+        raise AppError(loadconfig.redact(getattr(e, "message", str(e)), _lt_secrets()), getattr(e, "status", 409))
+
+
+def _lt_args(body):
+    base = _names_base(body)
+    table = str(body.get("table_id") or "").strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    stage = str(body.get("stage") or "dev").strip().lower()
+    return base, table, stage
+
+
+def api_loadtable_setup(q):
+    """What the page needs before a table is chosen: whether Planning is configured (yes or no, never a secret), the Workspace ID to show, the stages, the typed reset phrases and
+    the in-scope tables for the base."""
+    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
+    try:                                      # the stages are the ones the user defined in config.json (workfront.planning); only their Workspace IDs are shown, never a token
+        data = loadconfig.read_config(CONFIG_PATH)
+        for st in loadconfig.planning_blocks(data):
+            c = loadconfig.credentials(data, "planning", st)
+            if c is not None and c.workspace_id:
+                out["stages"].append(st)
+                out["stage_info"][st] = {"workspace_id": c.workspace_id}
+        out["configured"] = bool(out["stages"])
+        if not out["configured"]:
+            out["problem"] = "No Planning stage is configured in config.json (section workfront.planning: one block each for dev, uat or production, with base_url, bearer_token and workspace_id)."
+    except loadconfig.ConfigError as e:
+        out["problem"] = str(e)
+    base = (q.get("base_id") or [""])[0]
+    if base:
+        try:
+            with db() as conn:
+                out["tables"] = _lt_call(tableload.table_choices, conn, _names_base(q))
+        except AppError as e:                          # a base that is not in the database yet must not hide the Workspace ID and the settings
+            out["tables_problem"] = e.message
+    return _lt_out(out)
+
+
+def api_loadtable_check(body):
+    """Step 1, and the state and gate of every later step (read-only: nothing is sent, nothing is written)."""
+    base, table, stage = _lt_args(body)
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
+    with db() as conn:
+        return _lt_out(_lt_call(tableload.check_table, conn, base, table, ctx, extract_dir()))
+
+
+def api_loadtable_workspace(body):
+    """Prove the chosen stage's token and Workspace ID with one read of the Workspace, and return its name. A failure says which value in config.json to change."""
+    stage = str(body.get("stage") or "dev").strip().lower()
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
+    tr = _lt_call(tableload.transport, ctx)
+    return _lt_out(tableload.workspace_status(ctx, tr))
+
+
+def api_loadtable_mapping(body):
+    base, table, stage = _lt_args(body)
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
+    with db() as conn:
+        return _lt_out(_lt_call(tableload.mapping, conn, base, table, ctx))
+
+
+def api_loadtable_verify(body):
+    """Step 5: the record counts side by side. One read of Workfront (a single page, values dropped at once)."""
+    base, table, stage = _lt_args(body)
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
+    tr = _lt_call(tableload.transport, ctx)
+    with db() as conn:
+        return _lt_out(_lt_call(tableload.verify, conn, base, table, ctx, tr, extract_dir()))
+
+
+class LoadJob:
+    """One background step of the Load a table page (the same shape as the profiling Job: status, cancel flag, progress, result)."""
+    def __init__(self, step, send, base, table_id, stage, ws, db_path):
+        self.id = str(int(time.time() * 1000))
+        self.step, self.send, self.base, self.table_id, self.stage, self.ws, self.db_path = step, send, base, table_id, stage, ws, db_path
+        self.status, self.error, self.result, self.progress = "running", None, None, {}
+        self.started_at, self.finished_at = utc_now(), None
+        self.cancel = threading.Event()
+        self.confirm = None
+
+    def set_progress(self, p):
+        self.progress = dict(p)
+
+
+LOADJOB = {"current": None}
+_loadjob_lock = threading.Lock()
+
+
+def _run_load_job(job):
+    secrets = _lt_secrets()
+    try:
+        ctx = tableload.planning_context(CONFIG_PATH, job.stage, job.send, job.confirm)
+        tr = tableload.transport(ctx)
+        stop = job.cancel.is_set
+        with db(job.db_path) as conn:
+            if job.step == "structure":
+                res = tableload.step_structure(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
+            elif job.step == "records":
+                res = tableload.step_records(conn, job.base, job.table_id, ctx, tr, job.send, extract_dir(), stop, job.set_progress)
+            elif job.step == "links":
+                res = tableload.step_links(conn, job.base, job.table_id, ctx, tr, job.send, extract_dir(), stop, job.set_progress)
+            else:
+                res = tableload.step_reset(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
+        job.result = _lt_out(res)
+        job.status = "cancelled" if res.get("cancelled") else "done"
+    except tableload.LoadError as e:
+        job.status, job.error = "failed", loadconfig.redact(e.message, secrets)
+    except Exception as e:
+        job.status, job.error = "failed", "Unexpected error: " + loadconfig.redact(loadrun.scrub(e), secrets)
+        print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+    finally:
+        job.finished_at = utc_now()
+
+
+def api_loadtable_start(body):
+    """Start one step as a background job. Every step is refused unless the one before is done (read from the database). A real send also needs the confirmation the page
+    collects: the table, the stage and the Workspace ID, exactly as shown; a reset needs the typed phrase too. Nothing runs without this call."""
+    base, table, stage = _lt_args(body)
+    step = str(body.get("step") or "")
+    if step not in LT_GATE:
+        raise AppError("Unknown step.")
+    send = body.get("send") is True
+    confirm = None
+    if send and stage == "production":          # a real send to the production stage needs a typed phrase on top of the confirmation
+        want = loadreset.phrase(stage) if step == "reset" else loadrun.PRODUCTION_PHRASE
+        if body.get("phrase") != want:
+            raise AppError("Sending to the production stage needs the exact phrase: %s" % want)
+        confirm = loadrun.PRODUCTION_PHRASE
+    ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, send, confirm)
+    with db() as conn:
+        st = _lt_call(tableload.check_table, conn, base, table, ctx, extract_dir())
+    _lt_call(tableload.need, st["gates"], LT_GATE[step], tableload.GATE_MESSAGE[LT_GATE[step]])
+    if step in ("records",) and not st["steps"]["records"]["file_exists"]:
+        raise AppError(st["steps"]["records"]["file_note"] or "There is no saved record file for this table.", 409)
+    if send:
+        conf = body.get("confirm")
+        if not (isinstance(conf, dict) and conf.get("table_id") == table and conf.get("stage") == stage and str(conf.get("workspace_id")) == ctx.ws):
+            raise AppError("Confirm the table, the stage and the Workspace ID exactly as shown before anything is sent.")
+        if step == "reset" and body.get("phrase") != loadreset.phrase(stage):
+            raise AppError("A reset deletes records and cannot be undone. Type the exact phrase: %s" % loadreset.phrase(stage))
+    with _loadjob_lock:
+        cur = LOADJOB["current"]
+        if cur and cur.status == "running":
+            raise AppError("A load step is already running (%s, table %s). Wait for it to finish or cancel it." % (cur.step, cur.table_id), 409)
+        job = LoadJob(step, send, base, table, stage, ctx.ws, STATE["db_path"])
+        job.confirm = confirm
+        LOADJOB["current"] = job
+    threading.Thread(target=_run_load_job, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id, "step": step, "send": send}
+
+
+def api_loadtable_status(_q=None):
+    job = LOADJOB["current"]
+    if not job:
+        return {"job": None}
+    return _lt_out({"job": {"id": job.id, "step": job.step, "send": job.send, "base_id": job.base, "table_id": job.table_id, "stage": job.stage, "workspace_id": job.ws, "status": job.status,
+                            "error": job.error, "started_at": job.started_at, "finished_at": job.finished_at, "progress": job.progress, "result": job.result}})
+
+
+def api_loadtable_cancel(_body=None):
+    job = LOADJOB["current"]
+    if not job or job.status != "running":
+        raise AppError("No load step is running.")
+    job.cancel.set()
+    return {"cancelling": True}
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("pages/setup.html", HTML), "/setup": ("pages/setup.html", HTML),
-          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML),
+          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML),
           "/log": ("pages/log.html", HTML),
           "/style.css": ("css/style.css", "text/css; charset=utf-8"),
           "/common.js": ("js/common.js", JS), "/setup.js": ("js/setup.js", JS),
-          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
+          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
-              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/records/view": api_records_view, "/api/core/targets": api_core_targets, "/api/records/attachments": api_records_attachments, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status,
+              "/api/depgraph": api_depgraph_view, "/api/links/directions": api_link_directions, "/api/records/registry": api_records_registry, "/api/records/view": api_records_view, "/api/core/targets": api_core_targets, "/api/records/attachments": api_records_attachments, "/api/field-writers": api_field_writers, "/api/postman/guide": api_postman_guide, "/api/sandbox-plan": api_sandbox_plan, "/api/postman/collection.json": api_postman_collection, "/api/export/field_writers.csv": api_export_field_writers, "/api/profile/status": api_profile_status, "/api/loadtable/setup": api_loadtable_setup, "/api/loadtable/status": api_loadtable_status,
               "/api/profile/results": api_profile_results, "/api/extract/files": api_extract_files, "/api/calllog": api_calllog, "/api/runbook": api_runbook,
               "/api/report.html": api_report_html, "/api/report.mhtml": api_report_mhtml,
               "/api/export/load_order.csv": api_export_load_order, "/api/export/profile.csv": api_export_profile,
@@ -5344,6 +5540,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
+               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/names/settings": api_names_settings,

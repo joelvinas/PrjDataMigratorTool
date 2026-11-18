@@ -30,6 +30,7 @@ import coreobjects as co
 import recordload as rl
 import recordmap as rm
 import loadreset as rs
+import tableload as tl
 import coretargets as tg
 import workfronthttp as wh
 
@@ -74,6 +75,11 @@ def summary_text(plan, base_id, title="Load plan", sent=False):
 def dry_run_csv(res):
     return _csv(["temp_id", "system", "kind", "name", "outcome", "detail"], [[r["temp_id"], r["system"], r["kind"], r["name"], r["outcome"], r["detail"] if not isinstance(r["detail"], dict) else
                                                                            "; ".join("%s=%s" % kv for kv in sorted(r["detail"].items()) if kv[1] not in (None, ""))] for r in res["results"]])
+
+
+def _chosen(a):
+    """The sorted table IDs from --table, or None. (Whether they exist in the plan is checked by tableload.build.)"""
+    return sorted(set(getattr(a, "tables", None) or [])) or None
 
 
 def _only(a, inputs):
@@ -122,7 +128,7 @@ def _run(a, opener=None):
         data = lc.read_config(a.config)
     except lc.ConfigError as e:
         sys.exit(str(e))
-    creds = {s: lc.credentials(data, s, a.core_env if s == "core" else None) for s in systems}
+    creds = {s: lc.credentials(data, s, a.core_env if s == "core" else a.planning_stage) for s in systems}
     missing = [("Core (%s)" % a.core_env) if s == "core" else "Planning" for s in systems if creds[s] is None]
     if missing:
         sys.exit("Not configured in %s: %s. Run 'config' to see what is set (yes or no only)." % (a.config, ", ".join(missing)))
@@ -142,12 +148,9 @@ def _run(a, opener=None):
         if not ls.available(conn):
             sys.exit("This database does not have the loader's state table in its current form. Apply the migrations (python sql/apply_migrations.py, after a backup) first.")
         try:
-            inputs = store.loader_inputs(conn, a.base)
-        except store.StoreError as e:
+            inputs, plan = tl.build(conn, a.base, getattr(a, "tables", None), include_link_fields=not a.no_link_fields)
+        except tl.LoadError as e:
             sys.exit(e.message)
-        inputs["link_state"] = ld.field_states(conn)
-        plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=not a.no_link_fields, link_state=inputs.get("link_state"),
-                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"), only_tables=_only(a, inputs))
         _write(a.out, "load_plan.csv", plan_csv(plan))
         rows, lines, results = [], ["Load run for %s" % a.base, ""], {}
         for s in systems:
@@ -155,11 +158,9 @@ def _run(a, opener=None):
                 tr = (ct.CoreTransport if s == "core" else pt.PlanningTransport)(wh.Http(creds[s], secrets, opener=opener))
             except ValueError as e:
                 sys.exit(str(e))
-            state = ls.DbState(conn, a.base, creds[s].workspace_id if s == "planning" else None)
-            stuck = state.pending(envs[s].name)
+            res, stuck = tl.run_structure(conn, a.base, plan["items"], s, tr, envs[s], creds[s].workspace_id if s == "planning" else None, dry_run=False)
             if stuck:
                 lines.append("%s: %d item(s) from an earlier run were started and not finished; they are tried again: %s" % (s.title(), len(stuck), ", ".join(stuck[:10]) + (" ..." if len(stuck) > 10 else "")))
-            res = lr.run_plan([i for i in plan["items"] if i["system"] == s], state, {s: tr}, envs[s], dry_run=False)
             results[s] = res
             lines += ["%s in %s%s:" % (s.title(), envs[s].name.upper(), (" (Workspace %s)" % creds[s].workspace_id) if s == "planning" else "")] + ["  %-16s %d" % (k, v) for k, v in sorted(res["counts"].items())] + [""]
             for r in res["results"]:
@@ -187,11 +188,11 @@ def _records(a, opener=None):
         data = lc.read_config(a.config)
     except lc.ConfigError as e:
         sys.exit(str(e))
-    creds = lc.credentials(data, "planning")
+    creds = lc.credentials(data, "planning", a.planning_stage)
     if creds is None or not creds.workspace_id:
-        sys.exit("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % a.config)
+        sys.exit("Planning is not configured for stage %s in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % (a.planning_stage, a.config))
     try:
-        env = lr.resolve_environment(a.planning_stage, None, dry_run=not a.send, workspace_id=creds.workspace_id)
+        env = lr.resolve_environment(a.planning_stage, a.confirm, dry_run=not a.send, workspace_id=creds.workspace_id)
     except ValueError as e:
         sys.exit(str(e))
     secrets = lc.secret_values(data)
@@ -203,13 +204,10 @@ def _records(a, opener=None):
         if not (ls.available(conn) and rm.available(conn)):
             sys.exit("This database does not have the loader's state tables in their current form. Apply the migrations (python sql/apply_migrations.py, after a backup) first.")
         try:
-            inputs = store.loader_inputs(conn, a.base)
-        except store.StoreError as e:
+            inputs, plan = tl.build(conn, a.base, getattr(a, "tables", None))
+        except tl.LoadError as e:
             sys.exit(e.message)
-        inputs["link_state"] = ld.field_states(conn)
-        only = _only(a, inputs)
-        plan = lp.build_plan(inputs["review"], inputs["choices"], include_link_fields=True, link_state=inputs.get("link_state"),
-                             record_counts=inputs.get("record_counts"), field_facts=inputs.get("field_facts"), only_tables=only)
+        only = _chosen(a)
         state = ls.DbState(conn, a.base, creds.workspace_id)
         tables = rl.table_targets(plan["items"], state, env.name)
         link_notes = {}
@@ -222,19 +220,12 @@ def _records(a, opener=None):
         ws = creds.workspace_id
         notes = {}
         if a.send:
-            for tid in sorted(tables):                          # register the record IDs of every loadable table (IDs only are read)
-                try:
-                    doc = rl.read_extract(a.extract_dir, a.base, tid)
-                    rm.register(conn, a.base, tid, [r.get("id") for r in doc["records"] if isinstance(r, dict)])
-                except (rl.RecordLoadError, rm.RecordMapError) as e:
-                    notes[tid] = str(e)
+            notes = tl.register_tables(conn, a.base, tables, a.extract_dir)      # the record IDs of every loadable table (IDs only are read)
         tr = pt.PlanningTransport(wh.Http(creds, secrets, opener=opener))
         batch = int(creds.extra.get("record_batch_size") or rl.BATCH_DEFAULT) if a.batch is None else a.batch
         rows, failures, lines = [], [], ["Record load for %s in %s (Workspace %s)%s" % (a.base, env.name.upper(), ws, "" if a.send else ", nothing was sent"), ""]
         passes = ("records", "links") if a.pass_name == "both" else (a.pass_name,)
-        for p in passes:
-            fn = rl.load_records if p == "records" else rl.load_links
-            res = fn(conn, a.base, tables, a.extract_dir, tr, env.name, ws, batch=batch, dry_run=not a.send)
+        for p, res in tl.run_passes(conn, a.base, tables, a.extract_dir, tr, env.name, ws, passes, batch, dry_run=not a.send):
             for t in res["tables"]:
                 done = t.get("created", t.get("updated", 0))
                 rows.append([t["table_id"], t["name"], p, t["pending"], done, t.get("waiting", 0), t["failed"], t.get("problems", 0), t["note"] or notes.get(t["table_id"], "") or link_notes.get(t["table_id"], "")])
@@ -261,11 +252,11 @@ def _reset(a, opener=None):
         data = lc.read_config(a.config)
     except lc.ConfigError as e:
         sys.exit(str(e))
-    creds = lc.credentials(data, "planning")
+    creds = lc.credentials(data, "planning", a.planning_stage)
     if creds is None or not creds.workspace_id:
-        sys.exit("Planning is not configured in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % a.config)
+        sys.exit("Planning is not configured for stage %s in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % (a.planning_stage, a.config))
     try:
-        env = lr.resolve_environment(a.planning_stage, None, dry_run=not a.send, workspace_id=creds.workspace_id)
+        env = lr.resolve_environment(a.planning_stage, lr.PRODUCTION_PHRASE if a.confirm == rs.phrase(a.planning_stage) else None, dry_run=not a.send, workspace_id=creds.workspace_id)
     except ValueError as e:
         sys.exit(str(e))
     need = rs.phrase(env.name)
@@ -279,10 +270,10 @@ def _reset(a, opener=None):
     ws = creds.workspace_id
     try:
         try:
-            name, rt = rs.target(conn, a.base, a.table, env.name, ws)
+            r = tl.reset_table(conn, a.base, a.table, env.name, ws, pt.PlanningTransport(wh.Http(creds, secrets, opener=opener)) if a.send else None, a.send)
         except rs.ResetError as e:
             sys.exit(str(e))
-        before = rs.local_counts(conn, a.base, a.table, env.name, ws)
+        name, before, w = r["name"], r["before"], r["wipe"]
         lines = ["Reset of table %s (%s) in %s, Workspace %s%s" % (a.table, name, env.name.upper(), ws, "" if a.send else ", dry run: nothing was sent"), "",
                  "Mapped Planning records this tool holds for the table: %d. Pass markers: %s." % (before["mapped"], ", ".join("%s %d" % kv for kv in sorted(before["markers"].items())) or "none")]
         result = {"before": before, "wipe": None, "cleared": None}
@@ -292,17 +283,12 @@ def _reset(a, opener=None):
                       "  2. then, once the record type lists empty, clear this table's rows from target_mappings and record_pass_markers for this stage and Workspace.",
                       "load_id_map is not touched, so the record type and fields stay recorded as created."]
         else:
-            tr = pt.PlanningTransport(wh.Http(creds, secrets, opener=opener))
-            try:
-                w = rs.wipe(tr, rt, ws)
-            except rs.ResetError as e:
-                sys.exit(str(e))
             result["wipe"] = w
             lines += ["", "Workfront: %d record(s) deleted in %d call(s), %d refused." % (w["deleted"], w["rounds"], w["failed"])]
             for why, n in sorted(w["reasons"].items()):
                 lines.append("  %d x %s" % (n, why))
             if w["left"] == 0:
-                result["cleared"] = rs.clear_local(conn, a.base, a.table, env.name, ws)
+                result["cleared"] = r["cleared"]
                 lines += ["The record type is empty. Cleared from this tool's memory: %d mapping(s), %d pass marker(s). The next 'records --send' starts clean." % (result["cleared"]["mappings"], result["cleared"]["markers"])]
             else:
                 lines += ["The record type is NOT empty (%s still listed), so this tool's memory was left as it is. Run the reset again." % ("an unknown number" if w["left"] is None else "%d" % w["left"])]
@@ -451,7 +437,8 @@ def main(argv=None, opener=None):
     pr.add_argument("--send", action="store_true", help="actually create records in Workfront. Without it nothing is sent")
     pr.add_argument("--config", default="config.json")
     pr.add_argument("--extract-dir", default="data_extract", help="where the saved record files are (default: data_extract)")
-    pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
+    pr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES, help="a stage defined in config.json (workfront.planning)")
+    pr.add_argument("--confirm", default=None, help="the exact phrase a real send to the production stage needs: %s" % lr.PRODUCTION_PHRASE)
     pr.add_argument("--table", dest="tables", action="append", metavar="TABLE_ID", help="limit the run to this table (repeatable); a run filter only, scope is not changed")
     pr.add_argument("--pass", dest="pass_name", default="both", choices=("both", "records", "links"))
     pr.add_argument("--batch", type=int, default=None, help="records per call (default: record_batch_size in config.json, else %d)" % rl.BATCH_DEFAULT)
@@ -497,7 +484,7 @@ def main(argv=None, opener=None):
         except lc.ConfigError as e:
             sys.exit(str(e))
         yn = lambda b: "configured" if b else "not configured"
-        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  Core %-12s %s" % (e, yn(st["core"][e])) for e in lc.ENVIRONMENTS] +                 ["  Planning              %s" % yn(st["planning"]), "  Planning workspace ID %s" % yn(st["planning_workspace"])]
+        lines = ["Workfront credentials in %s (yes or no only):" % a.config] + ["  Core %-12s %s" % (e, yn(st["core"][e])) for e in lc.ENVIRONMENTS] +                 ["  Planning %-10s   %s (token, address and Workspace ID)" % (s, yn(ok)) for s, ok in sorted(st["planning_stages"].items())] + ([] if st["planning_stages"] else ["  Planning              not configured"])
         print("\n".join(lines))
         return st
     if a.cmd == "run":

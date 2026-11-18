@@ -69,15 +69,19 @@ def clear_local(conn, base_id, table_id, stage, ws):
     return {"mappings": m, "markers": k}
 
 
-def wipe(tr, record_type_id, workspace_id):
+def wipe(tr, record_type_id, workspace_id, should_stop=None, progress=None):
     """Delete every record of the record type, 100 per call. Returns {deleted, failed, reasons, left, rounds}. `left` is what Workfront still lists at the end (None if unknown).
-    Refuses when the record type says it belongs to a different Workspace."""
+    Refuses when the record type says it belongs to a different Workspace. should_stop() is asked before each call (a stop sets `cancelled` and leaves `left` unknown, so the
+    caller keeps its memory); progress({"round", "deleted", "failed"}) is called after each call."""
     rt = tr.get_record_type(record_type_id)
     home = rt.get("primaryWorkspaceId") if isinstance(rt, dict) else None
     if home and str(home) != str(workspace_id):
         raise ResetError("The record type belongs to a different Workspace than the workspace_id in config.json. Nothing was deleted.")
-    out = {"deleted": 0, "failed": 0, "reasons": {}, "left": None, "rounds": 0}
+    out = {"deleted": 0, "failed": 0, "reasons": {}, "left": None, "rounds": 0, "cancelled": False}
     for _ in range(MAX_ROUNDS):
+        if should_stop and should_stop():
+            out["cancelled"], out["left"] = True, None
+            return out
         ids, total = tr.list_record_ids(record_type_id, PAGE)
         out["left"] = total
         if not ids:
@@ -90,6 +94,8 @@ def wipe(tr, record_type_id, workspace_id):
             if not g.get("deleted"):
                 out["failed"] += 1
                 out["reasons"][g.get("error") or "no reason"] = out["reasons"].get(g.get("error") or "no reason", 0) + 1
+        if progress:
+            progress({"round": out["rounds"], "deleted": out["deleted"], "failed": out["failed"]})
         if not done:
             return out                                  # nothing was removed this round: a repeat would only repeat the refusal
     out["left"] = None                                  # the round limit was reached, so what is left is not known

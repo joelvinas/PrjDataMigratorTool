@@ -3,7 +3,7 @@
    textContent (never innerHTML) so table or field names cannot inject markup. */
 
 const $ = (id) => document.getElementById(id);
-const EXPECTED_SERVER_VERSION = "1.15"; // must match APP_VERSION in server.py
+const EXPECTED_SERVER_VERSION = "1.16"; // must match APP_VERSION in server.py
 const state = { ready: false, status: null, schema: [], pollTimer: null, lastJobId: null, lastJobStatus: null };
 
 function el(tag, attrs, ...kids) {
@@ -145,6 +145,7 @@ const NAV_PAGES = [
   { key: "names", href: "/names", label: "Field names", sub: "Naming rules and review" },
   { key: "postman", href: "/postman", label: "Postman tests", sub: "Planning API checks" },
   { key: "load", href: "/load", label: "Stage 4: Map and load", sub: "Record map and attachments" },
+  { key: "loadtable", href: "/loadtable", label: "Load a table", sub: "One table into Planning, step by step" },
 ];
 const NAV_BOTTOM = [{ key: "log", href: "/log", label: "API call log", sub: "Audit trail" }];
 
