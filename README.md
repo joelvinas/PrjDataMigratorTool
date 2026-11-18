@@ -67,6 +67,7 @@ airtable-migration-control/
 │   ├── loadstate.py             the runner's state in load_id_map
 │   ├── loadconfig.py            reads the Workfront credentials and settings from config.json; never shows or stores a secret
 │   ├── loader.py                the loader command line: plan, dry-run, run --send, records and reset
+│   ├── tableload.py             the one-table load steps (check, structure, records, links, verify, reset) that loader.py and the Load a table page share
 │   ├── typemap.py  workfronthttp.py  coretransport.py  planningtransport.py   the target type mapping, the HTTP layer and the two Workfront transports
 │   ├── recordmap.py             the record ID map: surrogate IDs, targets, pass markers, attachment map and the views behind the Stage 4 screens
 │   ├── recordload.py            the Planning record load: the records pass and the links pass
@@ -74,7 +75,7 @@ airtable-migration-control/
 │   ├── planlimits.py            Planning limits and the Core history size, checked in the load plan
 │   └── postmantests.py  sandboxplan.py   the Postman test guide and collection, and the sandbox test plan
 ├── web/                         The pages the server serves (URLs are unchanged: /stage1, /common.js, /style.css)
-│   ├── pages/                   setup.html (home, steps 1 and 2), stage1.html (steps 3 to 6), stage2.html (forms), stage3.html (automations), names.html (field names), load.html, postman.html, log.html (API call log, last in the side panel)
+│   ├── pages/                   setup.html (home, steps 1 and 2), stage1.html (steps 3 to 6), stage2.html (forms), stage3.html (automations), names.html (field names), load.html, loadtable.html (load one table), postman.html, log.html (API call log, last in the side panel)
 │   ├── js/                      one script per page, plus common.js (API helper, left navigation, base picker, connection check) and editor-kit.js (shared by Stages 2 and 3)
 │   └── css/                     style.css, shared by every page
 ├── CLAUDE.md                    standing rules for anyone (or any AI assistant) working on this code
@@ -115,6 +116,9 @@ airtable-migration-control/
     ├── regression/names_api_test.py   the Field names endpoints and page ("namesapi"), against the mock server
     ├── regression/fieldgroups_test.py   consolidation rules and merged descriptions ("names"); no server needed
     ├── regression/names_ui_test.py    the Field names page in a real browser ("namesui"); needs Playwright
+    ├── regression/tableload_test.py   the one-table load steps against a fake Workfront ("names"); no server needed
+    ├── regression/loadtable_api_test.py, loadtable_fixture.py   the Load a table endpoints ("loadtable"), and the fake Workfront and fabricated base the two Load a table tests share
+    ├── regression/loadtable_ui_test.py   the Load a table page in a real browser ("loadtableui"); needs Playwright
     ├── run_regression.py            runs every suite below against the mock, in throwaway copies of the project
     ├── regression/                  the suites: e2e2, report_test, views_test, extract_test, attach_test, attstats_test, ui_test
     └── answer_key_check.py         optional: checks load order against an answer key (see Checking against an answer key)
@@ -592,6 +596,15 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
   python src/loader.py records --db db/migration.db --base appXXXXXXXXXXXXXX --planning-stage dev --table tblXXXXXXXXXXXXXX --send
   ```
 
+- **Load a table (page, `/loadtable`)** does the same thing one table at a time from the browser, with the same code the command line runs (`src/tableload.py`; `loader.py run`, `records` and `reset` call it too, so the two cannot drift apart). Pick the base, the Planning stage (dev or uat) and an in-scope table; the Workspace ID is shown from `config.json` (the token never is). Six steps, each open only when the one before is done (the server reads that from the database, so a restart picks up where it stopped, and refuses a step that is not open):
+  1. **Check**: the plan for this table only, with ready, on hold and blocked counts and the reasons, and the tables its link fields point to. Blocked means nothing below opens.
+  2. **Create the record type and fields** (dry run, then Send): one table, like `--table`; shows each item's outcome (created, already created, adopted, failed) and then the **Workfront ID map** (Airtable field, new name, Workfront ID). Each ID is written to `load_id_map` as it comes back.
+  3. **Records**: checks the saved record file is there (counts only), then a dry run and Send. Failures are listed by Airtable record ID with a scrubbed reason; no value is ever shown.
+  4. **Links**: the second pass; links to a table whose records are not loaded yet wait, and the page lists which tables they wait for.
+  5. **Verify**: record counts side by side (saved file, registry, records done, mapped, and Workfront's own count from one read); a difference is shown as counts and never repaired. It opens when the records pass is complete; links waiting on other tables do not hold it back.
+  6. **Reset** (collapsed danger zone): the `reset` command for this table, with its dry-run counts first and the typed phrase (`DELETE RECORDS IN DEV` or `UAT`).
+
+  Every Send opens a confirmation that names the table, the stage and the Workspace ID, and the server refuses a send whose confirmation does not match. Nothing runs when the page opens. Steps 2, 3, 4 and 6 run as one background job at a time with progress (table, batch number, counts) and a Cancel button that takes effect between items or batches; a rerun after a stop carries on and creates nothing twice. Every call to Workfront goes through the existing transports and `workfronthttp` (its retry and wait rules). **Rehearsal order for one table in a dummy DEV Workspace:** Check, then structure (dry run, Send), then Records (file check, dry run, Send); load the tables its links point to the same way; then Links, then Verify; use Reset only to start the table over. **Provisional:** the Verify count and the Reset use Planning's list and delete routes from Adobe's reference, not from a call; "dry run before Send" is enforced by the page, not by the server.
 - **`reset`** wipes ONE table so it can be reloaded: it deletes the table's records in the Planning Workspace and clears what this tool remembers about them. The record type and its fields stay. A dry run is the default and sends nothing at all.
 
   ```
@@ -643,6 +656,7 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
 | Stage 3: Automations | `/stage3` | Record Airtable automations by hand (trigger, nested steps and logic, field use, text and links), document them for the team, query which fields they use, and produce a rebuild report with Workfront Planning fields | Built (version 1.13) |
 | Field names | `/names` | Check renamed field and table names against the documented naming rules, review the proposed repairs, approve or abandon, and export for the client | Built (version 1.14) |
 | Stage 4: Map and load | `/load` | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.15): the load plan, dry run, field creation (`run --send`), the Planning record load (`records`) and the screens that show the record map, pass markers and attachment map (`/load`, read-only, IDs and counts only, sortable on the server). See `docs/LOADER_PLAN.md` |
+| Load a table | `/loadtable` | Load ONE table into Workfront Planning step by step without the command line: check, create the record type and fields, records, links, verify, and a reset | **Begun** (version 1.16) |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 
 Decisions made:

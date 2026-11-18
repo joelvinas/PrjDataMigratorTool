@@ -14,6 +14,10 @@ Stage 4 takes the approved names, the scope and target decisions, the consolidat
 | 4d | **Attachments** as native Core documents (link expiry, download behavior against real Airtable is untested) | **Built and tested against a fake Workfront** (`loader.py attachments`): from the files Stage 1 saved, never from a link. Not run for real |
 | 4e | **The Core to Planning publish pattern**: the write-once Planning ID field, the sync status, idempotent publish, the reconciliation report | Not started; needs sandbox proof first |
 
+## The Load a table page (`/loadtable`)
+
+A browser page runs the same steps as `loader.py` for ONE table: check the plan, create the record type and fields, load the records, set the links, verify the counts, and reset (see the README). The shared code is `src/tableload.py`; the server (`/api/loadtable/...`) adds the gates, the confirmation (table, stage and Workspace ID) and a background job with progress and cancel. **Rehearsal order:** check, structure (dry run, send), records (file check, dry run, send), then the same for each table its links point to, then links, then verify; reset only to start a table over. Unverified: Verify's Workfront count (`totalElements` from the list route) and the reset's list and delete routes come from the reference, not from a call.
+
 ## What is built (4a)
 
 Run it read-only against the database. Nothing is sent anywhere.
