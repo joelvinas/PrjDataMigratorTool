@@ -2,6 +2,7 @@
 import json, os, sqlite3, subprocess, sys, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
+import typesfixture as tf
 B = "http://127.0.0.1:8765"; ok = True; BASE = "appLookupApi001"
 def check(n, c, x=""):
     global ok; ok &= bool(c); print(("PASS " if c else "FAIL ") + n, "" if c else str(x)[:300])
@@ -27,7 +28,9 @@ schema = {"tables": [{"id": "tblLk0000000001", "name": "Orders", "primaryFieldId
     fld("L01", "Order Name"), fld("L02", "Ship To", "multipleSelects", choices(PLACES)), fld("L03", "Status", "singleSelect", choices(["Open", "Closed"])),
     fld("L04", "Origin", "singleSelect", choices(["Alpha Town", "Beta City", "Gamma Bay", "Delta Ridge", "Echo Falls", "Golf Bend"]))]},
     {"id": "tblLk0000000002", "name": "Visits", "primaryFieldId": "fldM01", "views": [], "fields": [fld("M01", "Visit Name"), fld("M02", "Place", "multipleSelects", choices(PLACES[:5]))]}]}
-post("/api/db/create", {"path": "lookups_api.db"}); post("/api/db/connect", {"path": "lookups_api.db"})
+post("/api/db/create", {"path": "lookups_api.db"})
+_c = sqlite3.connect("lookups_api.db"); tf.strip_drafts(_c); _c.close()   # an older database: the library now holds 021 to 025
+post("/api/db/connect", {"path": "lookups_api.db"})
 _, r = post("/api/schema/ingest", {"base_id": BASE, "source": "json", "schema_json": json.dumps(schema)})
 check("fabricated schema ingested", r.get("tables") == 2 and r.get("fields") == 6, r)
 
@@ -51,7 +54,7 @@ s, e = post("/api/lookups/assign", A(field_ids=["fldL02"], list_name="Places"));
 # ---- connect reports 024 as pending, and the script applies it
 s, r = post("/api/db/connect", {"path": "lookups_api.db"})
 check("connect names migration 024 among the pending drafts", s == 200 and 24 in [p["migration"] for p in r["pending_migrations"]], r.get("pending_migrations"))
-p = subprocess.run([sys.executable, os.path.join("sql", "apply_draft_migrations.py"), "lookups_api.db"], capture_output=True, text=True)
+p = subprocess.run([sys.executable, os.path.join("sql", "apply_migrations.py"), "lookups_api.db"], capture_output=True, text=True)
 check("the script applies the drafts", p.returncode == 0 and "024" in p.stdout, p.stdout + p.stderr)
 s, rv = get("/api/lookups/review?base_id=" + BASE + "&threshold=5"); check("after the migration the page is ready", rv["ready"] is True and rv["missing"] == [])
 

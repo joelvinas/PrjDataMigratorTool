@@ -27,6 +27,7 @@ check("the example row is skipped with a note, not reported as an unknown field"
 tmp = tempfile.mkdtemp(prefix="typesimport_")
 c = sqlite3.connect(os.path.join(tmp, "i.db")); c.row_factory = sqlite3.Row; c.execute("PRAGMA foreign_keys = ON")
 c.executescript(open(os.path.join(ROOT, "sql", "DatabaseSchemaLibrary.sql"), encoding="utf-8").read())
+tf.strip_drafts(c)   # the library now holds 021 to 025: go back to an older database so the "not applied yet" paths can be tested
 B = "appImport001"
 c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tA', ?, 'Orders')", (B,))
 F = [("f1", "Title", "singleLineText"), ("f2", "Notes", "multilineText"), ("f3", "Status", "singleSelect"), ("f4", "Due", "date"), ("f5", "Amount", "number"), ("f6", "Body", "richText")]

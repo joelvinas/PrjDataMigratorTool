@@ -46,7 +46,7 @@ async function decide(path, body, msgId, okText) {
 function render() {
   const R = D.R;
   $("notReady").hidden = !R || R.ready;
-  if (R && !R.ready) $("notReadyText").textContent = "Saving lookup lists needs migration 024 applied to this database. Still missing: " + R.missing.join(", ") + ". Back up the file, run python sql/apply_draft_migrations.py on it, then connect again. You can look at the select fields below; nothing can be saved until then.";
+  if (R && !R.ready) $("notReadyText").textContent = "Saving lookup lists needs migration 024 applied to this database. Still missing: " + R.missing.join(", ") + ". Back up the file, run python sql/apply_migrations.py on it, then connect again. You can look at the select fields below; nothing can be saved until then.";
   renderSummary(); renderLists(); renderFields(); renderControls();
 }
 

@@ -104,16 +104,15 @@ airtable-migration-control/
 │   ├── migration_010_add_load_id_map.sql   applied 2026-11-14: load_id_map (Workfront IDs against temporary IDs, per environment)
 │   ├── migration_011_add_table_core_objects.sql    applied 2026-11-14: table_core_objects
 │   ├── migration_012_add_core_target_type.sql      applied 2026-11-14: field_names.core_target_type (one new column)
-│   ├── migration_021_add_data_type_mapping.sql     DRAFT, not applied: data_type_defaults, field_type_decisions, data_type_events (default mapping, who/when/why, history)
-│   ├── migration_022_add_core_display_type.sql     DRAFT, not applied: field_names.core_display_type (one new column) and the view field_data_types
-│   ├── migration_023_add_rule_text_and_new_types.sql   DRAFT, not applied: data_type_defaults.rule_text (one new column), four more Airtable types, the reference values
+│   ├── migration_021_add_data_type_mapping.sql     in the library (fresh databases get it from step 1): data_type_defaults, field_type_decisions, data_type_events (default mapping, who/when/why, history)
+│   ├── migration_022_add_core_display_type.sql     in the library: field_names.core_display_type (one new column) and the view field_data_types
+│   ├── migration_023_add_rule_text_and_new_types.sql   in the library (fresh databases get it from step 1): data_type_defaults.rule_text (one new column), four more Airtable types, the reference values
 │   ├── migration_013_add_field_relationships.sql   applied 2026-11-14: field_relationships
 │   ├── migration_014_add_option_names.sql          applied 2026-11-14: option_names, option_workfront_ids
 │   ├── migration_015_add_relationship_directions.sql  applied 2026-11-14: link direction columns
 │   ├── migration_016_load_id_map_workspace_key.sql  applied 2026-11-14: workspace_key in the load_id_map key
 │   ├── migration_017_add_record_id_map.sql         applied 2026-11-14: the record ID map (4 tables)
-│   ├── apply_migrations.py             applies 001 to 017 to an existing database (safe to repeat)
-│   └── apply_draft_migrations.py       applies the DRAFT migrations 021 to 023 (safe to repeat; separate until they are folded in)
+│   └── apply_migrations.py             applies 001 to 025 to an existing database in one run (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
@@ -295,7 +294,7 @@ Easiest, with Python only (no SQLite client needed):
 python sql/apply_migrations.py path/to/your.db
 ```
 
-The data type mapping and the lookup lists (draft migrations 021 to 024) are applied separately, after the command above: `python sql/apply_draft_migrations.py path/to/your.db`. Connecting does not refuse a database that lacks them, but step 1 shows a warning with this command, and the Data types and Lookup lists pages cannot save until they are applied. Draft migration 024 (three tables: `lookup_lists`, `field_lookup_decisions`, `lookup_list_events`) is NOT in `DatabaseSchemaLibrary.sql`, the embedded DDL or `apply_migrations.py` until you confirm it is applied.
+Migrations 021 to 025 (the data type mapping, the lookup lists and the Git-R-Done field results) are part of the same run, and a new database made by step 1 already has them: the tables are in `DatabaseSchemaLibrary.sql` and the embedded DDL, and the default type mapping is filled in when the tables are created. A database made before they existed is brought up to date by the command above; it never changes data.
 
 It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. Migration 005 also drops the old placeholder tables `form_sections` and `form_fields`, and migration 006 drops `automation_catalog` and `automation_steps`, but only if they are empty (a placeholder with rows is kept and reported). The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 
@@ -595,7 +594,7 @@ A single or multiple select field with hundreds of options (a list of cities, fo
 - **What the page does.** It lists every single and multiple select field of the base with its option count (from the schema, `airtable_fields.choices_json`: metadata, never a record value), flags the long ones from a threshold the person sets (50 to start; it is a setting of this page, not a Workfront limit), counts options that repeat once letter case and spacing are ignored, and shows a few option names to help recognise a list. A person ticks fields and authorizes them into a new list (named here, with a name proposed from the field) or into an existing list that several fields share, or returns them to ordinary select fields. Lists can be renamed, and deleted when no field uses them.
 - **The rules.** The tool proposes and a person decides: who, when and why are stored for every change (`field_lookup_decisions` holds the latest, `lookup_list_events` is the append-only history). A list name is the name of a Planning record type, so it follows the Planning naming rules and cannot equal a table's Planning name or another list's name (ignoring case).
 - **What it does not do yet.** Nothing is sent to Workfront from this page, and the load plan and the loader do not read these decisions yet: creating the lookup record type, loading its records and turning the field into a reference are the next steps (see docs/LOADER_PLAN.md). Core is not part of this.
-- **Draft migration 024.** The page shows the select fields before the migration is applied and says what is missing, but nothing can be saved until `python sql/apply_draft_migrations.py path/to/your.db` has applied it. Endpoints: `GET /api/lookups/review?base_id=...&threshold=...`, `POST /api/lookups/assign`, `/unassign`, `/rename` and `/delete`.
+- **Migration 024** is part of the library. On an older database the page shows the select fields and says what is missing, but nothing can be saved until `python sql/apply_migrations.py path/to/your.db` has been run. Endpoints: `GET /api/lookups/review?base_id=...&threshold=...`, `POST /api/lookups/assign`, `/unassign`, `/rename` and `/delete`.
 
 ## The loader (Stage 4, begun)
 

@@ -32,6 +32,7 @@ check("state: unset, set (canonical only) and invalid", [dt.state("planning", x)
 tmp = tempfile.mkdtemp(prefix="datatypes_")
 c = sqlite3.connect(os.path.join(tmp, "d.db")); c.row_factory = sqlite3.Row; c.execute("PRAGMA foreign_keys = ON")
 c.executescript(open(os.path.join(ROOT, "sql", "DatabaseSchemaLibrary.sql"), encoding="utf-8").read())
+tf.strip_drafts(c)   # the library now holds 021 to 025: go back to an older database so the "not applied yet" paths can be tested
 B = "appTypes001"
 for tid, nm in (("tA", "Orders"), ("tB", "Customers")):
     c.execute("insert into airtable_tables(table_id, base_id, table_name) values (?,?,?)", (tid, B, nm))
