@@ -426,8 +426,14 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         if send_name != sent:
             row["note"] = "the name is taken by a field Planning keeps in the record type, so the field is created as %s" % send_name
 
+        # two-part check: the real type was refused AND there is nothing to store (every value empty) -> plain text, so it does not use up a long-text slot.
+        # "Empty" is known from the scan of the records, or, when no records could be read, from the Stage 1 profile (null count equals row count).
+        all_null = (s.get("nonempty") == 0 and (s.get("total") or 0) > 0) or (not s and (f.get("row_count") or 0) > 0 and (f.get("null_count") or 0) >= f["row_count"])
+
         def fallback_type():
             nonlocal long_count
+            if all_null:
+                return "text"
             if longest is None or longest > TEXT_MAX:
                 if long_count >= LONG_TEXT_CAP:
                     row["note"] = ("possibly truncated: the record type already has %d long-text fields, the most Planning allows, so this one is plain text" % LONG_TEXT_CAP)
