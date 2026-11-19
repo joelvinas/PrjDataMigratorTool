@@ -188,6 +188,39 @@ try:
     s, r = start("reset", "tC", True, "production", confirm=conf("tC", "production", "wsProd"), phrase="DELETE RECORDS IN DEV")
     check("a production reset needs its own phrase", s == 400 and "DELETE RECORDS IN PRODUCTION" in r["error"], r)
 
+    # ---- step 7 and 8: reset the table's structure (dev; the production rows made above must survive)
+    s, r, j = run("reset_table", "tC")
+    check("the table reset dry run shows counts and the phrase, and sends nothing", s == 200 and j["result"]["dry_run"] and j["result"]["phrase"] == "RESET TABLE IN DEV" and j["result"]["before"]["map_total"] == 2 and j["result"]["attempt"] is None, j)
+    s, r = call("GET", "/api/loadtable/setup?base_id=" + BASE)
+    check("setup carries the table reset phrase of every stage", r["table_phrases"] == {"dev": "RESET TABLE IN DEV", "uat": "RESET TABLE IN UAT", "production": "RESET TABLE IN PRODUCTION"}, r.get("table_phrases"))
+    n0 = len(fake.reqs)
+    for label, body, want in (("no phrase", {"confirm": conf("tC")}, "RESET TABLE IN DEV"), ("the records-reset phrase", {"confirm": conf("tC"), "phrase": "DELETE RECORDS IN DEV"}, "RESET TABLE IN DEV"), ("no confirmation", {"phrase": "RESET TABLE IN DEV"}, "Confirm the table")):
+        s, r = start("reset_table", "tC", True, **body)
+        check("a table reset with %s is refused and sends nothing" % label, s == 400 and want in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = start("reset_table", "tC", True, "production", confirm=conf("tC", "production", "wsProd"), phrase="CREATE IN PRODUCTION")
+    check("a production table reset needs its own phrase", s == 400 and "RESET TABLE IN PRODUCTION" in r["error"] and len(fake.reqs) == n0, r)
+    fake.rt_refuse = 403
+    s, r, j = run("reset_table", "tC", True, phrase="RESET TABLE IN DEV")
+    check("when Workfront refuses the record type delete the job still finishes, says why, keeps the map, and holds no token", s == 200 and j["status"] == "done" and j["result"]["attempt"]["deleted"] is False and j["result"]["attempt"]["status"] == 403
+          and "RECORD_TYPE_IN_HIERARCHY" in j["result"]["attempt"]["reason"] and j["result"]["cleared"] is None and TOKEN not in json.dumps(j) and state("tC")["gates"]["can_reset_table"] and state("tC")["steps"]["structure"]["done"], j)
+    s, r = start("forget_table", "tC", True)
+    check("forgetting the map also needs the confirmation of table, stage and Workspace", s == 400 and "Confirm the table" in r["error"], r)
+    s, r, j = run("forget_table", "tC", False)
+    check("forgetting the map has no dry run", s == 200 and j["status"] == "failed" and "no dry run" in j["error"], j)
+    n0 = len(fake.reqs)
+    s, r, j = run("forget_table", "tC", True)
+    sC = state("tC")
+    check("forgetting anyway clears the dev map without calling Workfront, and the table can be built again from step 2", s == 200 and j["status"] == "done" and j["result"]["cleared"]["load_id_map"] == 2 and len(fake.reqs) == n0
+          and sC["gates"]["can_structure"] and not sC["gates"]["can_records"] and not sC["steps"]["structure"]["record_type"] and not sC["gates"]["can_reset_table"], j)
+    check("the production stage's map for the same table was not touched", state("tC", "production")["steps"]["structure"]["done"] and state("tC", "production")["gates"]["can_reset_table"])
+    s, r = start("forget_table", "tC", True, confirm=conf("tC"))
+    check("with nothing left to forget the step is closed", s == 409 and "nothing to reset" in r["error"], r)
+    fake.rt_refuse = None
+    s, r, j = run("structure", "tC", True)
+    s, r, j = run("reset_table", "tC", True, phrase="RESET TABLE IN DEV")
+    check("when Workfront deletes the record type the same step forgets the map", s == 200 and j["status"] == "done" and j["result"]["attempt"] == {"deleted": True, "already_gone": False} and len(fake.rt_deleted) == 1 and j["result"]["cleared"]["load_id_map"] == 2
+          and not state("tC")["gates"]["can_reset_table"], j)
+
     # ---- what must never leave
     text = "\n".join(seen)
     check("the Workfront token is in no response body", TOKEN not in text and fake.bad_auth == 0)

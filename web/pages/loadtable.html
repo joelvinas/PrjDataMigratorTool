@@ -120,6 +120,18 @@
   <div class="row"><label for="resetPhrase">Type the phrase <code id="resetPhraseShown"></code></label><input id="resetPhrase" type="text" maxlength="40" autocomplete="off" disabled>
     <button id="btnResetSend" type="button" class="primary" disabled>Delete the records...</button></div>
 </details>
+
+<details class="card danger step" id="step7">
+  <summary><strong>7. Reset this table's structure (danger zone)</strong> <span id="pill7" class="tag">locked</span></summary>
+  <p class="hint">Starts the table over so it can be tested again from step 2. It tries to <strong>delete the table's record type in Workfront Planning</strong> (Adobe deletes its fields and records with it), and only when Workfront confirms it is gone does this tool forget the IDs it holds for the table: the record type, fields, select options, record IDs and pass markers. Nothing needed to rebuild the table is lost: names, data types, link directions and every decision stay. If Workfront refuses, nothing here changes, you are told why, and you can choose to forget the IDs anyway. The dry run reads this tool's own counts and sends nothing.</p>
+  <div class="row"><button id="btnTblDry" type="button" disabled>Dry run</button></div>
+  <div id="tblMsg" class="msg"></div>
+  <div class="row"><label for="tblPhrase">Type the phrase <code id="tblPhraseShown"></code></label><input id="tblPhrase" type="text" maxlength="40" autocomplete="off" disabled>
+    <button id="btnTblSend" type="button" class="primary" disabled>Delete the record type...</button></div>
+  <div class="row" id="forgetRow" hidden>
+    <button id="btnForget" type="button" disabled>Forget this table's IDs anyway...</button>
+    <span class="hint">Use this after deleting the record type by hand, or when you accept that it may still exist in Workfront. A record type left behind makes the next structure run report a name clash.</span></div>
+</details>
 </main>
 </div>
 </div>

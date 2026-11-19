@@ -12,6 +12,9 @@ The steps, each possible only when the one before is done (the state is read fro
     4 links       the links pass
     5 verify      the record counts: saved file, registry, records done, Workfront's own count
     6 reset       wipe this table's records so it can be reloaded (a dry run, then a typed phrase)
+    7 reset_table delete the table's record type in Workfront and forget its IDs, so the table can be rebuilt from step 2 (tablereset.py); if Workfront refuses, nothing local
+                  changes and the person is told why
+    8 forget_table  only after a refusal, and only when the person chooses: forget the IDs without calling Workfront
 
 Rules kept here (CLAUDE.md): no record value, no token and no file name leaves this module; a result holds table, field and record IDs, names of schema objects, counts,
 statuses and reasons already scrubbed by loadrun.scrub(). A function never sends anything unless it is given send=True (a dry run reads the database and the saved file only).
@@ -28,9 +31,10 @@ import loadstate as ls
 import planningtransport as pt
 import recordload as rl
 import recordmap as rm
+import tablereset as tbr
 import workfronthttp as wh
 
-STEPS = ("structure", "records", "links", "reset")
+STEPS = ("structure", "records", "links", "reset", "reset_table", "forget_table")
 FAILURE_LIMIT = 200                  # failed records listed in one result (the full count is always given)
 
 
@@ -318,7 +322,8 @@ def check_table(conn, base_id, table_id, ctx, extract_dir):
              "done": (not link_items) or (records["complete"] and not pend_links)}
     steps = {"structure": structure, "records": records, "links": links}
     gates = {"can_structure": check["can_continue"], "can_records": check["can_continue"] and structure["done"], "can_links": check["can_continue"] and structure["done"] and records["complete"] and bool(link_items),
-             "can_verify": check["can_continue"] and structure["done"] and records["complete"], "can_reset": bool(structure["record_type"])}
+             "can_verify": check["can_continue"] and structure["done"] and records["complete"], "can_reset": bool(structure["record_type"]),
+             "can_reset_table": bool(tbr.counts(conn, base_id, table_id, stage, ctx.ws)["map_total"])}       # anything recorded, even a failed or unfinished item, can be reset
     return {"check": check, "steps": steps, "gates": gates, "workspace_id": ctx.ws, "stage": stage}
 
 
@@ -333,6 +338,7 @@ GATE_MESSAGE = {
     "can_links": "Step 3 is not finished (or this table has no link fields): finish the records pass first.",
     "can_verify": "Step 3 is not finished: load the records first.",
     "can_reset": "No Planning record type is recorded for this table in this stage and Workspace, so there is nothing to reset.",
+    "can_reset_table": "This tool holds no created or attempted item for this table in this stage and Workspace, so there is nothing to reset.",
 }
 
 
@@ -445,6 +451,32 @@ def step_reset(conn, base_id, table_id, ctx, tr, send, should_stop, progress):
         raise LoadError(str(e), 409)
     r.pop("record_type", None)
     r.update({"step": "reset", "dry_run": not send, "phrase": rs.phrase(ctx.stage), "cancelled": bool(r["wipe"] and r["wipe"].get("cancelled"))})
+    return r
+
+
+def step_reset_table(conn, base_id, table_id, ctx, tr, send, should_stop, progress):
+    """Step 7: delete the record type, then forget the map. A dry run reads this tool's own counts and sends nothing. A refusal from Workfront is a RESULT (attempt.deleted false,
+    the map kept), not an error, so the page can offer step 8."""
+    try:
+        r = tbr.reset(conn, base_id, table_id, ctx.stage, ctx.ws, tr, send)
+    except tbr.TableResetError as e:
+        raise LoadError(str(e), 409)
+    a = r["attempt"]
+    if a and not a["deleted"]:
+        a["reason"] = clean(ctx, a.get("reason") or "")
+    r.update({"step": "reset_table", "dry_run": not send, "phrase": tbr.phrase(ctx.stage), "cancelled": False})
+    return r
+
+
+def step_forget_table(conn, base_id, table_id, ctx, tr, send, should_stop, progress):
+    """Step 8: forget the map without calling Workfront. Refused as a dry run: it only ever follows a refused step 7, and it deletes nothing but this tool's own rows."""
+    if not send:
+        raise LoadError("Forgetting the map has no dry run: run step 7 as a dry run to see the counts.", 409)
+    try:
+        r = tbr.forget_only(conn, base_id, table_id, ctx.stage, ctx.ws)
+    except tbr.TableResetError as e:
+        raise LoadError(str(e), 409)
+    r.update({"step": "forget_table", "dry_run": False, "cancelled": False})
     return r
 
 

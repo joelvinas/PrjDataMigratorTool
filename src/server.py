@@ -44,6 +44,7 @@ import sandboxplan
 import linkdirections as ld
 import loadconfig
 import loadreset
+import tablereset
 import loadrun
 import recordmap
 import tableload
@@ -5562,7 +5563,8 @@ def api_names_report(q):
 # The Workfront settings are read from config.json on every call by loadconfig and never reach a response: every payload and message below passes through _lt_out(), which
 # removes each configured secret from the text as a last line of defence. Record values are never read here: a result holds IDs, schema names, counts and scrubbed reasons.
 # --------------------------------------------------------------------------
-LT_GATE = {"structure": "can_structure", "records": "can_records", "links": "can_links", "reset": "can_reset"}
+LT_GATE = {"structure": "can_structure", "records": "can_records", "links": "can_links", "reset": "can_reset", "reset_table": "can_reset_table", "forget_table": "can_reset_table"}
+LT_PHRASE = {"reset": loadreset.phrase, "reset_table": tablereset.phrase}      # steps that always need their own typed phrase when they send
 
 
 def _lt_secrets():
@@ -5581,7 +5583,7 @@ def _lt_call(fn_, *a, **k):
     """Run a tableload function and turn its LoadError (or a reset refusal) into the app's AppError, with every secret removed from the message."""
     try:
         return fn_(*a, **k)
-    except (tableload.LoadError, loadreset.ResetError) as e:
+    except (tableload.LoadError, loadreset.ResetError, tablereset.TableResetError) as e:
         raise AppError(loadconfig.redact(getattr(e, "message", str(e)), _lt_secrets()), getattr(e, "status", 409))
 
 
@@ -5597,7 +5599,7 @@ def _lt_args(body):
 def api_loadtable_setup(q):
     """What the page needs before a table is chosen: whether Planning is configured (yes or no, never a secret), the Workspace ID to show, the stages, the typed reset phrases and
     the in-scope tables for the base."""
-    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
+    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "table_phrases": {s: tablereset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
     try:                                      # the stages are the ones the user defined in config.json (workfront.planning); only their Workspace IDs are shown, never a token
         data = loadconfig.read_config(CONFIG_PATH)
         for st in loadconfig.planning_blocks(data):
@@ -5683,6 +5685,10 @@ def _run_load_job(job):
                 res = tableload.step_records(conn, job.base, job.table_id, ctx, tr, job.send, extract_dir(), stop, job.set_progress)
             elif job.step == "links":
                 res = tableload.step_links(conn, job.base, job.table_id, ctx, tr, job.send, extract_dir(), stop, job.set_progress)
+            elif job.step == "reset_table":
+                res = tableload.step_reset_table(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
+            elif job.step == "forget_table":
+                res = tableload.step_forget_table(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
             else:
                 res = tableload.step_reset(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
         job.result = _lt_out(res)
@@ -5706,7 +5712,7 @@ def api_loadtable_start(body):
     send = body.get("send") is True
     confirm = None
     if send and stage == "production":          # a real send to the production stage needs a typed phrase on top of the confirmation
-        want = loadreset.phrase(stage) if step == "reset" else loadrun.PRODUCTION_PHRASE
+        want = LT_PHRASE[step](stage) if step in LT_PHRASE else loadrun.PRODUCTION_PHRASE
         if body.get("phrase") != want:
             raise AppError("Sending to the production stage needs the exact phrase: %s" % want)
         confirm = loadrun.PRODUCTION_PHRASE
@@ -5720,8 +5726,8 @@ def api_loadtable_start(body):
         conf = body.get("confirm")
         if not (isinstance(conf, dict) and conf.get("table_id") == table and conf.get("stage") == stage and str(conf.get("workspace_id")) == ctx.ws):
             raise AppError("Confirm the table, the stage and the Workspace ID exactly as shown before anything is sent.")
-        if step == "reset" and body.get("phrase") != loadreset.phrase(stage):
-            raise AppError("A reset deletes records and cannot be undone. Type the exact phrase: %s" % loadreset.phrase(stage))
+        if step in LT_PHRASE and body.get("phrase") != LT_PHRASE[step](stage):
+            raise AppError("A reset deletes %s and cannot be undone. Type the exact phrase: %s" % ("records" if step == "reset" else "the record type, its fields and its records", LT_PHRASE[step](stage)))
     with _loadjob_lock:
         cur = LOADJOB["current"]
         if cur and cur.status == "running":

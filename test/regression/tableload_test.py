@@ -56,7 +56,7 @@ save("tB", [{"id": "recB%d" % i, "fields": {"fB1": "SECRETVALUE customer %d" % i
 save("tC", [{"id": "recC1", "fields": {"fC1": "SECRETVALUE note"}}, {"id": "recC2", "fields": {"fC1": "SECRETVALUE note 2"}}])
 
 class Resp(object):
-    def __init__(self, status, body): self.status, self._b = status, json.dumps(body).encode()
+    def __init__(self, status, body): self.status, self._b = status, (json.dumps(body).encode() if body is not None else b"")
     def read(self): return self._b
     def __enter__(self): return self
     def __exit__(self, *a): return False
@@ -64,6 +64,7 @@ class Fake(object):
     """A fake Planning: record types, fields, a record store per record type (bulk create, list, bulk delete), PATCH, and switches to refuse a field or fail record indexes."""
     def __init__(self):
         self.reqs, self.n, self.r, self.store, self.refuse_fields, self.fail_index, self.on_bulk = [], 0, 0, {}, set(), set(), None
+        self.rt_refuse, self.gone, self.deleted, self.home = None, set(), [], "wsDev"      # record type delete: a refusal status, IDs already gone, IDs deleted, the Workspace a record type reports
     def open(self, req, timeout=None):
         body = json.loads(req.data) if req.data else None
         m, full = req.get_method(), req.full_url
@@ -88,7 +89,14 @@ class Fake(object):
         if m == "GET" and "/record-types/" in u and u.endswith("/records"):
             rt = u.split("/record-types/")[1].split("/")[0]; rows = self.store.get(rt, [])
             return Resp(200, {"content": [{"id": r, "data": {"f": "SECRETVALUE"}} for r in rows[:100]], "totalElements": len(rows)})
-        if m == "GET" and u.rsplit("/", 2)[-2] == "record-types": return Resp(200, {"id": u.rsplit("/", 1)[-1], "primaryWorkspaceId": "wsDev"})
+        if m in ("GET", "DELETE") and u.rsplit("/", 2)[-2] == "record-types":
+            import urllib.error, io
+            rid = u.rsplit("/", 1)[-1]
+            if rid in self.gone or rid in self.deleted: raise urllib.error.HTTPError(full, 404, "nf", {}, io.BytesIO(b"{}"))
+            if m == "DELETE":
+                if self.rt_refuse: raise urllib.error.HTTPError(full, self.rt_refuse, "no", {}, io.BytesIO(json.dumps({"code": "RECORD_TYPE_IN_HIERARCHY", "message": "refused for Bearer " + TOKEN}).encode()))
+                self.deleted.append(rid); return Resp(204, None)
+            return Resp(200, {"id": rid, "primaryWorkspaceId": self.home})
         if m == "DELETE" and u.endswith("/records/bulk"):
             rt = u.split("/record-types/")[1].split("/")[0]; res = []
             for i, rid in enumerate(body["ids"]): self.store[rt].remove(rid); res.append({"requestIndex": i, "id": rid, "status": "success"})
@@ -114,7 +122,7 @@ check("a table that is out of scope or unknown is refused with its ID", "tD" in 
 sE = state("tE")
 check("a table with a blocked field (no imported data type) is BLOCKED with reasons, and no later step is open", sE["check"]["counts"]["blocked"] >= 1 and not sE["check"]["can_continue"] and sE["check"]["reasons"] and not any(sE["gates"].values()), sE["gates"])
 sC = state("tC")
-check("a clear table: ready counts, no blocked item, step 2 open and the rest closed", sC["check"]["counts"] == {"ready": 2, "hold": 0, "blocked": 0} and sC["gates"] == {"can_structure": True, "can_records": False, "can_links": False, "can_verify": False, "can_reset": False}, sC["gates"])
+check("a clear table: ready counts, no blocked item, step 2 open and the rest closed", sC["check"]["counts"] == {"ready": 2, "hold": 0, "blocked": 0} and sC["gates"] == {"can_structure": True, "can_records": False, "can_links": False, "can_verify": False, "can_reset": False, "can_reset_table": False}, sC["gates"])
 sA = state("tA")
 check("step 1 names the tables a link points to and how far each one is", [d["table_id"] for d in sA["check"]["dependencies"]] == ["tB"] and sA["check"]["dependencies"][0]["loaded"] is False and sA["check"]["dependencies"][0]["record_type"] is None and sA["check"]["dependency_tables"] == ["tB"], sA["check"]["dependencies"])
 check("each step is refused until the one before is done", all(refused(tl.need, sC["gates"], k, tl.GATE_MESSAGE[k]) for k in ("can_records", "can_links", "can_verify", "can_reset")) and refused(tl.need, sC["gates"], "can_structure", "x") is None)
@@ -240,6 +248,55 @@ stop.store[sC["steps"]["structure"]["record_type"]] = ["X%d" % i for i in range(
 calls = []
 res = keep(tl.step_reset(conn, BASE, "tC", ctx, trs, True, lambda: (calls.append(1) or len(calls) > 1), events.append))
 check("a stop during the wipe says so, leaves the rest in Workfront and keeps the local memory", res["cancelled"] and len(stop.store[sC["steps"]["structure"]["record_type"]]) == 150 and res["cleared"] is None, res)
+
+# ---- step 7 and 8: reset a table's structure (delete the record type, then forget the map)
+import tablereset as tbr
+def rows(tid): return conn.execute("select count(*) from load_id_map where table_id=? and workspace_key='wsDev' and environment='dev'", (tid,)).fetchone()[0]
+def kept(): return [conn.execute("select count(*) from %s" % t).fetchone()[0] for t in ("airtable_tables", "airtable_fields", "name_events", "source_records", "field_relationships", "table_scope")]
+rtB = state("tB")["steps"]["structure"]["record_type"]
+fidB = conn.execute("select airtable_field_id from load_id_map where table_id='tB' and kind='field' order by 1 limit 1").fetchone()[0]
+for env_, ws_ in (("dev", "wsDev"), ("uat", "wsDev"), ("dev", "wsOther")):     # one option ID read back for the stage and Workspace in use, and two that must survive
+    conn.execute("insert into option_workfront_ids(airtable_field_id, choice_id, system, environment, workspace_id, workfront_option_id) values (?,?,?,?,?,?)", (fidB, "ch" + env_ + ws_, "planning", env_, ws_, "OPT"))
+conn.commit()
+sB = state("tB")
+check("the table reset opens once anything is recorded for the table, and not before", sB["gates"]["can_reset_table"] and not state("tE")["gates"]["can_reset_table"], (sB["gates"], state("tE")["gates"]))
+h0, n0, k0 = dbhash(), len(fk.reqs), kept()
+res = keep(tl.step_reset_table(conn, BASE, "tB", ctx, None, False, None, events.append))
+check("the table reset dry run counts what would be forgotten, names the other tables' link fields that point here, and sends and writes nothing",
+      res["dry_run"] and res["attempt"] is None and res["cleared"] is None and res["before"]["map_total"] == 3 and res["before"]["mapped_records"] == 3 and res["before"]["markers"] >= 3 and res["before"]["option_ids"] == 1
+      and res["inbound"] == [{"table_id": "tA", "name": "Orders", "fields": 1}] and res["phrase"] == "RESET TABLE IN DEV" and len(fk.reqs) == n0 and dbhash() == h0, res)
+check("forgetting the map has no dry run", "no dry run" in (refused(tl.step_forget_table, conn, BASE, "tB", ctx, None, False, None, events.append) or ""))
+fk.home = "wsOther"
+res = keep(tl.step_reset_table(conn, BASE, "tB", ctx, tr, True, None, events.append))
+check("a record type in another Workspace is never deleted: the attempt is refused and the map is kept", res["attempt"]["deleted"] is False and "different Workspace" in res["attempt"]["reason"] and res["cleared"] is None
+      and not [x for x in fk.reqs if x[0] == "DELETE" and x[1].split("?")[0].endswith("/record-types/" + rtB)] and rows("tB") == 3)
+fk.home = "wsDev"; fk.rt_refuse = 403
+res = keep(tl.step_reset_table(conn, BASE, "tB", ctx, tr, True, None, events.append))
+check("when Workfront refuses the delete the result says why, with no token, and nothing local changes", res["attempt"]["deleted"] is False and res["attempt"]["status"] == 403 and "RECORD_TYPE_IN_HIERARCHY" in res["attempt"]["reason"] and TOKEN not in json.dumps(res)
+      and res["cleared"] is None and rows("tB") == 3 and state("tB")["steps"]["structure"]["record_type"] == rtB and state("tB")["steps"]["records"]["complete"], res)
+check("a refusal leaves step 8 available: still recorded, gate open", state("tB")["gates"]["can_reset_table"])
+inbound_rows, n_f = rows("tA"), len(fk.reqs)
+res = keep(tl.step_forget_table(conn, BASE, "tB", ctx, None, True, None, events.append))
+check("forgetting anyway sends nothing, clears the table's map (items, record IDs, markers, option IDs) for this stage and Workspace only", res["cleared"] == {"load_id_map": 3, "mappings": 3, "markers": res["before"]["markers"], "option_ids": 1}
+      and len(fk.reqs) == n_f and rows("tB") == 0 and rows("tA") == inbound_rows and rows("tC") > 0
+      and conn.execute("select count(*) from option_workfront_ids").fetchone()[0] == 2 and kept() == k0, res)
+check("every decision and the Airtable registry are still there, so the table can be rebuilt", kept() == k0 and not state("tB")["steps"]["structure"]["record_type"] and not state("tB")["gates"]["can_records"] and state("tB")["gates"]["can_structure"] and not state("tB")["gates"]["can_reset_table"])
+check("a table with nothing recorded is refused with a plain reason", "nothing to reset" in (refused(tl.step_reset_table, conn, BASE, "tB", ctx, tr, False, None, events.append) or "") and "nothing to reset" in (refused(tl.step_reset_table, conn, BASE, "tB", ctx, tr, True, None, events.append) or ""))
+fk.rt_refuse = None
+res = keep(tl.step_structure(conn, BASE, "tB", ctx, tr, True, None, events.append)); keep(tl.step_records(conn, BASE, "tB", ctx, tr, True, extract, None, events.append))
+sB = state("tB"); rtB2 = sB["steps"]["structure"]["record_type"]
+check("the table is rebuilt and reloaded from the kept knowledge, with a new record type", res["counts"].get("created") == 3 and rtB2 and rtB2 != rtB and sB["steps"]["records"]["complete"] and len(fk.store[rtB2]) == 3, res["counts"])
+res = keep(tl.step_reset_table(conn, BASE, "tB", ctx, tr, True, None, events.append))
+check("when Workfront deletes the record type the map is forgotten in the same step", res["attempt"] == {"deleted": True, "already_gone": False} and fk.deleted == [rtB2] and res["cleared"]["load_id_map"] == 3 and res["cleared"]["mappings"] == 3 and rows("tB") == 0, res)
+fk.gone.add(state("tC")["steps"]["structure"]["record_type"])
+res = keep(tl.step_reset_table(conn, BASE, "tC", ctx, tr, True, None, events.append))
+check("a record type already deleted by hand counts as deleted, and the map is forgotten", res["attempt"] == {"deleted": True, "already_gone": True} and res["cleared"]["load_id_map"] == 2 and rows("tC") == 0, res)
+st_ = tl.ls.DbState(conn, BASE, "wsDev")
+st_.begin({"temp_id": "P-T-tE", "kind": "record_type", "system": "planning", "table_id": "tE", "name": "Pending"}, "dev"); st_.fail("P-T-tE", "dev", "refused for Bearer " + TOKEN)
+n1 = len(fk.reqs)
+res = keep(tl.step_reset_table(conn, BASE, "tE", ctx, tr, True, None, events.append))
+check("a table with only a failed attempt (no Workfront ID) is forgotten at once without calling Workfront", res["attempt"] is None and res["cleared"]["load_id_map"] == 1 and len(fk.reqs) == n1 and rows("tE") == 0, res)
+check("the table reset never touches the Core rows or another Workspace's rows", conn.execute("select count(*) from load_id_map where system='core'").fetchone()[0] == 0 and conn.execute("select count(*) from option_workfront_ids where workspace_id='wsOther'").fetchone()[0] == 1)
 
 # ---- what must never leave
 blob = "\n".join(never)
