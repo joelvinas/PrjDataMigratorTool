@@ -5510,6 +5510,15 @@ def api_names_import_template(_q=None):
     return (names_io.template_csv().encode("utf-8"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="field-names-and-types-template.csv"'})
 
 
+def api_names_export(q):
+    """The field names and data types already held, in the template's format, for repair in Excel and re-import."""
+    base = _names_base(q)
+    with db() as conn:
+        rev = _names(names_store.review, conn, base)
+    return (names_io.export_csv(rev["fields"]).encode("utf-8"), "text/csv; charset=utf-8",
+            {"Content-Disposition": 'attachment; filename="field-names-and-types_%s_%s.csv"' % (base, _stamp())})
+
+
 def api_names_import(body):
     with db() as conn:
         base = _names_base(body)
@@ -5996,7 +6005,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
               "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
               "/api/names/review": api_names_review, "/api/datatypes/review": api_datatypes_review, "/api/lookups/review": api_lookups_review, "/api/names/report": api_names_report,
-              "/api/names/import-template.csv": api_names_import_template, "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml,
+              "/api/names/import-template.csv": api_names_import_template, "/api/names/export.csv": api_names_export,"/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml,
               "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,

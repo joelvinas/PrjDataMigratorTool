@@ -39,6 +39,23 @@ def template_csv():
     return "\ufeff" + out.getvalue()
 
 
+def export_csv(review_fields):
+    """The data we already hold, in the template's columns, so it can be fixed in Excel and imported again. One row per field that is not abandoned or merged,
+    sorted by table name and field name. A name is the approved one when there is one, otherwise the current candidate (the typed or original name, before any
+    repair). Types are the stored ones (blank when none). No record value is involved. UTF-8 with a BOM, so Excel opens it."""
+    out = io.StringIO(newline="")
+    w = csv.writer(out, lineterminator="\r\n")
+    w.writerow(TEMPLATE_HEADER)
+    def name(f, t):
+        tr = (f.get("targets") or {}).get(t) or {}
+        return (tr.get("approved_name") if tr.get("status") == "approved" else None) or tr.get("candidate") or ""
+    for f in sorted((f for f in review_fields if not f.get("abandoned") and not f.get("consolidated")),
+                    key=lambda f: ((f.get("table_name") or "").casefold(), (f.get("original") or "").casefold(), f["field_id"])):
+        w.writerow((f["field_id"], f.get("original") or "", f.get("data_type") or "", name(f, "planning_name"), name(f, "core_name"), name(f, "core_label"),
+                    f.get("target_type") or "", f.get("core_target_type") or "", f.get("core_display_type") or ""))
+    return "﻿" + out.getvalue()
+
+
 def _hkey(h):
     return re.sub(r"[^a-z0-9]", "", (h or "").lower())
 

@@ -123,6 +123,8 @@ const isPreview = () => !!N.saved && !sameSettings(controlSettings(), N.saved);
 /* ---------- talking to the server ---------- */
 async function load() {
   const base = baseNow();
+  const exp = $("linkExport");
+  if (exp) exp.href = "/api/names/export.csv?base_id=" + encodeURIComponent(base);
   if (!/^app[A-Za-z0-9]{4,}$/.test(base)) { N.R = null; render(); return; }
   try {
     const r = await api("GET", "/api/names/review?base_id=" + encodeURIComponent(base));
