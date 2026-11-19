@@ -376,6 +376,24 @@ class PlanningTransport(object):
         reply = self.http.request("GET", "/v2/record-types/%s" % record_type_id)
         return reply if isinstance(reply, dict) else {}
 
+    def delete_record_type(self, record_type_id, workspace_id=None):
+        """Permanently delete a record type, with its fields and records: DELETE /v2/record-types/{id} (204; 403 RECORD_TYPE_IN_HIERARCHY; 404). Not yet run against a real Workfront.
+        First reads the record type and refuses one whose primaryWorkspaceId is not `workspace_id` (when both are known). Never raises for a refusal: returns
+        {"deleted": True, "already_gone": bool} or {"deleted": False, "status": HTTP status or None, "reason": "short cleaned text"}. A 404 counts as deleted (it is gone)."""
+        if not record_type_id:
+            raise ValueError("A record type ID is needed.")
+        try:
+            rt = self.get_record_type(record_type_id)
+            home = rt.get("primaryWorkspaceId") if isinstance(rt, dict) else None
+            if home and workspace_id and str(home) != str(workspace_id):
+                return {"deleted": False, "status": None, "reason": "The record type belongs to a different Workspace than the workspace_id in config.json, so it was not deleted."}
+            self.http.request("DELETE", "/v2/record-types/%s" % record_type_id)
+        except HttpError as e:
+            if e.status == 404:
+                return {"deleted": True, "already_gone": True}
+            return {"deleted": False, "status": e.status, "reason": str(e)}
+        return {"deleted": True, "already_gone": False}
+
     def list_record_ids(self, record_type_id, size=100):
         """(the first page's record IDs, total records in the record type). Only IDs are kept: the record values in the reply are dropped at once. GET /v2/record-types/{id}/records?page=0&size=N."""
         if not record_type_id:

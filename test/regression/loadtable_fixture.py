@@ -18,6 +18,7 @@ class Fake(object):
     def reset(self):
         self.reqs, self.n, self.r, self.store, self.refuse_fields, self.delay, self.bad_auth, self.reject = [], 0, 0, {}, set(), 0.0, 0, False
         self.workspaces = {"wsDev": "Rehearsal Workspace", "wsProd": "Live Workspace"}      # a Workspace ID that is not here answers 404
+        self.rt_refuse, self.rt_deleted = None, []                                          # a record type DELETE answers this status (e.g. 403) while it is set; the IDs it deleted
     def handle(self, m, path, body, auth):
         with self.lock:
             self.reqs.append((m, path, body))
@@ -44,6 +45,9 @@ class Fake(object):
                 rt = u.split("/record-types/")[1].split("/")[0]; rows = self.store.get(rt, [])
                 return 200, {"content": [{"id": r, "data": {"f": "SECRETVALUE"}} for r in rows[:100]], "totalElements": len(rows)}
             elif m == "GET" and u.rsplit("/", 2)[-2] == "record-types": return 200, {"id": u.rsplit("/", 1)[-1], "primaryWorkspaceId": "wsDev"}
+            elif m == "DELETE" and u.rsplit("/", 2)[-2] == "record-types":
+                if self.rt_refuse: return self.rt_refuse, {"code": "RECORD_TYPE_IN_HIERARCHY", "message": "refused for Bearer " + TOKEN}
+                self.rt_deleted.append(u.rsplit("/", 1)[-1]); return 200, {}
             elif m == "DELETE" and u.endswith("/records/bulk"):
                 rt = u.split("/record-types/")[1].split("/")[0]; res = []
                 for i, rid in enumerate(body["ids"]): self.store[rt].remove(rid); res.append({"requestIndex": i, "id": rid, "status": "success"})

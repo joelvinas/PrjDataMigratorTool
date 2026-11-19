@@ -44,6 +44,7 @@ import sandboxplan
 import linkdirections as ld
 import loadconfig
 import loadreset
+import tablereset
 import loadrun
 import recordmap
 import tableload
@@ -5581,7 +5582,7 @@ def _lt_call(fn_, *a, **k):
     """Run a tableload function and turn its LoadError (or a reset refusal) into the app's AppError, with every secret removed from the message."""
     try:
         return fn_(*a, **k)
-    except (tableload.LoadError, loadreset.ResetError) as e:
+    except (tableload.LoadError, loadreset.ResetError, tablereset.TableResetError) as e:
         raise AppError(loadconfig.redact(getattr(e, "message", str(e)), _lt_secrets()), getattr(e, "status", 409))
 
 
@@ -5897,6 +5898,46 @@ def api_emergency_cancel(_body=None):
     return {"cancelling": True}
 
 
+def _em_reset_common(body, send):
+    """The checks both table resets share: the table (a plain ID) and, for a real send, the confirmation the page collects (the table and the Workspace ID exactly as shown), and no
+    run going on either page. Returns (base, table, ctx)."""
+    base = _names_base(body)
+    table = str(body.get("table_id") or "").strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    ctx = _em_context(send)
+    if send:
+        conf = body.get("confirm")
+        if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
+            raise AppError("Confirm the table and the Workspace ID exactly as shown before anything is sent.")
+        for cur, what in ((EMJOB["current"], "A Git-R-Done run"), (LOADJOB["current"], "A Load a table step")):
+            if cur and cur.status == "running":
+                raise AppError("%s is going (table %s). Wait for it or cancel it before resetting." % (what, cur.table_id), 409)
+    return base, table, ctx
+
+
+def api_emergency_reset(body):
+    """Reset one table in the DEV Workspace so Git-R-Done can build it again: with send false, this tool's own counts only (nothing is sent, nothing is written); with send true, try
+    to delete the table's record type in Workfront and, only when it is gone, forget the IDs held for the table. A refusal from Workfront is an ordinary answer (attempt.deleted false,
+    nothing forgotten). Not gated by the Load a table steps: it needs only a table that this tool holds something for. See tablereset.py."""
+    send = body.get("send") is True
+    base, table, ctx = _em_reset_common(body, send)
+    with db() as conn:
+        tr = _lt_call(tableload.transport, ctx) if send else None
+        res = _lt_call(tablereset.reset, conn, base, table, emergency.STAGE, ctx.ws, tr, send)
+    res.update(dry_run=not send, workspace_id=ctx.ws, stage=emergency.STAGE)
+    return _lt_out(res)
+
+
+def api_emergency_forget(body):
+    """After a refused delete, and only when the person chooses: forget the IDs held for the table in the dev Workspace without calling Workfront."""
+    base, table, ctx = _em_reset_common(body, True)
+    with db() as conn:
+        res = _lt_call(tablereset.forget_only, conn, base, table, emergency.STAGE, ctx.ws)
+    res.update(workspace_id=ctx.ws, stage=emergency.STAGE)
+    return _lt_out(res)
+
+
 def api_emergency_report(q):
     """One report file of the last runs, by plain name (letters, digits, hyphen, underscore and one of the two extensions); never a path."""
     name = (q.get("file") or [""])[0]
@@ -5947,7 +5988,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
-               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/emergency/start": api_emergency_start, "/api/emergency/cancel": api_emergency_cancel,
+               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/lookups/assign": api_lookups_assign, "/api/lookups/unassign": api_lookups_unassign, "/api/lookups/rename": api_lookups_rename, "/api/lookups/delete": api_lookups_delete, "/api/datatypes/default": api_datatypes_default,

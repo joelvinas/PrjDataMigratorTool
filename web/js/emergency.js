@@ -12,6 +12,8 @@ const OUT_ROW = { clean: "out-ok", "pre-converted": "out-hold", failed: "out-fai
 function applyGo() {
   const busy = !!(em.job && em.job.status === "running");
   $("btnGo").disabled = !(em.setup && em.setup.configured && baseNow() && tableNow()) || busy;
+  $("btnReset").disabled = $("btnGo").disabled;
+  $("btnForget").disabled = busy;
   $("btnCancel").hidden = !busy;
 }
 
@@ -98,10 +100,47 @@ async function go() {
   const name = t ? t.airtable_name : tableNow();
   if (!window.confirm("Send the table \"" + name + "\" (" + tableNow() + ") to the dev Workspace " + wsNow() + "?\n\nThis creates a record type and fields and loads records in Workfront Planning.")) return;
   showGlobalError("");
+  setMsg("resetMsg", "", ""); $("forgetRow").hidden = true;
   $("resultCard").hidden = true;
   await api("POST", "/api/emergency/start", { base_id: baseNow(), table_id: tableNow(), confirm: { table_id: tableNow(), workspace_id: wsNow() } });
   await follow();
   if (!em.timer && em.job && em.job.status === "running") em.timer = setInterval(() => poll().catch((e) => { stopTimer(); showGlobalError(e.message); }), 1500);
+}
+
+/* ---------- reset: delete the record type, then forget the IDs (a refusal is an answer, not an error) ---------- */
+const forgotten = (c) => fmt(c.load_id_map) + " recorded item(s), " + fmt(c.mappings) + " record ID(s), " + fmt(c.markers) + " marker(s), " + fmt(c.option_ids) + " option ID(s)";
+const resetBody = (send) => ({ base_id: baseNow(), table_id: tableNow(), send, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
+const tableLabel = () => { const t = (em.setup.tables || []).find((x) => x.table_id === tableNow()); return (t ? t.airtable_name : tableNow()) + " (" + tableNow() + ")"; };
+const linkWarn = (r) => (r.inbound || []).length ? "\n\nLink fields of other tables point at this one (" + r.inbound.map((x) => x.name + " x " + fmt(x.fields)).join(", ") + "); Workfront may refuse the delete because of them." : "";
+
+function showReset(r) {
+  const a = r.attempt;
+  $("forgetRow").hidden = true;
+  if (a && !a.deleted) {
+    $("forgetRow").hidden = false;
+    setMsg("resetMsg", "Workfront did NOT delete the record type" + (a.status ? " (HTTP " + a.status + ")" : "") + ": " + (a.reason || "no reason given") + " The IDs this tool holds were kept. Fix the cause and press Reset table again, delete the record type by hand in Workfront, or use \"Forget this table's IDs anyway\"." + linkWarn(r).replace(/\n\n/, " "), "err");
+    return;
+  }
+  $("resultCard").hidden = true;
+  setMsg("resetMsg", (a ? (a.already_gone ? "The record type was already gone from Workfront. " : "Record type deleted in Workfront. ") : "No record type ID was recorded, so nothing was deleted in Workfront (if an interrupted run created one, delete it by hand). ")
+    + "Forgot " + forgotten(r.cleared) + ". Press Go to build the table again.", "ok");
+}
+
+async function resetTable() {
+  showGlobalError(""); setMsg("resetMsg", "", ""); $("forgetRow").hidden = true;
+  const peek = await api("POST", "/api/emergency/reset", resetBody(false));        // this tool's own counts: nothing is sent
+  const b = peek.before;
+  if (!window.confirm("Reset the table \"" + tableLabel() + "\" in the dev Workspace " + wsNow() + "?\n\nThis tool holds " + fmt(b.map_total) + " recorded item(s), " + fmt(b.mapped_records) + " record ID(s), " + fmt(b.markers) + " marker(s) and " + fmt(b.option_ids) + " option ID(s) for it. "
+    + (b.record_type ? "It will try to DELETE record type " + b.record_type + " in Workfront Planning, with its fields and records, then forget these. This cannot be undone." : "No record type ID is recorded, so nothing will be deleted in Workfront; these will be forgotten.") + linkWarn(peek))) return;
+  showReset(await api("POST", "/api/emergency/reset", resetBody(true)));
+}
+
+async function forgetTable() {
+  if (!window.confirm("Forget every ID this tool holds for \"" + tableLabel() + "\" in the dev Workspace " + wsNow() + "?\n\nNothing is sent to Workfront. A record type still there will cause a name clash on the next Go.")) return;
+  const r = await api("POST", "/api/emergency/forget", resetBody(true));
+  $("forgetRow").hidden = true;
+  $("resultCard").hidden = true;
+  setMsg("resetMsg", "Forgot " + forgotten(r.cleared) + ". Nothing was sent to Workfront. If the record type still exists there, delete it before pressing Go.", "ok");
 }
 
 const guarded = (fn) => () => fn().catch((e) => { showGlobalError(e.message); applyGo(); });
@@ -111,7 +150,9 @@ startPage("emergency", { afterConnect }, () => {
   initBaseCombo();
   watchSort("fieldGrid");
   $("baseId").addEventListener("input", guarded(loadSetup));
-  $("tableSel").addEventListener("change", applyGo);
+  $("tableSel").addEventListener("change", () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; applyGo(); });
   $("btnGo").addEventListener("click", guarded(go));
+  $("btnReset").addEventListener("click", guarded(resetTable));
+  $("btnForget").addEventListener("click", guarded(forgetTable));
   $("btnCancel").addEventListener("click", guarded(async () => { await api("POST", "/api/emergency/cancel", {}); $("progress").textContent = "Stopping after the current item..."; }));
 });
