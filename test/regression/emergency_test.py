@@ -284,13 +284,22 @@ check("the refusal note says what the token may do with the field (the permissio
 check("after the first refused delete no other delete is tried", len([x for x in fk8.reqs if x[0] == "DELETE"]) == 1 and len([x for x in fk8.reqs if x[0] == "PATCH" and "/v2/fields/" in x[1]]) == 5)
 check("the renamed fields are in Planning under their new names, and the run still loads the table", {f["displayName"] for f in fk8.fields[rt8]} >= {"Unused default - Name", "AirtableRecordId", "Order Name"} and "Name" not in {f["displayName"] for f in fk8.fields[rt8]}
       and res8["records"]["loaded"] == 3 and any("renamed" in n for n in res8["notes"]), (p8, res8["notes"]))
-# neither a delete nor a rename works: named in a note, the run goes on
+# neither a delete nor a rename works (403 FORBIDDEN in the first real run): one try of each, then the defaults are left alone and a clashing Airtable name gets the CONFLICT- prefix
 dbp9 = os.path.join(tmp, "base9.db"); shutil.copyfile(dbp, dbp9)
-c9 = sqlite3.connect(dbp9); c9.execute("delete from load_id_map"); c9.execute("delete from target_mappings"); c9.execute("delete from record_pass_markers"); c9.commit(); c9.close()
-fk9 = Fake(); fk9.refuse_delete = {"DEF1_%d" % i for i in range(5)}; fk9.refuse_rename = {"DEF1_1"}
-res9, _c9 = go(fk9, "tX", db=dbp9)
-check("a field that can be neither deleted nor renamed is named in a note, and the run still loads the table", [x["name"] for x in res9["prepare"]["failed"]] == ["Description"] and len(res9["prepare"]["renamed"]) == 4
-      and any("Description" in n for n in res9["notes"]) and res9["records"]["loaded"] == 3, (res9["prepare"], res9["notes"]))
+c9 = sqlite3.connect(dbp9); c9.execute("delete from load_id_map"); c9.execute("delete from target_mappings"); c9.execute("delete from record_pass_markers")
+c9.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tZ', ?, 'Clash Table')", (BASE,))
+for fid, nm in (("fzN", "Name"), ("fzS", "status"), ("fzO", "Other")):
+    c9.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values (?,?,?,?,?,?,'2026-01-01 10:00:00.000000')", (BASE, "tZ", "Clash Table", fid, nm, "singleLineText"))
+c9.commit(); c9.close()
+save("tZ", [{"id": "recZ%d" % i, "fields": {"fzN": "n%d" % i, "fzS": "s%d" % i, "fzO": "o%d" % i}} for i in (1, 2)])
+fk9 = Fake(); fk9.refuse_delete = {"DEF1_%d" % i for i in range(5)}; fk9.refuse_rename = {"DEF1_%d" % i for i in range(5)}
+res9, _c9 = go(fk9, "tZ", db=dbp9)
+p9 = res9["prepare"]; by9 = {f["field_id"]: f for f in res9["fields"]}; rt9 = res9["record_type"]["planning_id"]
+check("when the delete and the rename are both refused only one of each is tried, and the five defaults are left alone", len([x for x in fk9.reqs if x[0] == "DELETE"]) == 1 and len([x for x in fk9.reqs if x[0] == "PATCH" and "/v2/fields/" in x[1]]) == 1
+      and sorted(x["name"] for x in p9["protected"]) == ["Description", "End Date", "Name", "Start Date", "Status"] and not p9["renamed"] and not p9["deleted"], p9)
+check("an Airtable field whose name a kept default field holds is created as CONFLICT-<name>, whatever the letter case", by9["fzN"]["sent_name"] == "CONFLICT-Name" and by9["fzS"]["sent_name"] == "CONFLICT-status" and by9["fzO"]["sent_name"] == "Other"
+      and {f["displayName"] for f in fk9.fields[rt9]} >= {"CONFLICT-Name", "CONFLICT-status", "Other", "Name", "Status"}, [f["displayName"] for f in fk9.fields[rt9]])
+check("the clash is explained in the field's note and in the run's notes, and the records still load", "CONFLICT-Name" in by9["fzN"]["note"] and any("CONFLICT-" in n for n in res9["notes"]) and res9["records"]["loaded"] == 2 and by9["fzN"]["outcome"] == "clean", (by9["fzN"], res9["notes"]))
 # a delete Planning accepts for some fields and refuses for none: nothing is renamed
 check("when deletes work nothing is renamed", not pre["renamed"] and not any(x[0] == "PATCH" and "/v2/fields/" in x[1] for x in fk.reqs))
 
