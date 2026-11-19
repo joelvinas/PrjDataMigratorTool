@@ -193,9 +193,9 @@ def real(replies):
 RES = lambda *rows: {"status": "ok", "total": len(rows), "results": list(rows)}
 tp, op = real([Resp(201, RES({"requestIndex": 0, "id": "A"}, {"requestIndex": 1, "id": "B"}))])
 got = tp.create_records([{"recordTypeId": "R", "fields": {"F1": "x"}}, {"recordTypeId": "R", "fields": {"F1": "y"}}])
-check("the transport posts to the record type's bulk route as a JSON array of {data} and returns each ID", got == [{"id": "A"}, {"id": "B"}]
+check("the transport posts to the record type's bulk route as a JSON array of {recordTypeId, data} and returns each ID", got == [{"id": "A"}, {"id": "B"}]
       and op.reqs[0].full_url.endswith("/v2/record-types/R/records/bulk") and op.reqs[0].get_method() == "POST"
-      and json.loads(op.reqs[0].data) == [{"data": {"F1": "x"}}, {"data": {"F1": "y"}}] and op.reqs[0].get_header("Authorization") == "Bearer " + SECRET, got)
+      and json.loads(op.reqs[0].data) == [{"recordTypeId": "R", "data": {"F1": "x"}}, {"recordTypeId": "R", "data": {"F1": "y"}}] and op.reqs[0].get_header("Authorization") == "Bearer " + SECRET, got)
 tp, op = real([Resp(201, RES({"requestIndex": 1, "id": "B"}, {"requestIndex": 0, "id": "A"}))])
 check("results are matched by requestIndex, not by position in the reply", tp.create_records([{"recordTypeId": "R", "fields": {}}, {"recordTypeId": "R", "fields": {}}]) == [{"id": "A"}, {"id": "B"}])
 tp, op = real([Resp(201, RES({"requestIndex": 0, "id": "A"})), Resp(201, RES({"requestIndex": 0, "id": "B"}))])
