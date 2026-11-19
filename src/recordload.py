@@ -167,6 +167,10 @@ def record_body(rt, fields, record, issues):
     for f in fields:
         if f["pass"] != "records":
             continue
+        if f.get("record_id"):                 # the primary field AirtableRecordId holds the record's own Airtable ID (an identifier, not a field value)
+            if isinstance(record, dict) and record.get("id"):
+                out[f["planning_id"]] = str(record["id"])
+            continue
         ok, v = convert(f, (src or {}).get(f["field_id"]))
         if not ok:
             issues.append((f["field_id"], v))

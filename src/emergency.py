@@ -248,6 +248,51 @@ def attempted_type(field, defaults):
     return t, "no mapping exists: the Airtable type %s was sent as given" % t
 
 
+PK_NAME = "AirtableRecordId"
+DEFAULT_FIELDS = frozenset({"name", "description", "start date", "end date", "status"})      # what a new Planning record type comes with (owner, 19 November 2026)
+
+
+def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id, reused, result, notes):
+    """The preparatory step of a Git-R-Done run. Planning's default fields (Name, Description, Start Date, End Date, Status) clash with Airtable field names, and the owner
+    confirmed in the Planning UI that they can be deleted once another field is the primary field. So: (1) create AirtableRecordId (text), recorded in the ID map under
+    P-K-<table> so a rerun never makes a second one; (2) make it the primary field, checked by reading the record type back; (3) delete the other fields.
+    A NEW record type loses every field except the ones this tool created; a REUSED one loses only a leftover default field by name, because a person may have added fields
+    to it. A failed delete is a note, not the end of the run; steps 1 and 2 failing end it (returns False), with nothing deleted. Returns (ok, primary field ID).
+    result["prepare"] = {field_id, created, primary, deleted: [{id, name, type}], failed: [{id, name, type, reason}], kept: [...]}."""
+    prep = result["prepare"] = {"field_id": None, "created": None, "primary": False, "deleted": [], "failed": [], "kept": [], "error": ""}
+    item = _item("P-K-" + table_id, "field", PK_NAME, rt_item["temp_id"], table_id, None, "text")
+    ok, pk_id, err, how = _try(state, env, tr, item)
+    if not ok:
+        prep["error"] = "AirtableRecordId could not be created: %s" % err
+        return False, None
+    prep.update(field_id=pk_id, created=how)
+    try:
+        tr.set_primary_field(rt_id, pk_id)
+        prep["primary"] = True
+    except Exception as e:
+        prep["error"] = "AirtableRecordId was created but could not be made the primary field: %s" % lr.scrub(e)
+        return False, pk_id
+    try:
+        fields = tr.list_fields(rt_id)
+    except Exception as e:
+        prep["error"] = "The fields of the record type could not be listed, so the default fields were not deleted: %s" % lr.scrub(e)
+        return False, pk_id
+    mine = {r[0] for r in conn.execute("SELECT workfront_id FROM load_id_map WHERE system='planning' AND kind='field' AND status='created' AND environment=? AND workspace_key=? AND base_id=? AND table_id=? "
+                                       "AND workfront_id IS NOT NULL", (env.name, state.workspace_id or "", base_id, table_id))} | {pk_id}
+    for f in sorted(fields, key=lambda x: (x["name"].lower(), x["id"])):
+        if f["id"] in mine or (reused and f["name"].strip().lower() not in DEFAULT_FIELDS):
+            prep["kept"].append(f)
+            continue
+        out = tr.delete_field(f["id"])
+        if out["deleted"]:
+            prep["deleted"].append(f)
+        else:
+            prep["failed"].append(dict(f, reason=("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]))
+    if prep["failed"]:
+        notes.append("%d default field(s) could not be deleted from the record type (%s). Delete them by hand in Workfront Planning if a name clashes." % (len(prep["failed"]), ", ".join(sorted(x["name"] for x in prep["failed"]))))
+    return True, pk_id
+
+
 def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=None, progress=None, should_stop=None, batch=None, reader=rl.read_extract):
     """One Go run. `calls` is the CallLog already hooked to the transport's HTTP layer. Returns the result dict that the page shows and the reports are made from."""
     progress = progress or (lambda p: None)
@@ -295,6 +340,15 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         return _finish(conn, result, calls)
     rtr["planning_id"] = rt_id
 
+    # ---- 1b. the preparatory step: AirtableRecordId becomes the primary field, then Planning's default fields are deleted, BEFORE any Airtable field is added
+    calls.phase, calls.field_id = "prepare", None
+    progress({"phase": "prepare", "message": "Preparing the record type: AirtableRecordId as the primary field, then removing the default fields"})
+    prep_ok, pk_id = prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id, reused_before, result, notes)
+    if not prep_ok:
+        result["finished_at"] = utc_now()
+        notes.append("The preparatory step did not finish, so no Airtable field was added (the default fields could clash with them). Fix the cause and run again: nothing is created twice.")
+        return _finish(conn, result, calls)
+
     # ---- what already exists in the record type (only when it was reused: a new one is empty)
     existing = {}
     if reused_before:
@@ -307,7 +361,7 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
 
     # ---- 2. the fields
     calls.phase = "fields"
-    loadable = []
+    loadable = [{"field_id": "(record id)", "planning_id": pk_id, "kind": "text", "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True, "record_id": True}]
     for n, f in enumerate(schema["fields"], 1):
         if stop():
             result["cancelled"] = True

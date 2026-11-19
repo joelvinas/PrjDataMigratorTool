@@ -18,6 +18,7 @@ class Fake(object):
     def reset(self):
         self.reqs, self.n, self.r, self.store, self.refuse_fields, self.delay, self.bad_auth, self.reject = [], 0, 0, {}, set(), 0.0, 0, False
         self.workspaces = {"wsDev": "Rehearsal Workspace", "wsProd": "Live Workspace"}      # a Workspace ID that is not here answers 404
+        self.rtfields, self.primary = {}, {}                                                 # record type -> its fields (the five defaults Planning adds, then the created ones); its primary field ID
         self.rt_refuse, self.rt_deleted = None, []                                          # a record type DELETE answers this status (e.g. 403) while it is set; the IDs it deleted
     def handle(self, m, path, body, auth):
         with self.lock:
@@ -32,10 +33,23 @@ class Fake(object):
             if m == "GET" and u.rsplit("/", 2)[-2] == "workspaces":
                 wid = u.rsplit("/", 1)[-1]
                 return (200, {"id": wid, "name": self.workspaces[wid]}) if wid in self.workspaces else (404, {"error": "NOT_FOUND"})
-            if m == "POST" and u.endswith("/record-types"): return 201, {"id": "RT%d" % self.n, "displayName": body["displayName"]}
+            if m == "POST" and u.endswith("/record-types"):
+                rid = "RT%d" % self.n
+                self.rtfields[rid] = [{"id": "DEF%d_%d" % (self.n, i), "displayName": d, "type": "text"} for i, d in enumerate(["Name", "Description", "Start Date", "End Date", "Status"])]
+                self.primary[rid] = "DEF%d_0" % self.n
+                return 201, {"id": rid, "displayName": body["displayName"]}
             if m == "POST" and u.endswith("/fields"):
                 if body["displayName"] in self.refuse_fields: return 400, {"error": "VALIDATION_FAILED for Bearer " + TOKEN}
-                return 201, {"id": "FLD%d" % self.n, "displayName": body["displayName"]}
+                row = {"id": "FLD%d" % self.n, "displayName": body["displayName"], "type": body.get("type")}
+                self.rtfields.setdefault(u.split("/record-types/")[1].split("/")[0], []).append(row)
+                return 201, {"id": row["id"], "displayName": row["displayName"]}
+            if m == "GET" and u.endswith("/fields"): return 200, {"content": self.rtfields.get(u.split("/record-types/")[1].split("/")[0], []), "cursor": {"hasMore": False}}
+            if m == "DELETE" and u.rsplit("/", 2)[-2] == "fields":
+                fid = u.rsplit("/", 1)[-1]
+                for k in self.rtfields: self.rtfields[k] = [f for f in self.rtfields[k] if f["id"] != fid]
+                return 204, {}
+            if m == "PATCH" and u.rsplit("/", 2)[-2] == "record-types":
+                self.primary[u.rsplit("/", 1)[-1]] = body["primaryFieldId"]; return 200, {}
             if m == "POST" and u.endswith("/records/bulk"):
                 rt, out = u.split("/record-types/")[1].split("/")[0], []
                 for i, _ in enumerate(body):
@@ -44,7 +58,7 @@ class Fake(object):
             elif m == "GET" and "/record-types/" in u and u.endswith("/records"):
                 rt = u.split("/record-types/")[1].split("/")[0]; rows = self.store.get(rt, [])
                 return 200, {"content": [{"id": r, "data": {"f": "SECRETVALUE"}} for r in rows[:100]], "totalElements": len(rows)}
-            elif m == "GET" and u.rsplit("/", 2)[-2] == "record-types": return 200, {"id": u.rsplit("/", 1)[-1], "primaryWorkspaceId": "wsDev"}
+            elif m == "GET" and u.rsplit("/", 2)[-2] == "record-types": return 200, {"id": u.rsplit("/", 1)[-1], "displayName": "x", "primaryFieldId": self.primary.get(u.rsplit("/", 1)[-1]), "primaryWorkspaceId": "wsDev"}
             elif m == "DELETE" and u.rsplit("/", 2)[-2] == "record-types":
                 if self.rt_refuse: return self.rt_refuse, {"code": "RECORD_TYPE_IN_HIERARCHY", "message": "refused for Bearer " + TOKEN}
                 self.rt_deleted.append(u.rsplit("/", 1)[-1]); return 200, {}
