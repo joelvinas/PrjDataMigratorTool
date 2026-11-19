@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Reset ONE table's Planning structure so it can be loaded again from step 2: delete its record type in Workfront, then forget the IDs this tool holds. Standard library only.
+"""Reset ONE table's Planning structure so it can be built again from scratch: delete its record type in Workfront, then forget the IDs this tool holds. Used by the Git-R-Done page
+(high-speed create, check, reset and try again), which is not gated by the Load a table steps; it writes the same state (load_id_map and the record registry) as Load a table, so both pages' tables can be reset. Standard library only.
 
 The two halves, kept apart on purpose:
     attempt   DELETE /v2/record-types/{id} (the record type, its fields and its records go with it, per Adobe). Never raises for a refusal: the reason comes back.
@@ -21,10 +22,6 @@ _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 class TableResetError(Exception):
     pass
-
-
-def phrase(stage):
-    return "RESET TABLE IN %s" % str(stage).upper()
 
 
 def _have(conn, name):
@@ -84,7 +81,7 @@ def forget(conn, base_id, table_id, stage, ws):
 
 
 def reset(conn, base_id, table_id, stage, ws, tr, send):
-    """Step 7. A dry run reads this tool's own counts and sends nothing. With send=True: attempt the record type delete; forget the map only when Workfront confirms it is gone.
+    """A dry run reads this tool's own counts and sends nothing. With send=True: attempt the record type delete; forget the map only when Workfront confirms it is gone.
     Returns {name, before, inbound, attempt, cleared, forgotten_without_attempt}. `attempt` is None when no record type ID is recorded (nothing to delete in Workfront; the map
     is then forgotten at once) and otherwise {"deleted", "already_gone"?, "status"?, "reason"?}. Raises TableResetError with a plain reason."""
     name = check(conn, base_id, table_id)
@@ -103,7 +100,7 @@ def reset(conn, base_id, table_id, stage, ws, tr, send):
 
 
 def forget_only(conn, base_id, table_id, stage, ws):
-    """Step 8: the person's choice after a refused delete. Forgets the map and sends nothing. Returns {name, before, cleared}."""
+    """The person's choice after a refused delete. Forgets the map and sends nothing. Returns {name, before, cleared}."""
     name = check(conn, base_id, table_id)
     before = counts(conn, base_id, table_id, stage, ws)
     return {"name": name, "before": before, "cleared": forget(conn, base_id, table_id, stage, ws)}

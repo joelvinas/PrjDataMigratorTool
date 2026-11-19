@@ -5563,8 +5563,7 @@ def api_names_report(q):
 # The Workfront settings are read from config.json on every call by loadconfig and never reach a response: every payload and message below passes through _lt_out(), which
 # removes each configured secret from the text as a last line of defence. Record values are never read here: a result holds IDs, schema names, counts and scrubbed reasons.
 # --------------------------------------------------------------------------
-LT_GATE = {"structure": "can_structure", "records": "can_records", "links": "can_links", "reset": "can_reset", "reset_table": "can_reset_table", "forget_table": "can_reset_table"}
-LT_PHRASE = {"reset": loadreset.phrase, "reset_table": tablereset.phrase}      # steps that always need their own typed phrase when they send
+LT_GATE = {"structure": "can_structure", "records": "can_records", "links": "can_links", "reset": "can_reset"}
 
 
 def _lt_secrets():
@@ -5599,7 +5598,7 @@ def _lt_args(body):
 def api_loadtable_setup(q):
     """What the page needs before a table is chosen: whether Planning is configured (yes or no, never a secret), the Workspace ID to show, the stages, the typed reset phrases and
     the in-scope tables for the base."""
-    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "table_phrases": {s: tablereset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
+    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
     try:                                      # the stages are the ones the user defined in config.json (workfront.planning); only their Workspace IDs are shown, never a token
         data = loadconfig.read_config(CONFIG_PATH)
         for st in loadconfig.planning_blocks(data):
@@ -5685,10 +5684,6 @@ def _run_load_job(job):
                 res = tableload.step_records(conn, job.base, job.table_id, ctx, tr, job.send, extract_dir(), stop, job.set_progress)
             elif job.step == "links":
                 res = tableload.step_links(conn, job.base, job.table_id, ctx, tr, job.send, extract_dir(), stop, job.set_progress)
-            elif job.step == "reset_table":
-                res = tableload.step_reset_table(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
-            elif job.step == "forget_table":
-                res = tableload.step_forget_table(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
             else:
                 res = tableload.step_reset(conn, job.base, job.table_id, ctx, tr, job.send, stop, job.set_progress)
         job.result = _lt_out(res)
@@ -5712,7 +5707,7 @@ def api_loadtable_start(body):
     send = body.get("send") is True
     confirm = None
     if send and stage == "production":          # a real send to the production stage needs a typed phrase on top of the confirmation
-        want = LT_PHRASE[step](stage) if step in LT_PHRASE else loadrun.PRODUCTION_PHRASE
+        want = loadreset.phrase(stage) if step == "reset" else loadrun.PRODUCTION_PHRASE
         if body.get("phrase") != want:
             raise AppError("Sending to the production stage needs the exact phrase: %s" % want)
         confirm = loadrun.PRODUCTION_PHRASE
@@ -5726,8 +5721,8 @@ def api_loadtable_start(body):
         conf = body.get("confirm")
         if not (isinstance(conf, dict) and conf.get("table_id") == table and conf.get("stage") == stage and str(conf.get("workspace_id")) == ctx.ws):
             raise AppError("Confirm the table, the stage and the Workspace ID exactly as shown before anything is sent.")
-        if step in LT_PHRASE and body.get("phrase") != LT_PHRASE[step](stage):
-            raise AppError("A reset deletes %s and cannot be undone. Type the exact phrase: %s" % ("records" if step == "reset" else "the record type, its fields and its records", LT_PHRASE[step](stage)))
+        if step == "reset" and body.get("phrase") != loadreset.phrase(stage):
+            raise AppError("A reset deletes records and cannot be undone. Type the exact phrase: %s" % loadreset.phrase(stage))
     with _loadjob_lock:
         cur = LOADJOB["current"]
         if cur and cur.status == "running":
@@ -5903,6 +5898,46 @@ def api_emergency_cancel(_body=None):
     return {"cancelling": True}
 
 
+def _em_reset_common(body, send):
+    """The checks both table resets share: the table (a plain ID) and, for a real send, the confirmation the page collects (the table and the Workspace ID exactly as shown), and no
+    run going on either page. Returns (base, table, ctx)."""
+    base = _names_base(body)
+    table = str(body.get("table_id") or "").strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    ctx = _em_context(send)
+    if send:
+        conf = body.get("confirm")
+        if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
+            raise AppError("Confirm the table and the Workspace ID exactly as shown before anything is sent.")
+        for cur, what in ((EMJOB["current"], "A Git-R-Done run"), (LOADJOB["current"], "A Load a table step")):
+            if cur and cur.status == "running":
+                raise AppError("%s is going (table %s). Wait for it or cancel it before resetting." % (what, cur.table_id), 409)
+    return base, table, ctx
+
+
+def api_emergency_reset(body):
+    """Reset one table in the DEV Workspace so Git-R-Done can build it again: with send false, this tool's own counts only (nothing is sent, nothing is written); with send true, try
+    to delete the table's record type in Workfront and, only when it is gone, forget the IDs held for the table. A refusal from Workfront is an ordinary answer (attempt.deleted false,
+    nothing forgotten). Not gated by the Load a table steps: it needs only a table that this tool holds something for. See tablereset.py."""
+    send = body.get("send") is True
+    base, table, ctx = _em_reset_common(body, send)
+    with db() as conn:
+        tr = _lt_call(tableload.transport, ctx) if send else None
+        res = _lt_call(tablereset.reset, conn, base, table, emergency.STAGE, ctx.ws, tr, send)
+    res.update(dry_run=not send, workspace_id=ctx.ws, stage=emergency.STAGE)
+    return _lt_out(res)
+
+
+def api_emergency_forget(body):
+    """After a refused delete, and only when the person chooses: forget the IDs held for the table in the dev Workspace without calling Workfront."""
+    base, table, ctx = _em_reset_common(body, True)
+    with db() as conn:
+        res = _lt_call(tablereset.forget_only, conn, base, table, emergency.STAGE, ctx.ws)
+    res.update(workspace_id=ctx.ws, stage=emergency.STAGE)
+    return _lt_out(res)
+
+
 def api_emergency_report(q):
     """One report file of the last runs, by plain name (letters, digits, hyphen, underscore and one of the two extensions); never a path."""
     name = (q.get("file") or [""])[0]
@@ -5953,7 +5988,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
-               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/emergency/start": api_emergency_start, "/api/emergency/cancel": api_emergency_cancel,
+               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/lookups/assign": api_lookups_assign, "/api/lookups/unassign": api_lookups_unassign, "/api/lookups/rename": api_lookups_rename, "/api/lookups/delete": api_lookups_delete, "/api/datatypes/default": api_datatypes_default,

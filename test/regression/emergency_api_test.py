@@ -77,6 +77,39 @@ try:
     check("a second Go creates no second record type or field and sends no record again", j2["status"] == "done" and len(fake.posts("/record-types")) == rts and len(fake.posts("/fields")) == flds
           and len(fake.posts("/records/bulk")) == bulks and j2["result"]["counts"]["records_already_loaded"] == 2, (j2["status"], j2.get("error"), j2["result"]["counts"] if j2["result"] else None))
 
+    # ---- reset the table and try again (not gated by the Load a table steps)
+    def rbody(send, **k): return dict({"base_id": BASE, "table_id": "tC", "send": send}, **k)
+    n0 = len(fake.reqs)
+    s, r = post("/api/emergency/reset", rbody(False))
+    check("the reset preview gives this tool's own counts (the record type, the field, the record IDs) and sends nothing", s == 200 and r["dry_run"] and r["before"]["map_total"] == 2 and r["before"]["mapped_records"] == 2 and r["before"]["record_type"]
+          and r["attempt"] is None and r["cleared"] is None and r["workspace_id"] == "wsDev" and len(fake.reqs) == n0 and TOKEN not in json.dumps(r), (s, r))
+    for label, body in (("no confirmation", {}), ("the wrong table", {"confirm": conf("tA")}), ("the wrong Workspace", {"confirm": conf("tC", "wsProd")})):
+        s, r = post("/api/emergency/reset", rbody(True, **body))
+        check("a reset with %s is refused and sends nothing" % label, s == 400 and "Confirm" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/forget", rbody(True))
+    check("forgetting the IDs needs the same confirmation", s == 400 and "Confirm" in r["error"] and len(fake.reqs) == n0, (s, r))
+    fake.rt_refuse = 403
+    s, r = post("/api/emergency/reset", rbody(True, confirm=conf("tC")))
+    check("when Workfront refuses the record type delete the answer says why, with no token, and nothing is forgotten", s == 200 and r["attempt"]["deleted"] is False and r["attempt"]["status"] == 403 and "RECORD_TYPE_IN_HIERARCHY" in r["attempt"]["reason"]
+          and r["cleared"] is None and TOKEN not in json.dumps(r) and post("/api/emergency/reset", rbody(False))[1]["before"]["map_total"] == 2, (s, r))
+    n1 = len(fake.reqs)
+    s, r = post("/api/emergency/forget", rbody(True, confirm=conf("tC")))
+    check("forgetting anyway clears the dev map without calling Workfront", s == 200 and r["cleared"]["load_id_map"] == 2 and r["cleared"]["mappings"] == 2 and len(fake.reqs) == n1, (s, r))
+    s, r = post("/api/emergency/reset", rbody(False))
+    check("with nothing held for the table the reset says so", s == 409 and "nothing to reset" in r["error"], (s, r))
+    fake.rt_refuse = None
+    rts, bulks = len(fake.posts("/record-types")), len(fake.posts("/records/bulk"))
+    s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "confirm": conf("tC")})
+    j3 = poll()
+    check("Go after a reset builds the table again from scratch: a new record type, and every record is sent again", j3["status"] == "done" and len(fake.posts("/record-types")) == rts + 1 and len(fake.posts("/records/bulk")) > bulks
+          and j3["result"]["counts"]["records_loaded"] == 2 and j3["result"]["counts"]["records_already_loaded"] == 0, (j3["status"], j3.get("error"), j3["result"]["counts"] if j3["result"] else None))
+    s, r = post("/api/emergency/reset", rbody(True, confirm=conf("tC")))
+    check("when Workfront deletes the record type the same call forgets the map", s == 200 and r["attempt"] == {"deleted": True, "already_gone": False} and len(fake.rt_deleted) == 1 and r["cleared"]["load_id_map"] == 2 and r["cleared"]["mappings"] == 2, (s, r))
+    rts = len(fake.posts("/record-types"))
+    s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "confirm": conf("tC")})
+    j4 = poll()
+    check("and Go works again straight after (create, reset, try again)", j4["status"] == "done" and len(fake.posts("/record-types")) == rts + 1 and j4["result"]["counts"]["records_loaded"] == 2, (j4["status"], j4.get("error")))
+
     text = "\n".join(seen) + "".join(open(os.path.join(folder, f), encoding="utf-8", errors="replace").read() for f in os.listdir(folder))
     check("the Workfront token is in no response and no report", TOKEN not in text and fake.bad_auth == 0)
     check("no record value is in any response or report", "SECRETVALUE" not in text)

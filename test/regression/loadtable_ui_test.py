@@ -185,28 +185,6 @@ try:
         pg.wait_for_function("document.getElementById('pill3').textContent !== 'done'")
         check("afterwards the table can be loaded again from step 3", enabled("#btnRecDry"))
 
-        # ---- step 7: reset the structure; Workfront refuses first, then the person chooses to forget the IDs
-        check("the structure reset is collapsed and its phrase, delete and forget buttons are closed until its dry run is done", not pg.eval_on_selector("#step7", "e => e.open"))
-        pg.click("#step7 summary")
-        check("only the dry run is open at first", enabled("#btnTblDry") and not enabled("#tblPhrase") and not enabled("#btnTblSend") and not pg.is_visible("#forgetRow"))
-        pg.click("#btnTblDry"); wait_text("#tblMsg", "Dry run")
-        check("the dry run shows the counts and the phrase to type", "recorded item(s)" in text("#tblMsg") and "would try to delete record type" in text("#tblMsg") and text("#tblPhraseShown") == "RESET TABLE IN DEV" and enabled("#tblPhrase") and not enabled("#btnTblSend"), text("#tblMsg"))
-        pg.fill("#tblPhrase", "reset table in dev")
-        check("a wrong phrase keeps Delete closed", not enabled("#btnTblSend"))
-        pg.fill("#tblPhrase", "RESET TABLE IN DEV")
-        check("the exact phrase opens Delete", enabled("#btnTblSend"))
-        fake.rt_refuse = 403
-        pg.click("#btnTblSend"); pg.wait_for_selector("#confirmDlg[open]")
-        check("the confirmation names the record type delete, the table, the stage and the Workspace", "record type" in text("#confirmTitle").lower() and "Orders (tA)" in text("#confirmTable") and text("#confirmWs").startswith("wsDev") and "cannot be undone" in text("#confirmText"))
-        pg.click("#confirmYes"); wait_text("#tblMsg", "did NOT delete")
-        check("a refusal shows Workfront's reason, keeps the IDs and offers to forget them anyway", "403" in text("#tblMsg") and "RECORD_TYPE_IN_HIERARCHY" in text("#tblMsg") and pg.is_visible("#forgetRow") and enabled("#btnForget") and "done" in text("#pill2") and TOKEN not in text("#tblMsg"), text("#tblMsg"))
-        pg.click("#btnForget"); pg.wait_for_selector("#confirmDlg[open]")
-        check("the forget confirmation says nothing is sent to Workfront", "forget" in text("#confirmTitle").lower() and "Nothing is sent" in text("#confirmText"))
-        pg.click("#confirmYes"); wait_text("#tblMsg", "Forgot")
-        pg.wait_for_function("document.getElementById('pill2').textContent !== 'done'")
-        check("after forgetting, the table starts over at step 2 and the forget choice goes away", enabled("#btnStructDry") and not enabled("#btnRecDry") and not pg.is_visible("#forgetRow") and "locked" in text("#pill7"), text("#tblMsg"))
-        fake.rt_refuse = None
-
         # ---- the production stage asks for a typed phrase on top of the confirmation
         pg.select_option("#stageSel", "production")
         pg.wait_for_function("document.getElementById('wsBadge').textContent.includes('Live Workspace')")

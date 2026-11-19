@@ -53,11 +53,7 @@ function applyGates() {
   on("btnResetDry", g.can_reset && !busy);
   $("resetPhrase").disabled = !(g.can_reset && lt.dry.reset && !busy);
   on("btnResetSend", g.can_reset && lt.dry.reset && !busy && $("resetPhrase").value === phrase());
-  on("btnTblDry", g.can_reset_table && !busy);
-  $("tblPhrase").disabled = !(g.can_reset_table && lt.dry.reset_table && !busy);
-  on("btnTblSend", g.can_reset_table && lt.dry.reset_table && !busy && $("tblPhrase").value === tablePhrase());
-  on("btnForget", g.can_reset_table && !busy);
-  if (!lt.st) { [1, 2, 3, 4, 5, 6, 7].forEach((n) => pill(n, n === 1 ? "not run" : "locked")); return; }
+  if (!lt.st) { [1, 2, 3, 4, 5, 6].forEach((n) => pill(n, n === 1 ? "not run" : "locked")); return; }
   const c = lt.st.check, d = (ok, open) => (ok ? ["done", "done"] : open ? ["open", "run"] : ["locked", ""]);
   pill(1, c.can_continue ? "clear" : "blocked", c.can_continue ? "done" : "fail");
   pill(2, ...d(s.structure.done, g.can_structure));
@@ -65,20 +61,15 @@ function applyGates() {
   pill(4, ...(s.links.applicable ? d(s.links.done, g.can_links) : ["nothing to do", g.can_verify ? "done" : ""]));
   pill(5, ...(g.can_verify ? ["open", "run"] : ["locked", ""]));
   pill(6, g.can_reset ? "open" : "locked", "");
-  pill(7, g.can_reset_table ? "open" : "locked", "");
 }
 const phrase = () => (lt.setup && lt.setup.phrases && lt.setup.phrases[stageNow()]) || "";
-const tablePhrase = () => (lt.setup && lt.setup.table_phrases && lt.setup.table_phrases[stageNow()]) || "";
 
 function resetChoice() {          // the base, stage or table changed: everything shown belongs to the old choice
   lt.st = null; lt.dry = {}; lt.last = {};
   ["reasonWin", "depWin", "depHead", "structWin", "mapWin", "recFailWin", "waitWin", "linkFailWin", "verifyWin"].forEach((id) => { $(id).hidden = true; });
-  ["checkMsg", "structMsg", "fileMsg", "recMsg", "linkMsg", "verifyMsg", "resetMsg", "tblMsg"].forEach((id) => setMsg(id, "", ""));
+  ["checkMsg", "structMsg", "fileMsg", "recMsg", "linkMsg", "verifyMsg", "resetMsg"].forEach((id) => setMsg(id, "", ""));
   $("resetPhrase").value = "";
   $("resetPhraseShown").textContent = phrase();
-  $("tblPhrase").value = "";
-  $("tblPhraseShown").textContent = tablePhrase();
-  $("forgetRow").hidden = true;
   const t = tableRow();
   $("tableInfo").textContent = t ? "scope: " + t.scope + "; lands in: " + (t.target === "planning_only" ? "Planning only" : t.target === "planning_and_core" ? "Planning and Core" : "not decided") + "; table name " + (t.name_approved ? "approved" : "NOT approved") : "";
   applyGates();
@@ -169,13 +160,13 @@ async function loadMap() {
 function askConfirm(what, step) {
   return new Promise((resolve) => {
     const dlg = $("confirmDlg");
-    const prod = stageNow() === "production" && step !== "reset" && step !== "reset_table";       // these two already need their own typed phrase
+    const prod = stageNow() === "production" && step !== "reset";       // the reset already needs its own typed phrase
     $("confirmPhraseRow").hidden = !prod;
     $("confirmPhrase").value = "";
     $("confirmPhraseShown").textContent = lt.setup.production_phrase;
     $("confirmYes").disabled = prod;
     $("confirmPhrase").oninput = () => { $("confirmYes").disabled = prod && $("confirmPhrase").value !== lt.setup.production_phrase; };
-    $("confirmTitle").textContent = step === "reset" ? "Delete records in Workfront" : step === "reset_table" ? "Delete the record type in Workfront" : step === "forget_table" ? "Forget this table's IDs" : "Send to Workfront";
+    $("confirmTitle").textContent = step === "reset" ? "Delete records in Workfront" : "Send to Workfront";
     $("confirmText").textContent = what;
     $("confirmTable").textContent = tableName() + " (" + tableNow() + ")";
     $("confirmStage").textContent = stageNow().toUpperCase();
@@ -194,8 +185,6 @@ const WHAT = {
   records: "Create this table's records in its Planning record type, in batches.",
   links: "Set the link fields of this table's records.",
   reset: "DELETE every record of this table's record type. This cannot be undone.",
-  reset_table: "DELETE this table's record type in Workfront, with its fields and records, then forget the IDs this tool holds for it. This cannot be undone.",
-  forget_table: "Forget every ID this tool holds for this table in this stage and Workspace. Nothing is sent to Workfront; a record type still there will cause a name clash on the next structure run.",
 };
 
 async function startJob(step, send, extra) {
@@ -215,7 +204,6 @@ async function startJob(step, send, extra) {
 function progressText(j) {
   const p = j.progress || {};
   if (j.step === "structure") return p.total ? "item " + fmt(p.done) + " of " + fmt(p.total) + " (" + countsText(p.counts) + ")" : "starting";
-  if (j.step === "reset_table" || j.step === "forget_table") return "working";
   if (j.step === "reset") return p.round ? "call " + fmt(p.round) + ": " + fmt(p.deleted) + " deleted, " + fmt(p.failed) + " refused" : "starting";
   if (!p.table_id) return "starting";
   const done = p.pass === "links" ? "updated " + fmt(p.updated) + ", waiting " + fmt(p.waiting) : "created " + fmt(p.created);
@@ -246,7 +234,7 @@ async function finishJob(j) {
   if (same) {
     lt.last[j.step] = j;
     if (j.send) lt.dry[j.step] = false; else if (j.status === "done") lt.dry[j.step] = true;
-    try { await refreshState(false); if (j.step === "structure" || j.step === "reset" || j.step === "reset_table" || j.step === "forget_table") await loadMap(); } catch (e) { showGlobalError(e.message); }
+    try { await refreshState(false); if (j.step === "structure" || j.step === "reset") await loadMap(); } catch (e) { showGlobalError(e.message); }
     renderResult(j);       // after the state is read, so the message and the buttons change together
   }
   applyGates();
@@ -281,8 +269,6 @@ function renderResult(j) {
     setMsg("linkMsg", r.dry_run ? "Dry run (nothing was sent): " + fmt(r.pending) + " record(s) are waiting for their links." : (r.cancelled ? "Stopped: " : "Done: ") + fmt(r.updated) + " updated, " + fmt(r.waiting) + " waiting for a linked record that is not loaded yet, " + fmt(r.failed) + " failed." + (r.note ? " " + r.note : ""),
       r.failed || r.waiting || r.cancelled ? "warn" : "ok");
     fillGrid("linkFailGrid", "linkFailWin", r.failures || [], (x) => [td(x.record_id), td(x.reason)]);
-  } else if (j.step === "reset_table" || j.step === "forget_table") {
-    renderTableReset(j);
   } else if (j.step === "reset") {
     if (j.status === "failed") return setMsg("resetMsg", failMsg(j), "err");
     const w = r.wipe;
@@ -290,26 +276,6 @@ function renderResult(j) {
     else if (w && w.left === 0) setMsg("resetMsg", fmt(w.deleted) + " record(s) deleted. The record type is empty and this tool's memory of its records was cleared (" + fmt(r.cleared.mappings) + " mapping(s), " + fmt(r.cleared.markers) + " marker(s)). Load it again from step 3.", "ok");
     else setMsg("resetMsg", (w && w.cancelled ? "Stopped: " : "Not finished: ") + fmt(w ? w.deleted : 0) + " deleted, " + fmt(w ? w.failed : 0) + " refused; the record type is NOT confirmed empty, so this tool's memory was kept. Run the reset again.", "warn");
   }
-}
-
-/* ---------- step 7: reset the structure ---------- */
-const forgotten = (c) => fmt(c.load_id_map) + " recorded item(s), " + fmt(c.mappings) + " record ID(s), " + fmt(c.markers) + " marker(s), " + fmt(c.option_ids) + " option ID(s)";
-
-function renderTableReset(j) {
-  const r = j.result || {};
-  $("forgetRow").hidden = true;
-  if (j.status === "failed") return setMsg("tblMsg", failMsg(j), "err");
-  if (j.step === "forget_table") return setMsg("tblMsg", "Forgot " + forgotten(r.cleared) + ". Nothing was sent to Workfront. The table can be created again from step 2; if its record type still exists in Workfront, delete it there first.", "ok");
-  const b = r.before, a = r.attempt;
-  const links = (r.inbound || []).length ? " Warning: link field(s) of other table(s) point at this one (" + r.inbound.map((x) => x.name + " x " + fmt(x.fields)).join(", ") + "); Workfront may refuse the delete because of them." : "";
-  if (r.dry_run) return setMsg("tblMsg", "Dry run (nothing was sent): this tool holds " + fmt(b.map_total) + " recorded item(s), " + fmt(b.mapped_records) + " record ID(s), " + fmt(b.markers) + " marker(s) and " + fmt(b.option_ids) + " option ID(s) for the table. "
-    + (b.record_type ? "It would try to delete record type " + b.record_type + " in Workfront, then forget these." : "No record type ID is recorded, so nothing would be deleted in Workfront; these would be forgotten.") + links, "ok");
-  if (a && !a.deleted) {
-    $("forgetRow").hidden = false;
-    return setMsg("tblMsg", "Workfront did NOT delete the record type" + (a.status ? " (HTTP " + a.status + ")" : "") + ": " + (a.reason || "no reason given") + " This tool's IDs for the table were kept. Fix the cause and run this step again, delete the record type by hand in Workfront, or use \"Forget this table's IDs anyway\" below." + links, "err");
-  }
-  setMsg("tblMsg", (a ? (a.already_gone ? "The record type was already gone from Workfront. " : "Record type deleted in Workfront. ") : "No record type ID was recorded, so nothing was deleted in Workfront (if an interrupted run created one, delete it by hand). ")
-    + "Forgot " + forgotten(r.cleared) + ". The table can be created again from step 2." + links, "ok");
 }
 
 /* ---------- step 5 ---------- */
@@ -342,9 +308,5 @@ startPage("loadtable", { afterConnect }, () => {
   $("btnResetDry").addEventListener("click", guarded(() => startJob("reset", false)));
   $("resetPhrase").addEventListener("input", applyGates);
   $("btnResetSend").addEventListener("click", guarded(() => startJob("reset", true, { phrase: $("resetPhrase").value })));
-  $("btnTblDry").addEventListener("click", guarded(() => startJob("reset_table", false)));
-  $("tblPhrase").addEventListener("input", applyGates);
-  $("btnTblSend").addEventListener("click", guarded(() => startJob("reset_table", true, { phrase: $("tblPhrase").value })));
-  $("btnForget").addEventListener("click", guarded(() => startJob("forget_table", true)));
   $("btnCancel").addEventListener("click", guarded(async () => { await api("POST", "/api/loadtable/cancel", {}); $("jobProgress").textContent = "Stopping after the current batch..."; }));
 });
