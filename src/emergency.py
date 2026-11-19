@@ -292,6 +292,10 @@ def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id,
                 continue
             delete_refused = True                     # Planning refuses deletes (a 403 in the first real run): the rest are renamed without asking again
             prep["delete_refused"] = ("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]
+            perms = tr.field_permissions(f["id"])
+            prep["permissions"] = perms
+            if perms:
+                prep["delete_refused"] += " (this token on the field %s: %s)" % (f["name"], ", ".join("%s=%s" % (k, str(v).lower()) for k, v in sorted(perms.items())))
         new_name = RENAMED_PREFIX + f["name"]
         out = tr.rename_field(f["id"], new_name)
         if out["renamed"]:

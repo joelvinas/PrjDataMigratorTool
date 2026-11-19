@@ -53,6 +53,8 @@ class Fake(object):
         if m == "GET" and "/record-types/" in u and not u.endswith("/fields"):
             rid = u.split("/record-types/")[1]
             return Resp(200, {"id": rid, "displayName": self.types[rid], "primaryFieldId": self.primary[rid], "primaryWorkspaceId": "wsDev"})
+        if m == "GET" and "/v2/permissions/fields/" in u:
+            return Resp(200, {"canView": True, "canEdit": True, "canDelete": False, "canAdd": True})
         if m == "PATCH" and "/v2/fields/" in u:
             fid = u.split("/v2/fields/")[1]
             if fid in self.refuse_rename: refuse("RENAME_REFUSED")
@@ -278,6 +280,7 @@ fk8 = Fake(); fk8.refuse_delete = {"DEF1_%d" % i for i in range(5)}
 res8, _c8 = go(fk8, "tX", db=dbp8)
 p8 = res8["prepare"]; rt8 = res8["record_type"]["planning_id"]
 check("when every delete is refused the default fields are renamed instead, with a prefix", sorted(x["new_name"] for x in p8["renamed"]) == ["Unused default - " + n for n in ("Description", "End Date", "Name", "Start Date", "Status")] and not p8["deleted"] and not p8["failed"], p8)
+check("the refusal note says what the token may do with the field (the permission flags)", "canDelete=false" in "".join(res8["notes"]) and p8["permissions"] == {"canView": True, "canEdit": True, "canDelete": False, "canAdd": True}, res8["notes"])
 check("after the first refused delete no other delete is tried", len([x for x in fk8.reqs if x[0] == "DELETE"]) == 1 and len([x for x in fk8.reqs if x[0] == "PATCH" and "/v2/fields/" in x[1]]) == 5)
 check("the renamed fields are in Planning under their new names, and the run still loads the table", {f["displayName"] for f in fk8.fields[rt8]} >= {"Unused default - Name", "AirtableRecordId", "Order Name"} and "Name" not in {f["displayName"] for f in fk8.fields[rt8]}
       and res8["records"]["loaded"] == 3 and any("renamed" in n for n in res8["notes"]), (p8, res8["notes"]))
