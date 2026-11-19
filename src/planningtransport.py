@@ -394,6 +394,42 @@ class PlanningTransport(object):
             return {"deleted": False, "status": e.status, "reason": str(e)}
         return {"deleted": True, "already_gone": False}
 
+    # ---- preparing a new record type: its default fields (Name, Description, Start Date, End Date, Status) clash with Airtable names. The owner confirmed in the Planning UI (19 November
+    #      2026) that once another field is the PRIMARY field, the defaults can be deleted. Routes from docs/WF_Planning_v2_API_simplified.yaml; not yet run against a real Workfront.
+    def list_fields(self, record_type_id):
+        """Every field of the record type, as [{id, name, type}] in the order Planning lists them (all pages)."""
+        if not record_type_id:
+            raise ValueError("A record type ID is needed.")
+        return [{"id": str(r["id"]), "name": str(r.get("displayName") or ""), "type": str(r.get("type") or "")}
+                for r in self._pages("/v2/record-types/%s/fields" % record_type_id) if isinstance(r, dict) and r.get("id")]
+
+    def set_primary_field(self, record_type_id, field_id):
+        """PATCH /v2/record-types/{id} with primaryFieldId (the displayName is read first and sent with it, because the update schema lists it as required), then read the record type
+        again and check that Planning really holds the new primary field: an accepted call is not proof. Raises HttpError with a plain reason when it is not confirmed."""
+        if not record_type_id or not field_id:
+            raise ValueError("A record type ID and a field ID are needed.")
+        rt = self.get_record_type(record_type_id)
+        if str(rt.get("primaryFieldId") or "") == str(field_id):
+            return True
+        body = {"displayName": rt.get("displayName") or "", "primaryFieldId": str(field_id)}
+        self.http.request("PATCH", "/v2/record-types/%s" % record_type_id, body)
+        got = self.get_record_type(record_type_id).get("primaryFieldId")
+        if str(got or "") != str(field_id):
+            raise HttpError("The primary field change was accepted but Planning still reports a different primary field when the record type is read back.")
+        return True
+
+    def delete_field(self, field_id):
+        """DELETE /v2/fields/{id} (204; 404 = already gone). Never raises for a refusal: {"deleted": True, "already_gone": bool} or {"deleted": False, "status", "reason"}."""
+        if not field_id:
+            raise ValueError("A field ID is needed.")
+        try:
+            self.http.request("DELETE", "/v2/fields/%s" % field_id)
+        except HttpError as e:
+            if e.status == 404:
+                return {"deleted": True, "already_gone": True}
+            return {"deleted": False, "status": e.status, "reason": lr.scrub(e)}
+        return {"deleted": True, "already_gone": False}
+
     def list_record_ids(self, record_type_id, size=100):
         """(the first page's record IDs, total records in the record type). Only IDs are kept: the record values in the reply are dropped at once. GET /v2/record-types/{id}/records?page=0&size=N."""
         if not record_type_id:

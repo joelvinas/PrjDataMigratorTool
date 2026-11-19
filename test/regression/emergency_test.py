@@ -35,6 +35,7 @@ class Fake(object):
     """A fake Planning. It refuses the field types in `refuse_types` (400 with an error code), lists the fields it created, and bulk-creates records."""
     def __init__(self):
         self.reqs, self.n, self.r, self.fields, self.refuse_types, self.refuse_names, self.fail_index = [], 0, 0, {}, {"date", "formula"}, set(), set()
+        self.primary, self.types, self.refuse_delete, self.refuse_primary = {}, {}, set(), False
     def open(self, req, timeout=None):
         body = json.loads(req.data) if req.data else None
         m, full = req.get_method(), req.full_url
@@ -44,7 +45,24 @@ class Fake(object):
         def refuse(code, extra=""):
             raise urllib.error.HTTPError(full, 400, "bad", {"X-Request-Id": "req-%d" % self.n}, io.BytesIO(json.dumps({"code": code, "message": "refused " + extra}).encode()))
         if m == "POST" and u.endswith("/record-types"):
-            return Resp(201, {"id": "RT%d" % self.n, "displayName": body["displayName"]})
+            rid = "RT%d" % self.n
+            self.types[rid] = body["displayName"]
+            self.fields[rid] = [{"id": "DEF%d_%d" % (self.n, i), "displayName": d, "type": "text"} for i, d in enumerate(["Name", "Description", "Start Date", "End Date", "Status"])]   # what Planning adds itself
+            self.primary[rid] = "DEF%d_0" % self.n
+            return Resp(201, {"id": rid, "displayName": body["displayName"]})
+        if m == "GET" and "/record-types/" in u and not u.endswith("/fields"):
+            rid = u.split("/record-types/")[1]
+            return Resp(200, {"id": rid, "displayName": self.types[rid], "primaryFieldId": self.primary[rid], "primaryWorkspaceId": "wsDev"})
+        if m == "PATCH" and "/record-types/" in u:
+            rid = u.split("/record-types/")[1]
+            if self.refuse_primary: refuse("PRIMARY_REFUSED")
+            self.primary[rid] = body["primaryFieldId"]
+            return Resp(200, {"id": rid})
+        if m == "DELETE" and "/v2/fields/" in u:
+            fid = u.split("/v2/fields/")[1]
+            if fid in self.refuse_delete: refuse("FIELD_IN_USE")
+            for rid in self.fields: self.fields[rid] = [f for f in self.fields[rid] if f["id"] != fid]
+            return Resp(204, {})
         if m == "POST" and u.endswith("/fields"):
             rt = u.split("/record-types/")[1].split("/")[0]
             if body["type"] in self.refuse_types: refuse("INVALID_FIELD_TYPE", "Bearer " + TOKEN)
@@ -214,6 +232,44 @@ check("the option list of a select field is in the report (schema metadata)", "R
 
 check("the CSV carries base, table, workspace and record type, the API call counts per field, and the options as JSON", all(h in csv_text.splitlines()[0] for h in ("base_name", "workspace_name", "workspace_id", "record_type_name", "record_type_id", "proposed_data_type", "implemented_data_type", "api_calls", "api_successes", "api_failures", "cardinality_is_capped", "airtable_options_json", "longest_value_length")))
 check("each field counts its own calls: a refused then accepted field has 2 calls, 1 success, 1 failure", by["fDate"]["api_calls"] == 2 and by["fDate"]["api_successes"] == 1 and by["fDate"]["api_failures"] == 1 and by["fName"]["api_calls"] == 1 and by["fLink"]["api_calls"] == 0, by["fDate"])
+
+# ---- the preparatory step: AirtableRecordId first, as the primary field, then the default fields go, BEFORE any Airtable field is added
+rt = res["record_type"]["planning_id"]
+pre = res["prepare"]
+order = [(x[0], x[1].split("/v2")[1].split("?")[0], x[2] if isinstance(x[2], dict) else None) for x in fk.reqs]
+first_field = next(i for i, x in enumerate(order) if x[0] == "POST" and x[1].endswith("/fields"))
+last_default_delete = max(i for i, x in enumerate(order) if x[0] == "DELETE")
+last_field_post = max(i for i, x in enumerate(order) if x[0] == "POST" and x[1].endswith("/fields"))
+check("the first field created is AirtableRecordId, as text", order[first_field][2] == {"displayName": "AirtableRecordId", "type": "text"}, order[first_field])
+patch_i = next(i for i, x in enumerate(order) if x[0] == "PATCH")
+check("it is made the primary field, and that comes right after it is created", order[patch_i][2] == {"displayName": "Gadget Orders", "primaryFieldId": pre["field_id"]} and patch_i > first_field and fk.primary[rt] == pre["field_id"], order[patch_i])
+check("every default field is deleted, and all deletes happen BEFORE the second field is created", sorted(x["name"] for x in pre["deleted"]) == ["Description", "End Date", "Name", "Start Date", "Status"]
+      and last_default_delete < [i for i, x in enumerate(order) if x[0] == "POST" and x[1].endswith("/fields")][1], pre)
+check("the Airtable field named like a default (Order Name is not, but the table has none) leaves no default behind", not any(f["displayName"] in ("Description", "End Date", "Start Date", "Status") for f in fk.fields[rt]) and pre["primary"] and pre["created"] == "created")
+check("the fields of the new record type are AirtableRecordId plus the run's own, nothing else", {f["displayName"] for f in fk.fields[rt]} >= {"AirtableRecordId", "Order Name", "PRE-Due Date"} and "Name" not in {f["displayName"] for f in fk.fields[rt]})
+check("AirtableRecordId is not counted among the Airtable fields of the result", len(res["fields"]) == 10 and all(f["field_name"] != "AirtableRecordId" for f in res["fields"]))
+check("each record carries its own Airtable record ID in AirtableRecordId", [d.get(pre["field_id"]) for d in sent] == ["recX1", "recX2", "recX3"], sent[:1])
+check("the primary field is recorded in the ID map under the table", rows["P-K-tX"]["workfront_id"] == pre["field_id"] and rows["P-K-tX"]["name"] == "AirtableRecordId" and rows["P-K-tX"]["table_id"] == "tX" and rows["P-K-tX"]["airtable_field_id"] is None)
+# a rerun on the same record type: nothing is created twice and the run's own fields are never deleted
+n_before = len(fk.reqs)
+res_b, conn_b = go(fk, "tX")
+again = [x for x in fk.reqs[n_before:]]
+check("a rerun creates no second AirtableRecordId and deletes nothing it made", not any(x[0] == "POST" and isinstance(x[2], dict) and x[2].get("displayName") == "AirtableRecordId" for x in again)
+      and not any(x[0] == "DELETE" for x in again) and res_b["prepare"]["created"] == "already_created" and res_b["prepare"]["primary"], [x[:2] for x in again if x[0] != "GET"])
+# a failing delete is a note, not the end of the run
+# the primary field cannot be set: nothing is deleted, no Airtable field is added, the run says why
+dbp7 = os.path.join(tmp, "base7.db"); shutil.copyfile(dbp, dbp7)
+c7 = sqlite3.connect(dbp7); c7.execute("delete from load_id_map"); c7.execute("delete from target_mappings"); c7.execute("delete from record_pass_markers"); c7.commit(); c7.close()
+fk7 = Fake(); fk7.refuse_primary = True
+res7, _c7 = go(fk7, "tX", db=dbp7)
+check("when the primary field cannot be set the run stops: no default field is deleted and no Airtable field is added",
+      not res7["prepare"]["primary"] and "primary" in res7["prepare"]["error"] and not any(x[0] == "DELETE" for x in fk7.reqs) and len(fk7.posts("/fields")) == 1 and res7["fields"] == [] and res7["records"]["loaded"] == 0, res7["prepare"])
+# a delete Planning refuses is reported by name, and the run goes on
+dbp8 = os.path.join(tmp, "base8.db"); shutil.copyfile(dbp, dbp8)
+c8 = sqlite3.connect(dbp8); c8.execute("delete from load_id_map"); c8.execute("delete from target_mappings"); c8.execute("delete from record_pass_markers"); c8.commit(); c8.close()
+fk8 = Fake(); fk8.refuse_delete = {"DEF1_1"}
+res8, _c8 = go(fk8, "tX", db=dbp8)
+check("a refused delete is a note naming the field, and the run still loads the table", [x["name"] for x in res8["prepare"]["failed"]] == ["Description"] and any("Description" in n for n in res8["notes"]) and res8["records"]["loaded"] == 3, (res8["prepare"], res8["notes"]))
 
 # ---- nothing secret anywhere
 everything = json.dumps(res, default=sorted) + json.dumps(resy, default=sorted) + fields_html + api_html + csv_text

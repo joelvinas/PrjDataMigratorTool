@@ -59,6 +59,9 @@ function renderResult(j) {
   }
   const notes = $("notes");
   clear(notes);
+  const pr = r.prepare;
+  if (pr) notes.appendChild(el("div", { class: "hint", text: "Preparatory step: AirtableRecordId " + (pr.primary ? "is the primary field" : "is NOT the primary field") + "; " + pr.deleted.length + " default field(s) deleted"
+    + (pr.deleted.length ? " (" + pr.deleted.map((x) => x.name).sort().join(", ") + ")" : "") + (pr.error ? ". " + pr.error : "") + "." }));
   (r.notes || []).forEach((n) => notes.appendChild(el("div", { class: "banner warn", text: n })));
   if (r.db_note) notes.appendChild(el("div", { class: "hint", text: r.db_note }));
   const rows = r.fields.slice().sort((a, b) => a.field_name.toLowerCase().localeCompare(b.field_name.toLowerCase()) || (a.field_id < b.field_id ? -1 : 1));
