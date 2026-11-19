@@ -100,11 +100,35 @@ class _Multipart(object):
         return out
 
 
+_REQUEST_ID_HEADERS = ("X-Request-Id", "X-Request-ID", "X-Amzn-RequestId", "X-Correlation-Id")
+_CODE_RE = re.compile(r"\"(?:code|errorCode)\"\s*:\s*\"([A-Za-z0-9_.-]{1,60})\"")
+
+
 class Http(object):
     def __init__(self, creds, secrets=(), opener=None, sleep=time.sleep, timeout=60):
         self.creds, self.secrets, self.sleep, self.timeout = creds, set(secrets) | {creds.secret()}, sleep, timeout
         self.opener = opener or urllib.request.build_opener(_NoRedirect)
         self.calls = 0
+        # Optional call recorder (the Emergency mode API log report): a callable given one dict per ATTEMPT {method, path, status, duration_ms, request_id, error_code,
+        # error_text}. The path holds no query and the dict holds no header, token or request body. `record_text` False keeps the error CODE only (a record call's error text
+        # could echo a value).
+        self.recorder, self.record_text = None, True
+
+    def _record(self, method, path, status, t0, headers=None, request_id=None, error=None):
+        if self.recorder is None:
+            return
+        rid = request_id
+        if not rid and headers is not None and hasattr(headers, "get"):
+            rid = next((headers.get(h) for h in _REQUEST_ID_HEADERS if headers.get(h)), None)
+        code = None
+        if error:
+            m = _CODE_RE.search(error)
+            code = m.group(1) if m else None
+        text = None
+        if error:
+            text = self.clean(error) if self.record_text else ("(text withheld: it may echo a record value)" if status else self.clean(error))
+        self.recorder({"method": method, "path": path, "status": status, "duration_ms": int((time.monotonic() - t0) * 1000), "request_id": str(rid)[:80] if rid else None,
+                       "error_code": code, "error_text": text})
 
     def clean(self, text):
         return lc.redact(lr.scrub(text, 400), self.secrets)
@@ -121,6 +145,7 @@ class Http(object):
         for attempt in range(len(WAITS) + 1):
             req = urllib.request.Request(self.url(path, query), data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json", "Accept-Encoding": "identity", name: value})
             self.calls += 1
+            t0 = time.monotonic()
             try:
                 with self.opener.open(req, timeout=self.timeout) as r:
                     raw = r.read()
@@ -129,19 +154,29 @@ class Http(object):
             except urllib.error.HTTPError as e:
                 status, raw = e.code, e.read()
                 if 300 <= status < 400:
-                    raise HttpError("The server answered with a redirect (%d), which is not followed so the credentials stay with the configured address." % status, status)
+                    err = "The server answered with a redirect (%d), which is not followed so the credentials stay with the configured address." % status
+                    self._record(method, path, status, t0, e.headers, error=err)
+                    raise HttpError(err, status)
                 if status not in RETRY_STATUS:
-                    raise HttpError(self._failure(status, raw, e.headers), status)
+                    err = self._failure(status, raw, e.headers)
+                    self._record(method, path, status, t0, e.headers, error=err)
+                    raise HttpError(err, status)
                 last = HttpError(self._failure(status, raw, e.headers), status)
+                self._record(method, path, status, t0, e.headers, error=str(last))
             except (urllib.error.URLError, OSError) as e:
                 last = HttpError(self.clean("Could not reach the server: %s" % getattr(e, "reason", e)), None)
+                self._record(method, path, None, t0, error=str(last))
             else:
                 if not raw.strip():
+                    self._record(method, path, status, t0, heads)
                     return None
                 try:
-                    return json.loads(read_text(raw, heads)[0])
+                    parsed = json.loads(read_text(raw, heads)[0])
                 except ValueError:
+                    self._record(method, path, status, t0, heads, error="The server's answer (HTTP %d) was not JSON." % status)
                     raise HttpError("The server's answer (HTTP %d) was not JSON." % status, status)
+                self._record(method, path, status, t0, heads, request_id=(parsed.get("requestId") if isinstance(parsed, dict) else None))
+                return parsed
             if attempt < len(WAITS):
                 self.sleep(WAITS[attempt])
         raise last

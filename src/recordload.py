@@ -97,10 +97,20 @@ def _empty(v):
     return v is None or v == "" or v == [] or v == {}
 
 
+def raw_text(value):
+    """The value as plain text exactly as Airtable gave it: a string stays as it is, anything else (a list, an object, a number, true or false) is its JSON text. Used by the
+    Emergency mode PRE- fields, which keep the original value untouched."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def convert(f, value):
     """(True, value for Planning), or (False, short reason with no value in it). An empty value is (True, None): it is simply left out."""
     if _empty(value):
         return True, None
+    if f.get("raw"):                       # an Emergency mode PRE- text field: no conversion, no cleaning
+        return True, raw_text(value)
     k = f["kind"]
     if k in ("text", "long-text", "rich-text"):
         if isinstance(value, (list, dict)):
