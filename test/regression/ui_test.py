@@ -15,7 +15,7 @@ with sync_playwright() as p:
     pg.goto(B); pg.wait_for_timeout(1200)
     navtxt=lambda p: [a.inner_text().split("\n")[0] for a in p.query_selector_all("#sidenav .nav-label")]
     check("home page is Setup with steps 1 and 2 only", pg.query_selector("#step1") and pg.query_selector("#step2") and not pg.query_selector("#step3") and pg.inner_text("#sidenav a.current .nav-label")=="Setup")
-    check("nav order, Stage 4 is the record map page, log is last", navtxt(pg)==["Setup","Stage 1: Data","Stage 2: Forms","Stage 3: Automations","Field names","Data types","Lookup lists","Postman tests","Stage 4: Map and load","Load a table","\U0001F6A8 Git-R-Done","API call log"], navtxt(pg))
+    check("nav order, Stage 4 is the record map page, log is last", navtxt(pg)==["Setup","Stage 1: Data","Stage 2: Forms","Stage 3: Automations","Field names","Data types","Lookup lists","Postman tests","Stage 4: Map and load","Load a table","\U0001F6A8 Git-R-Done","Extract to CSV","API call log"], navtxt(pg))
     check("Stage 4 is a link to the record map page", pg.query_selector("#sidenav a[href='/load']") is not None)
     box=lambda sel: pg.eval_on_selector(sel,"e=>{const r=e.getBoundingClientRect();return [r.top,r.bottom]}")
     nb=pg.eval_on_selector("#sidenav","e=>{const r=e.getBoundingClientRect();return r.bottom}")

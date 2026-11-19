@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extract to CSV - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="extractcsv">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<main>
+<section class="card" id="ctxCard">
+  <h2>Extract to CSV</h2>
+  <p class="hint">Turns one saved Airtable table extract (the <code>.json</code> file the extract step writes into <code>data_extract</code>) into a CSV you can open in Excel and check against Airtable. This page needs no database and no token. The file is read in memory, converted and handed back; nothing is stored, and the values are not shown on this page.</p>
+  <p class="hint"><strong>What the CSV holds.</strong> The first rows give the extract's facts (format, base_id, table_id, table_name, captured_at, record_count, field_count), then two blank rows. Next come a <code>field_id</code> row and a <code>data_type</code> row, then the heading row (<code>record_id</code>, <code>createdTime</code>, then one field name per column), then <strong>one row per record</strong>. A list (linked records, multiple selects, attachments) stays in its one cell as JSON text, and long text keeps its line breaks inside its cell. Commas, quotes and slashes in a value are handled. A true or false is written <code>true</code> or <code>false</code>, and an empty value is an empty cell.</p>
+  <div class="row">
+    <label for="fileIn">Extract file (.json)</label>
+    <input id="fileIn" type="file" accept=".json,application/json">
+    <button id="btnConvert" type="button" class="primary" disabled>Convert to CSV</button>
+  </div>
+  <div id="pageMessage" class="msg" aria-live="polite"></div>
+  <div id="resultBox" hidden aria-live="polite">
+    <p id="resultLine"></p>
+    <p><a id="dlLink" class="btnlink primary" href="#" download>Download the CSV</a></p>
+    <ul id="warnList"></ul>
+  </div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/extractcsv.js"></script>
+</body>
+</html>

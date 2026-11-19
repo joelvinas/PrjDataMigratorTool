@@ -72,6 +72,7 @@ airtable-migration-control/
 │   ├── loader.py                the loader command line: plan, dry-run, run --send, records and reset
 │   ├── tableload.py             the one-table load steps (check, structure, records, links, verify, reset) that loader.py and the Load a table page share
 │   ├── tablereset.py            the table structure reset used by Git-R-Done: delete the record type, then forget the table's IDs (counts, inbound links, one transaction)
+│   ├── extractcsv.py            one saved extract file to a CSV (facts rows, field rows, one row per record); behind the Extract to CSV page
 │   ├── typemap.py  workfronthttp.py  coretransport.py  planningtransport.py   the target type mapping, the HTTP layer and the two Workfront transports
 │   ├── recordmap.py             the record ID map: surrogate IDs, targets, pass markers, attachment map and the views behind the Stage 4 screens
 │   ├── recordload.py            the Planning record load: the records pass and the links pass
@@ -702,6 +703,7 @@ python src/loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX --env
 | Stage 4: Map and load | `/load` | Field crosswalk, translating view field IDs, loading records into Workfront Planning and Core | **Begun** (version 1.15): the load plan, dry run, field creation (`run --send`), the Planning record load (`records`) and the screens that show the record map, pass markers and attachment map (`/load`, read-only, IDs and counts only, sortable on the server). See `docs/LOADER_PLAN.md` |
 | Load a table | `/loadtable` | Load ONE table into Workfront Planning step by step without the command line: check, create the record type and fields, records, links, verify, and a reset of its records | **Begun** (version 1.16) |
 | Git-R-Done | `/emergency` | One table into the dev Workspace in one click, plus Reset table (delete its record type and forget its IDs) to try again fast | Built |
+| Extract to CSV | `/extractcsv` | Pick a saved extract `.json` file and download it as a CSV to check in Excel: the extract's facts first (base_id, table_id, table_name, captured_at, record_count, field_count), then field IDs, types and names, then one row per record and one column per field. Lists and long text stay inside their one cell. Needs no database or token; nothing is stored | Built |
 | API call log | `/log` | Every call made to Airtable, for auditing. Always last in the side panel. | Built |
 
 Decisions made:
