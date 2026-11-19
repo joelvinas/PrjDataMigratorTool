@@ -249,6 +249,7 @@ def attempted_type(field, defaults):
 
 
 PK_NAME = "AirtableRecordId"
+RENAMED_PREFIX = "Unused default - "                  # a default field Planning will not delete is renamed with this, so its name cannot clash with an Airtable field
 DEFAULT_FIELDS = frozenset({"name", "description", "start date", "end date", "status"})      # what a new Planning record type comes with (owner, 19 November 2026)
 
 
@@ -259,7 +260,7 @@ def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id,
     A NEW record type loses every field except the ones this tool created; a REUSED one loses only a leftover default field by name, because a person may have added fields
     to it. A failed delete is a note, not the end of the run; steps 1 and 2 failing end it (returns False), with nothing deleted. Returns (ok, primary field ID).
     result["prepare"] = {field_id, created, primary, deleted: [{id, name, type}], failed: [{id, name, type, reason}], kept: [...]}."""
-    prep = result["prepare"] = {"field_id": None, "created": None, "primary": False, "deleted": [], "failed": [], "kept": [], "error": ""}
+    prep = result["prepare"] = {"field_id": None, "created": None, "primary": False, "deleted": [], "renamed": [], "failed": [], "kept": [], "error": ""}
     item = _item("P-K-" + table_id, "field", PK_NAME, rt_item["temp_id"], table_id, None, "text")
     ok, pk_id, err, how = _try(state, env, tr, item)
     if not ok:
@@ -279,17 +280,28 @@ def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id,
         return False, pk_id
     mine = {r[0] for r in conn.execute("SELECT workfront_id FROM load_id_map WHERE system='planning' AND kind='field' AND status='created' AND environment=? AND workspace_key=? AND base_id=? AND table_id=? "
                                        "AND workfront_id IS NOT NULL", (env.name, state.workspace_id or "", base_id, table_id))} | {pk_id}
+    delete_refused = False
     for f in sorted(fields, key=lambda x: (x["name"].lower(), x["id"])):
         if f["id"] in mine or (reused and f["name"].strip().lower() not in DEFAULT_FIELDS):
             prep["kept"].append(f)
             continue
-        out = tr.delete_field(f["id"])
-        if out["deleted"]:
-            prep["deleted"].append(f)
+        if not delete_refused:
+            out = tr.delete_field(f["id"])
+            if out["deleted"]:
+                prep["deleted"].append(f)
+                continue
+            delete_refused = True                     # Planning refuses deletes (a 403 in the first real run): the rest are renamed without asking again
+            prep["delete_refused"] = ("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]
+        new_name = RENAMED_PREFIX + f["name"]
+        out = tr.rename_field(f["id"], new_name)
+        if out["renamed"]:
+            prep["renamed"].append(dict(f, new_name=new_name))
         else:
             prep["failed"].append(dict(f, reason=("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]))
+    if prep["renamed"]:
+        notes.append("Planning would not delete %d default field(s), so they were renamed with the prefix \"%s\" instead (%s)." % (len(prep["renamed"]), RENAMED_PREFIX.strip(), ", ".join(sorted(x["name"] for x in prep["renamed"]))))
     if prep["failed"]:
-        notes.append("%d default field(s) could not be deleted from the record type (%s). Delete them by hand in Workfront Planning if a name clashes." % (len(prep["failed"]), ", ".join(sorted(x["name"] for x in prep["failed"]))))
+        notes.append("%d default field(s) could be neither deleted nor renamed (%s). Change them by hand in Workfront Planning if a name clashes." % (len(prep["failed"]), ", ".join(sorted(x["name"] for x in prep["failed"]))))
     return True, pk_id
 
 

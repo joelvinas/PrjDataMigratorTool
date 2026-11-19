@@ -48,6 +48,12 @@ class Fake(object):
                 fid = u.rsplit("/", 1)[-1]
                 for k in self.rtfields: self.rtfields[k] = [f for f in self.rtfields[k] if f["id"] != fid]
                 return 204, {}
+            if m == "PATCH" and u.rsplit("/", 2)[-2] == "fields":
+                fid = u.rsplit("/", 1)[-1]
+                for k in self.rtfields:
+                    for f in self.rtfields[k]:
+                        if f["id"] == fid: f["displayName"] = body["displayName"]
+                return 200, {"id": fid}
             if m == "PATCH" and u.rsplit("/", 2)[-2] == "record-types":
                 self.primary[u.rsplit("/", 1)[-1]] = body["primaryFieldId"]; return 200, {}
             if m == "POST" and u.endswith("/records/bulk"):

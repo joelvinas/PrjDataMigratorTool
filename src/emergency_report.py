@@ -99,8 +99,8 @@ def fields_html(result, css, apilog_name=None, redact=lambda t: t):
     h.append("<li>Record type: %s (%s).</li>" % (_e(result["record_type"]["outcome"]), _e(result["record_type"]["planning_id"] or "none")))
     pr = result.get("prepare")
     if pr:
-        h.append("<li>Preparatory step: AirtableRecordId (%s) %s; %d default field(s) deleted%s.</li>" % (_e(pr["field_id"] or "none"), "is the primary field" if pr["primary"] else "is NOT the primary field",
-                 len(pr["deleted"]), (": " + _e(", ".join(sorted(x["name"] for x in pr["deleted"])))) if pr["deleted"] else ""))
+        h.append("<li>Preparatory step: AirtableRecordId (%s) %s; %d default field(s) deleted, %d renamed%s.</li>" % (_e(pr["field_id"] or "none"), "is the primary field" if pr["primary"] else "is NOT the primary field",
+                 len(pr["deleted"]), len(pr.get("renamed", [])), (": " + _e(", ".join(sorted(x["name"] for x in pr["deleted"])))) if pr["deleted"] else ""))
     h.append("<li>Lengths came from %s.</li>" % _e(result["scan_source"] or "no record data (unknown)"))
     h.append("<li>Database table emergency_field_results: %s</li>" % _e(result["db_note"]))
     h.append("</ul>")

@@ -430,6 +430,17 @@ class PlanningTransport(object):
             return {"deleted": False, "status": e.status, "reason": lr.scrub(e)}
         return {"deleted": True, "already_gone": False}
 
+    def rename_field(self, field_id, new_name):
+        """PATCH /v2/fields/{id} with only displayName (merge-patch: nothing else changes). Used when Planning refuses to delete a default field. Never raises for a refusal:
+        {"renamed": True} or {"renamed": False, "status", "reason"}. Not yet run against a real Workfront."""
+        if not field_id or not new_name:
+            raise ValueError("A field ID and a new name are needed.")
+        try:
+            self.http.request("PATCH", "/v2/fields/%s" % field_id, {"displayName": new_name})
+        except HttpError as e:
+            return {"renamed": False, "status": e.status, "reason": lr.scrub(e)}
+        return {"renamed": True}
+
     def list_record_ids(self, record_type_id, size=100):
         """(the first page's record IDs, total records in the record type). Only IDs are kept: the record values in the reply are dropped at once. GET /v2/record-types/{id}/records?page=0&size=N."""
         if not record_type_id:
