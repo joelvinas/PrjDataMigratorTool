@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Apply the migrations (001 to 019) to an existing database. Standard library only.
+"""Apply every migration (001 to 025) to an existing database in one run. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
 Adds only the columns and tables that are missing, so it is safe to run more than once and on a database that is already
 up to date. It never changes data. The only drops are the removal of the empty placeholder tables form_sections and form_fields (migration 005) and automation_catalog and automation_steps (migration 006); a placeholder that has rows is kept and reported. Back up the file first if it matters to you."""
 import os, re, sqlite3, sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+import draftmigrations  # noqa: E402  (021 to 025: data types, lookup lists, Git-R-Done results)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -54,6 +57,8 @@ def main():
     conn.executescript(open(os.path.join(HERE, "migration_018_add_link_direction_events.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_019_add_field_writer_decisions.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_020_add_core_parents.sql"), encoding="utf-8").read())
+    conn.commit()
+    ran = draftmigrations.apply(conn)   # 021 to 025, each only if still missing
     dropped, kept = [], []
     for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():
@@ -69,6 +74,8 @@ def main():
         print("Added %d column(s): %s" % (len(added), ", ".join(added)))
     if new_tables:
         print("Added table(s): %s" % ", ".join(new_tables))
+    if ran:
+        print("Applied migration(s): %s" % ", ".join("%03d" % n for n in ran))
     if dropped:
         print("Dropped empty placeholder table(s): %s" % ", ".join(dropped))
     if kept:

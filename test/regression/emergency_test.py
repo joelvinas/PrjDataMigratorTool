@@ -174,9 +174,13 @@ res5 = em.run_table(conn5, BASE, "tX", ctx5, tr5, os.path.join(tmp, "nowhere"), 
 check("with no saved file the table is re-read through the supplied fetcher, and the result says so", fetched == [(BASE, "tX")] and res5.get("reread") and "re-read from Airtable" in res5["scan_source"] and res5["records"]["loaded"] == 1, res5["notes"])
 
 # ---- the optional database table (draft migration 025)
-check("without migration 025 the database write is skipped, with a plain note", res["db_written"] is False and "emergency_field_results" in res["db_note"])
+check("a database built from the schema library already has the results table, so the field results are saved", res["db_written"] is True and "emergency_field_results" in res["db_note"], res["db_note"])
 dbp6 = os.path.join(tmp, "base6.db"); shutil.copy(dbp, dbp6)
 c6 = sqlite3.connect(dbp6); [c6.execute("delete from " + t) for t in ("load_id_map", "target_mappings", "record_pass_markers", "source_records")]
+c6.execute("drop table emergency_field_results"); c6.commit()
+res6x, conn6x = go(Fake(), "tX", db=dbp6)
+check("on an older database without the results table the write is skipped, with a plain note", res6x["db_written"] is False and "emergency_field_results" in res6x["db_note"], res6x["db_note"])
+[c6.execute("delete from " + t) for t in ("load_id_map", "target_mappings", "record_pass_markers", "source_records")]
 c6.executescript(open(os.path.join(ROOT, "sql", "migration_025_add_emergency_field_results.sql"), encoding="utf-8").read()); c6.executescript(open(os.path.join(ROOT, "sql", "migration_025_add_emergency_field_results.sql"), encoding="utf-8").read()); c6.commit(); c6.close()
 res6, conn6 = go(Fake(), "tX", db=dbp6)
 conn6.commit()

@@ -404,6 +404,7 @@ CREATE TABLE field_names (
     description TEXT,                 -- generated from the lineage syntax, then hand-edited
     target_type TEXT,                 -- target Workfront data type
     core_target_type TEXT,            -- the Workfront Core data type (migration 012); target_type is the Planning data type
+    core_display_type TEXT,           -- the Workfront Core displayType (migration 022); core_target_type is the dataType
     planning_name_verdict TEXT,       -- cache of the last validation: PASS, AUTO_FIXABLE or NEEDS_HUMAN (always recomputable)
     core_name_verdict TEXT,
     core_label_verdict TEXT,
@@ -769,6 +770,133 @@ CREATE TABLE table_core_events (
     FOREIGN KEY (table_id) REFERENCES airtable_tables(table_id)
 );
 CREATE INDEX idx_table_core_events_table ON table_core_events(table_id, event_id);
+
+-- 20. The data type mapping per system: the default mapping, who set each field's type and how, and the history (migration 021, with 022 and 023)
+-- Planning and Core have different type lists, so each field has two answers (field_names.target_type = Planning, core_target_type + core_display_type = Core).
+-- The default mapping rows are seeded by seed() in src/draftmigrations.py (from migrations 021 and 023); a person edits a default and every edit is kept in data_type_events.
+-- The default mapping: one row per (system, Airtable field type). A person may edit a default; every edit goes to data_type_events.
+-- NULL default_type = the tool proposes nothing and a person must decide.
+CREATE TABLE data_type_defaults (
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    airtable_type TEXT NOT NULL,
+    default_type TEXT,                           -- Planning type, or the Core dataType
+    default_display_type TEXT,                   -- Core displayType; NULL for Planning
+    note TEXT,
+    rule_text TEXT,                              -- the transformation rule in words (migration 023)
+    updated_by TEXT NOT NULL DEFAULT 'seed',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (system, airtable_type)
+);
+
+-- Who set each field's type for each system, and how: default (taken from the mapping), override (a person chose another), import (spreadsheet).
+CREATE TABLE field_type_decisions (
+    airtable_field_id TEXT NOT NULL,
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    chosen_type TEXT NOT NULL,
+    chosen_display_type TEXT,                    -- Core only
+    source TEXT NOT NULL CHECK(source IN ('default', 'override', 'import')),
+    decided_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    PRIMARY KEY (airtable_field_id, system),
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id)
+);
+
+-- Append-only history (the lesson of migrations 018 and 019). A bulk update shares one batch_id. Default edits have airtable_field_id = NULL.
+-- 'clear' also records a value that was not on the allowed list and was removed (the old value is kept here, so nothing is lost).
+CREATE TABLE data_type_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT,
+    airtable_field_id TEXT,
+    system TEXT NOT NULL CHECK(system IN ('planning', 'core')),
+    airtable_type TEXT,                          -- set on default edits
+    event_type TEXT NOT NULL CHECK(event_type IN ('set', 'change', 'clear', 'default_change')),
+    old_type TEXT,
+    old_display_type TEXT,
+    new_type TEXT,
+    new_display_type TEXT,
+    source TEXT,
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_data_type_events_field ON data_type_events(airtable_field_id, event_id);
+
+CREATE INDEX idx_data_type_events_batch ON data_type_events(batch_id);
+
+-- 21. Lookup lists: select fields authorized to become a record type of their own, and the history (migration 024)
+-- A lookup list: the name of the record type to be created in Planning. The name is a Planning name and follows the Planning naming rules (checked by the app).
+CREATE TABLE lookup_lists (
+    list_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_id TEXT NOT NULL,
+    list_name TEXT NOT NULL,
+    created_by TEXT NOT NULL,                    -- initials or a short name (the app has no logins)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT
+);
+
+-- The latest decision per select field: this field's options go to this list. A field with no row stays an ordinary select field.
+-- Several fields may share one list.
+CREATE TABLE field_lookup_decisions (
+    airtable_field_id TEXT NOT NULL PRIMARY KEY,
+    list_id INTEGER NOT NULL,
+    decided_by TEXT NOT NULL,
+    decided_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    FOREIGN KEY (airtable_field_id) REFERENCES airtable_fields(field_id),
+    FOREIGN KEY (list_id) REFERENCES lookup_lists(list_id)
+);
+
+-- Append-only history (the lesson of migrations 018 and 019): rows are never updated or deleted. A bulk change shares one batch_id.
+CREATE TABLE lookup_list_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT,
+    base_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('list_create', 'list_rename', 'list_delete', 'assign', 'unassign')),
+    list_id INTEGER,
+    airtable_field_id TEXT,
+    old_list_id INTEGER,
+    old_name TEXT,
+    new_name TEXT,
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_lookup_list_events_field ON lookup_list_events(airtable_field_id, event_id);
+
+CREATE INDEX idx_lookup_list_events_batch ON lookup_list_events(batch_id);
+
+-- 22. The field results of a Git-R-Done run (migration 025)
+CREATE TABLE emergency_field_results (
+    result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,                  -- one Go run: E<UTC start as yyyymmddThhmmssZ>-<Airtable table ID>
+    run_at TIMESTAMP NOT NULL,             -- when the run started (UTC)
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    airtable_field_id TEXT NOT NULL,
+    airtable_field_name TEXT NOT NULL,
+    airtable_type TEXT NOT NULL,
+    planning_name TEXT,                    -- the Planning name the naming rules suggest (a suggestion for the crosswalk; the name SENT is the Airtable name, or PRE- + it)
+    core_name TEXT,                        -- the suggested Core name
+    label_name TEXT,                       -- the suggested Core label
+    attempted_planning_type TEXT,          -- the Planning type tried first
+    outcome TEXT NOT NULL CHECK(outcome IN ('clean', 'pre-converted', 'skipped', 'failed')),
+    planning_field_id TEXT,                -- the Planning field ID (also in load_id_map, against the Airtable field ID)
+    error_code TEXT,                       -- Planning's error code for the refused attempt
+    error_text TEXT,                       -- a short message with any credential removed
+    max_length INTEGER,                    -- the longest value, in characters (a number only; the values themselves are never kept)
+    cardinality INTEGER,                   -- from the profile (airtable_fields.cardinality)
+    null_count INTEGER,
+    total_records INTEGER,
+    option_list TEXT,                      -- JSON array of the select options' names (schema metadata)
+    formula_definition TEXT,               -- the formula, or the lookup or rollup definition in words
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, airtable_field_id)
+);
+
+CREATE INDEX idx_emergency_results_table ON emergency_field_results(base_id, table_id, run_at);
 '''
 
 
@@ -1020,6 +1148,8 @@ def api_db_create(body):
                 for kind, table, sql in DDL_STATEMENTS:
                     if table in to_create:
                         conn.execute(sql)
+            if "data_type_defaults" in to_create:
+                draftmigrations.seed(conn)   # the view and the default type mapping (migrations 022, 021, 023)
             info = inspect_db(conn)
     except sqlite3.DatabaseError as e:
         raise DbError("Could not create the tables: %s. Nothing was changed." % scrub(e))

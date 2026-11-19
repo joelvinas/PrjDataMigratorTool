@@ -24,7 +24,9 @@ def fld(i, n, t="singleLineText", o=None):
     return d
 schema = {"tables": [{"id": "tblDt0000000001", "name": "Orders", "primaryFieldId": "fldD01", "views": [], "fields": [
     fld("D01", "Order Name"), fld("D02", "Amount", "number"), fld("D03", "Status", "singleSelect", {"choices": [{"id": "selA", "name": "Open"}]}), fld("D04", "Notes", "multilineText")]}]}
-post("/api/db/create", {"path": "datatypes_api.db"}); post("/api/db/connect", {"path": "datatypes_api.db"})
+post("/api/db/create", {"path": "datatypes_api.db"})
+_c = sqlite3.connect("datatypes_api.db"); tf.strip_drafts(_c); _c.close()   # an older database: the library now holds 021 to 025
+post("/api/db/connect", {"path": "datatypes_api.db"})
 _, r = post("/api/schema/ingest", {"base_id": BASE, "source": "json", "schema_json": json.dumps(schema)})
 check("fabricated schema ingested", r.get("tables") == 1 and r.get("fields") == 4, r)
 
@@ -42,13 +44,13 @@ check("a bad base ID is refused", get("/api/datatypes/review?base_id=nope")[0] =
 # ---- connecting reports the draft migrations as pending without blocking, and the script fixes it
 import subprocess
 s, r = post("/api/db/connect", {"path": "datatypes_api.db"})
-check("connect is still ready but names the pending migrations and the command", s == 200 and r["ready"] is True and [p["migration"] for p in r["pending_migrations"]] == [21, 22, 23, 24]
-      and "sql/apply_draft_migrations.py" in r["pending_message"], r.get("pending_message"))
-p = subprocess.run([sys.executable, os.path.join("sql", "apply_draft_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
-check("the script applies 021 to 024", p.returncode == 0 and "021, 022, 023, 024" in p.stdout, p.stdout + p.stderr)
+check("connect on an older database is not ready, and names the pending migrations and the command", s == 200 and r["ready"] is False and "data_type_defaults" in r["missing_tables"] and [p["migration"] for p in r["pending_migrations"]] == [21, 22, 23, 24, 25]
+      and "sql/apply_migrations.py" in r["pending_message"], r.get("pending_message"))
+p = subprocess.run([sys.executable, os.path.join("sql", "apply_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
+check("the script applies 021 to 025", p.returncode == 0 and "021, 022, 023, 024, 025" in p.stdout, p.stdout + p.stderr)
 s, r = post("/api/db/connect", {"path": "datatypes_api.db"})
-check("after the script nothing is pending", r["ready"] is True and r["pending_migrations"] == [] and r["pending_message"] == "", r.get("pending_message"))
-p = subprocess.run([sys.executable, os.path.join("sql", "apply_draft_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
+check("after the script nothing is pending and the database is ready", r["ready"] is True and r["pending_migrations"] == [] and r["pending_message"] == "", r.get("pending_message"))
+p = subprocess.run([sys.executable, os.path.join("sql", "apply_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
 check("a second run changes nothing", p.returncode == 0 and "Already up to date" in p.stdout, p.stdout + p.stderr)
 # put the database back to the library form so the rest of this suite still starts from the helper
 os.remove("datatypes_api.db")

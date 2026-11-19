@@ -492,5 +492,5 @@ def store_results(conn, result):
                      f["suggested_label"], f["attempted_type"], f["outcome"], f["planning_field_id"] or None, code or None, (err or "")[:500] or None, f["max_length"], f["cardinality"],
                      f["nulls"], f["total_records"], json.dumps(f["options"], ensure_ascii=False) if f["options"] else None, f["definition"] or None))
     with conn:
-        conn.executemany("INSERT INTO emergency_field_results(%s) VALUES (%s)" % (", ".join(RESULT_COLUMNS), ", ".join("?" * len(RESULT_COLUMNS))), rows)
+        conn.executemany("INSERT OR REPLACE INTO emergency_field_results(%s) VALUES (%s)" % (", ".join(RESULT_COLUMNS), ", ".join("?" * len(RESULT_COLUMNS))), rows)
     return True, "%d field result rows saved to emergency_field_results." % len(rows)
