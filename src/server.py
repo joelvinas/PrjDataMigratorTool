@@ -5632,7 +5632,7 @@ def emergency_out_dir():
 
 
 def _em_context(send):
-    """The DEV settings (Emergency mode never uses another stage). Raises AppError with a plain message and no secret."""
+    """The DEV settings (Git-R-Done never uses another stage). Raises AppError with a plain message and no secret."""
     try:
         return tableload.planning_context(CONFIG_PATH, emergency.STAGE, send)
     except tableload.LoadError as e:
@@ -5744,7 +5744,7 @@ def api_emergency_start(body):
     with _emjob_lock:
         cur = EMJOB["current"]
         if cur and cur.status == "running":
-            raise AppError("An Emergency mode run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
+            raise AppError("A Git-R-Done run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
         job = EmergencyJob(base, table, ctx.ws, STATE["db_path"])
         EMJOB["current"] = job
     threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
@@ -5762,7 +5762,7 @@ def api_emergency_status(_q=None):
 def api_emergency_cancel(_body=None):
     job = EMJOB["current"]
     if not job or job.status != "running":
-        raise AppError("No Emergency mode run is going.")
+        raise AppError("No Git-R-Done run is going.")
     job.cancel.set()
     return {"cancelling": True}
 

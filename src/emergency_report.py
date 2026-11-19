@@ -26,7 +26,7 @@ def stem(result):
     ts = re.sub(r"[^0-9]", "", result["started_at"])
     ts = ts[:8] + "-" + ts[8:12]
     safe = lambda x: re.sub(r"[^A-Za-z0-9_-]", "", x)
-    return "%s_%s_%s" % (safe(result["base_id"]), safe(result["table_id"]), ts)
+    return "Git-R-Done_%s_%s_%s" % (safe(result["base_id"]), safe(result["table_id"]), ts)
 
 
 def log_ref(span):
@@ -83,8 +83,8 @@ details.sec>summary{cursor:pointer;font-weight:700}
 def fields_html(result, css, apilog_name=None, redact=lambda t: t):
     c = result["counts"]
     h = ['<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-         "<title>Emergency mode field report</title><style>%s%s</style></head><body><main>" % (css, EXTRA_CSS)]
-    h.append("<h1>Emergency mode: field report</h1>")
+         "<title>Git-R-Done field report</title><style>%s%s</style></head><body><main>" % (css, EXTRA_CSS)]
+    h.append("<h1>Git-R-Done: field report</h1>")
     h.append('<p class="meta">Table <strong>%s</strong> (%s) of base %s, loaded into the Planning Workspace %s (stage %s). Run %s to %s (UTC). Field names, counts and error codes only: '
              "no record value is in this report.</p>" % (_e(result["table_name"]), _e(result["table_id"]), _e(result["base_id"]), _e(result["workspace_id"]), _e(result["stage"]),
                                                           _e(result["started_at"]), _e(result["finished_at"])))
@@ -148,8 +148,8 @@ def fields_html(result, css, apilog_name=None, redact=lambda t: t):
 def apilog_html(result, css, airtable_calls=(), redact=lambda t: t):
     calls = result["calls"]
     h = ['<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-         "<title>Emergency mode API log</title><style>%s%s</style></head><body><main>" % (css, EXTRA_CSS)]
-    h.append("<h1>Emergency mode: API log</h1>")
+         "<title>Git-R-Done API log</title><style>%s%s</style></head><body><main>" % (css, EXTRA_CSS)]
+    h.append("<h1>Git-R-Done: API log</h1>")
     h.append('<p class="meta">Every Workfront call of this run for table <strong>%s</strong> (%s), in order, including the calls that worked and the retries. Endpoints are paths '
              "without query; no header, token or request body is recorded, and the text of a failed record call is withheld because it could repeat a value. Run %s to %s (UTC).</p>"
              % (_e(result["table_name"]), _e(result["table_id"]), _e(result["started_at"]), _e(result["finished_at"])))
@@ -198,7 +198,7 @@ def write_reports(result, out_dir, to_mhtml, css, airtable_calls=(), redact=lamb
     with open(os.path.join(out_dir, names["csv"]), "wb") as f:
         f.write(csv_bytes(result, redact))
     with open(os.path.join(out_dir, names["fields"]), "wb") as f:
-        f.write(to_mhtml(fields_html(result, css, names["apilog"], redact), "Emergency mode field report"))
+        f.write(to_mhtml(fields_html(result, css, names["apilog"], redact), "Git-R-Done field report"))
     with open(os.path.join(out_dir, names["apilog"]), "wb") as f:
-        f.write(to_mhtml(apilog_html(result, css, airtable_calls, redact), "Emergency mode API log"))
+        f.write(to_mhtml(apilog_html(result, css, airtable_calls, redact), "Git-R-Done API log"))
     return names

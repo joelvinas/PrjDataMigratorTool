@@ -192,7 +192,7 @@ wrap = lambda html, title: ("Subject: %s\r\n\r\n" % title).encode("ascii") + htm
 red = lambda t: t.replace(TOKEN, "[removed]")
 names = er.write_reports(res, out, wrap, "body{}", redact=red)
 check("three files with the same folder and name stem", sorted(os.listdir(out)) == sorted(names.values()) and len({n.rsplit("_", 1)[0] for n in names.values()}) == 1 and names["fields"].endswith("_fields.mhtml")
-      and names["apilog"].endswith("_apilog.mhtml") and names["csv"].endswith("_fields.csv") and names["fields"].startswith(BASE + "_tX_"), names)
+      and names["apilog"].endswith("_apilog.mhtml") and names["csv"].endswith("_fields.csv") and names["fields"].startswith("Git-R-Done_" + BASE + "_tX_"), names)
 fields_html = open(os.path.join(out, names["fields"]), encoding="utf-8").read()
 api_html = open(os.path.join(out, names["apilog"]), encoding="utf-8").read()
 csv_text = open(os.path.join(out, names["csv"]), encoding="utf-8").read()

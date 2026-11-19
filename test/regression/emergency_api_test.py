@@ -68,7 +68,7 @@ try:
         s, r = call("GET", "/api/emergency/report?file=" + bad)
         check("a report request for %r is refused" % bad, s == 404, (s, r))
     s, r = post("/api/emergency/cancel", {})
-    check("cancel with nothing running says so", s == 400 and "No Emergency mode run" in r["error"], r)
+    check("cancel with nothing running says so", s == 400 and "No Git-R-Done run" in r["error"], r)
 
     # a second Go reuses everything
     rts, flds, bulks = len(fake.posts("/record-types")), len(fake.posts("/fields")), len(fake.posts("/records/bulk"))
