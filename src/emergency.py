@@ -299,7 +299,7 @@ def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id,
         else:
             prep["failed"].append(dict(f, reason=("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]))
     if prep["renamed"]:
-        notes.append("Planning would not delete %d default field(s), so they were renamed with the prefix \"%s\" instead (%s)." % (len(prep["renamed"]), RENAMED_PREFIX.strip(), ", ".join(sorted(x["name"] for x in prep["renamed"]))))
+        notes.append("Planning would not delete %d default field(s), so they were renamed with the prefix \"%s\" instead (%s). Workfront's answer to the delete: %s" % (len(prep["renamed"]), RENAMED_PREFIX.strip(), ", ".join(sorted(x["name"] for x in prep["renamed"])), prep.get("delete_refused") or "none"))
     if prep["failed"]:
         notes.append("%d default field(s) could be neither deleted nor renamed (%s). Change them by hand in Workfront Planning if a name clashes." % (len(prep["failed"]), ", ".join(sorted(x["name"] for x in prep["failed"]))))
     return True, pk_id
