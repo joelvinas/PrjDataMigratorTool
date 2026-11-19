@@ -4,7 +4,7 @@
 Routes and property names come from the saved Planning API v2 reference:
     POST /v2/workspaces/{workspaceId}/record-types       body {displayName, description}                 -> {id, ...}
     POST /v2/record-types/{recordTypeId}/fields          body {displayName, type, description, ...}      -> {id, options, ...}
-    POST /v2/record-types/{recordTypeId}/records/bulk    body [{"data": {"<fieldId>": value}}]            -> 201 (all created) or 207 (some failed): {status, total, succeeded, failed,
+    POST /v2/record-types/{recordTypeId}/records/bulk    body [{"recordTypeId": id, "data": {"<fieldId>": value}}]  -> 201 (all created) or 207 (some failed): {status, total, succeeded, failed,
                                                           requestId, results: [{requestIndex, id, ...}]}; a failed result has status "error" and error {code, message}
 Owner-verified (17 November 2026): a field CAN be changed in place with PATCH; the bulk record route, body and reply above (Postman test 5; the exact keys of a SUCCESSFUL
 result beyond requestIndex and id, including its status text, were not copied, so success is "no error and an id"); record type names are checked per Workspace
@@ -290,7 +290,8 @@ class PlanningTransport(object):
 
     # ---- records (route, body and reply verified by Postman test 5, 17 November 2026; see the module docstring)
     def create_records(self, bodies):
-        """Create records, one bulk call per record type: POST /v2/record-types/{recordTypeId}/records/bulk with a JSON array of {"data": {fieldId: value}}.
+        """Create records, one bulk call per record type: POST /v2/record-types/{recordTypeId}/records/bulk with a JSON array of {"recordTypeId": id, "data": {fieldId: value}}.
+        Every element repeats the recordTypeId even though it is in the URL: without it Planning answers 400 INVALID_DATA (reported by a peer, 18 November 2026).
         Each body is {recordTypeId, fields}. Returns one result per body, in the order given: {"id": "..."} for a record Planning created, or {"error": "short reason"}.
 
         The reply (201 all created, 207 some failed) holds results[], each with requestIndex; a result is matched to its record by requestIndex, never by position.
@@ -305,7 +306,7 @@ class PlanningTransport(object):
             if not rt:
                 raise ValueError("A record needs its record type's Planning ID.")
             positions = groups[rt]
-            reply = self.http.request("POST", "/v2/record-types/%s/records/bulk" % rt, [{"data": bodies[p].get("fields") or {}} for p in positions])
+            reply = self.http.request("POST", "/v2/record-types/%s/records/bulk" % rt, [{"recordTypeId": rt, "data": bodies[p].get("fields") or {}} for p in positions])
             rows = reply.get("results") if isinstance(reply, dict) else None
             if not isinstance(rows, list):
                 raise UnmatchedReply("The create call worked but its reply has no results list, so the records cannot be matched.")
