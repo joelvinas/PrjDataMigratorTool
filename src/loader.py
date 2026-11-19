@@ -5,6 +5,7 @@
     python loader.py dry-run --db db/migration.db --base appXXXXXXXXXXXXXX [--env sandbox1|sandbox2|preview|production] [--out out/loader]
     python loader.py reset   --db db/migration.db --base appXXXXXXXXXXXXXX --table tblXXXXXXXXXXXXXX [--planning-stage dev|uat] [--send --confirm "DELETE RECORDS IN DEV"]
     python loader.py planning-reset --db db/migration.db [--planning-stage dev|uat|production] [--send --confirm "RESET PLANNING IN DEV"]   (database only; deletes nothing in Workfront)
+    python loader.py share-record-types --db db/migration.db [--planning-stage dev|uat|production] [--send]   (share the existing record types and place them in the sidebar)
     python loader.py config  [--config config.json]     (which Workfront credentials are set: yes or no only)
 
 The database is opened READ-ONLY and nothing is sent anywhere. `plan` lists everything the migration would create in Workfront Planning and
@@ -155,16 +156,20 @@ def _run(a, opener=None):
             sys.exit(e.message)
         _write(a.out, "load_plan.csv", plan_csv(plan))
         rows, lines, results = [], ["Load run for %s" % a.base, ""], {}
+        sharing_problems = 0
         for s in systems:
             try:
-                tr = (ct.CoreTransport if s == "core" else pt.PlanningTransport)(wh.Http(creds[s], secrets, opener=opener))
+                tr = ct.CoreTransport(wh.Http(creds[s], secrets, opener=opener)) if s == "core" else _planning_transport(data, creds[s], a.planning_stage, secrets, opener)
             except ValueError as e:
                 sys.exit(str(e))
             res, stuck = tl.run_structure(conn, a.base, plan["items"], s, tr, envs[s], creds[s].workspace_id if s == "planning" else None, dry_run=False)
             if stuck:
                 lines.append("%s: %d item(s) from an earlier run were started and not finished; they are tried again: %s" % (s.title(), len(stuck), ", ".join(stuck[:10]) + (" ..." if len(stuck) > 10 else "")))
             results[s] = res
+            sharing_problems += len(_problems(res.get("sharing") or []))
             lines += ["%s in %s%s:" % (s.title(), envs[s].name.upper(), (" (Workspace %s)" % creds[s].workspace_id) if s == "planning" else "")] + ["  %-16s %d" % (k, v) for k, v in sorted(res["counts"].items())] + [""]
+            if s == "planning":
+                lines += _share_lines(res.get("sharing") or [], tr.sharing) + [""]
             for r in res["results"]:
                 d = r["detail"]
                 rows.append([r["temp_id"], s, envs[s].name, r["kind"], r["name"], r["outcome"], d if not isinstance(d, dict) else "; ".join("%s=%s" % kv for kv in sorted(d.items()) if kv[1] not in (None, ""))])
@@ -172,12 +177,40 @@ def _run(a, opener=None):
         conn.close()
     _write(a.out, "load_run.csv", lc.redact(_csv(RUN_COLUMNS, rows), secrets))
     failed = sum(r["counts"].get("failed", 0) for r in results.values())
-    lines += ["%d item(s) failed. See load_run.csv for each item's outcome and the plain reason." % failed if failed else "No item failed.", "",
+    lines += ["%d item(s) failed. See load_run.csv for each item's outcome and the plain reason." % failed if failed else "No item failed.",
+              ("%d sharing or sidebar problem(s): see the PROBLEM lines above. Those record types may be invisible to other people; run 'share-record-types' after fixing the cause." % sharing_problems) if sharing_problems else "", "",
               "Attaching Core fields to a custom form is a manual step. Anything on hold or blocked in the plan was not sent (load_plan.csv gives the reasons)."]
     text = lc.redact("\n".join(lines), secrets)
     _write(a.out, "load_run_summary.txt", text + "\n\n" + lc.redact(summary_text(plan, a.base, sent=True), secrets))
     print(text + "\nReports written to %s" % a.out)
     return results
+
+def _planning_transport(data, creds, stage, secrets, opener=None):
+    """The Planning transport with the stage's share_with and section_name from config.json (None when neither is set). A half-set or malformed setting stops with a plain message."""
+    try:
+        sharing = lc.planning_sharing(data, stage)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    return pt.PlanningTransport(wh.Http(creds, secrets, opener=opener), sharing)
+
+
+def _problems(results):
+    return [(r["record_type_id"], p) for r in results for p in r["problems"]]
+
+
+def _share_lines(results, sharing):
+    """Plain lines about sharing and sidebar placement for a run's record types. A problem is never hidden: it is listed with the record type's ID."""
+    if not results:
+        return ["Sharing: no record type was created or reused in this run."] if sharing else []
+    ok = sum(1 for r in results if r["members"] == "ok" and r["section"] == "ok")
+    L = ["Sharing and sidebar placement: %d record type(s), %d shared and placed (each confirmed by reading it back), %d with a problem." % (len(results), ok, len(results) - ok)]
+    for rid, why in _problems(results):
+        L.append("  PROBLEM %s: %s" % (rid, why))
+    for r in results:
+        for n in r["notes"]:
+            L.append("  note %s: %s" % (r["record_type_id"], n))
+    return L
+
 
 RECORD_COLUMNS = ["table_id", "table_name", "pass", "pending", "done", "waiting", "failed", "problems", "note"]
 FAILURE_COLUMNS = ["table_id", "pass", "airtable_record_id", "reason"]
@@ -358,6 +391,50 @@ def _planning_reset(a, opener=None):
     return result
 
 
+def _share_record_types(a, opener=None):
+    """One-off: share and place (in the sidebar) the record types that already exist in the id map for this stage and Workspace. Without --send it lists them and sends nothing.
+    Each is checked first and only what is missing is granted; each result is verified by reading it back."""
+    try:
+        data = lc.read_config(a.config)
+        sharing = lc.planning_sharing(data, a.planning_stage)
+    except lc.ConfigError as e:
+        sys.exit(str(e))
+    if sharing is None:
+        sys.exit("Nothing to share with: set share_with and section_name for stage %s in %s (section workfront.planning)." % (a.planning_stage, a.config))
+    creds = lc.credentials(data, "planning", a.planning_stage)
+    if creds is None or not creds.workspace_id:
+        sys.exit("Planning is not configured for stage %s in %s (a Bearer token and a workspace_id are needed). Run 'config' to see what is set." % (a.planning_stage, a.config))
+    try:
+        env = lr.resolve_environment(a.planning_stage, a.confirm, dry_run=not a.send, workspace_id=creds.workspace_id)
+    except ValueError as e:
+        sys.exit(str(e))
+    secrets = lc.secret_values(data)
+    if not os.path.isfile(a.db):
+        sys.exit("No such database: %s" % a.db)
+    conn = sqlite3.connect(a.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not ls.available(conn):
+            sys.exit("This database does not have the loader's state table in its current form. Apply the migrations first.")
+        ids = plreset.record_type_ids(conn, env.name, creds.workspace_id)
+    finally:
+        conn.close()
+    lines = ["Share record types in %s, Workspace %s%s" % (env.name.upper(), creds.workspace_id, "" if a.send else ", nothing was sent"), "",
+             "%d record type(s) in the id map; section %r; %d subject(s)." % (len(ids), sharing["section_name"], len(sharing["share_with"]))]
+    results = []
+    if a.send:
+        tr = pt.PlanningTransport(wh.Http(creds, secrets, opener=opener), sharing)
+        for rid in sorted(ids):
+            results.append(tr.ensure_shared(rid))
+        lines += [""] + _share_lines(results, sharing)
+    else:
+        lines += ["  %s  %s" % (rid, ids[rid][1]) for rid in sorted(ids)] + ["", "Add --send to share them and place them in the sidebar (each result is read back and checked)."]
+    text = lc.redact(chr(10).join(lines), secrets)
+    _write(a.out, "share_record_types_summary.txt", text)
+    print(text + chr(10) + "Report written to %s" % a.out)
+    return {"results": results, "ids": ids}
+
+
 CORE_OBJECT_COLUMNS = ["table_id", "table_name", "object_code", "pending", "created", "failed", "note"]
 
 
@@ -517,6 +594,13 @@ def main(argv=None, opener=None):
     ppr.add_argument("--config", default="config.json")
     ppr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
     ppr.add_argument("--workspace-id", default=None, help="the Workspace to forget (default: workspace_id of the stage in config.json)")
+    psr = sub.add_parser("share-record-types", help="share the record types already in the id map and place them in the sidebar section (share_with and section_name in config.json); dry run unless --send")
+    psr.add_argument("--db", required=True)
+    psr.add_argument("--out", default="out/loader")
+    psr.add_argument("--send", action="store_true", help="actually change sharing and the sidebar in Workfront. Without it nothing is sent")
+    psr.add_argument("--config", default="config.json")
+    psr.add_argument("--planning-stage", default="dev", choices=lr.PLANNING_STAGES)
+    psr.add_argument("--confirm", default=None, help="the exact phrase a real send to the production stage needs: %s" % lr.PRODUCTION_PHRASE)
     pc2 = sub.add_parser("core-objects", help="create one Core object (project, request or task) per record under the parent decided for its table")
     pc2.add_argument("--db", required=True)
     pc2.add_argument("--base", required=True, help="Airtable base ID")
@@ -536,6 +620,8 @@ def main(argv=None, opener=None):
     pa.add_argument("--core-env", default="sandbox1", choices=lc.ENVIRONMENTS)
     pa.add_argument("--confirm", default=None, help="the exact phrase a real Core production run needs: %s" % lr.PRODUCTION_PHRASE)
     a = ap.parse_args(argv)
+    if a.cmd == "share-record-types":
+        return _share_record_types(a, opener)
     if a.cmd == "planning-reset":
         return _planning_reset(a, opener)
     if a.cmd == "attachments":

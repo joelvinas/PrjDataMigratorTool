@@ -97,9 +97,19 @@ def workspace_status(ctx, tr):
     return out
 
 
-def transport(ctx, opener=None):
+def sharing_for(data, stage):
+    """The stage's share_with and section_name from config.json, or None when neither is set. A half-set or malformed setting is a plain LoadError."""
     try:
-        return pt.PlanningTransport(wh.Http(ctx.creds, ctx.secrets, opener=opener))
+        return lc.planning_sharing(data, stage)
+    except lc.ConfigError as e:
+        raise LoadError(str(e))
+
+
+def transport(ctx, opener=None):
+    """The Planning transport for the stage. With share_with and section_name set in config.json, every record type it creates is shared and placed in the sidebar."""
+    sharing = sharing_for(ctx.data, ctx.stage)
+    try:
+        return pt.PlanningTransport(wh.Http(ctx.creds, ctx.secrets, opener=opener), sharing)
     except ValueError as e:
         raise LoadError(str(e))
 
@@ -136,6 +146,12 @@ def run_structure(conn, base_id, items, system, tr, env, ws, dry_run, should_sto
     state = ls.DbState(conn, base_id, ws if system == "planning" else None)
     stuck = state.pending(env.name)
     res = lr.run_plan([i for i in items if i["system"] == system], state, {system: tr}, env, dry_run=dry_run, log=log, should_stop=should_stop)
+    if system == "planning" and not dry_run and hasattr(tr, "ensure_shared"):
+        for r in res["results"]:                            # a record type that already existed (reused or adopted) is checked too: shared, and in the sidebar
+            if r["kind"] == "record_type" and r["outcome"] in ("already_created", "adopted") and r["detail"]:
+                tr.ensure_shared(str(r["detail"]))
+    if hasattr(tr, "share_results"):
+        res["sharing"] = list(tr.share_results)
     return res, stuck
 
 
@@ -368,7 +384,7 @@ def step_structure(conn, base_id, table_id, ctx, tr, send, should_stop, progress
         counts[outcome] = counts.get(outcome, 0) + 1
         progress({"step": "structure", "table_id": table_id, "done": sum(counts.values()), "total": len(items), "counts": dict(counts), "item": temp_id})
     res, stuck = run_structure(conn, base_id, items, "planning", tr, ctx.env, ctx.ws, dry_run=not send, should_stop=should_stop, log=log)
-    return {"step": "structure", "dry_run": not send, "counts": res["counts"], "items": _outcome_rows(res, items), "cancelled": res["cancelled"], "unfinished_before": stuck,
+    return {"step": "structure", "dry_run": not send, "counts": res["counts"], "items": _outcome_rows(res, items), "cancelled": res["cancelled"], "unfinished_before": stuck, "sharing": res.get("sharing", []),
             "dependency_tables": plan["summary"].get("dependency_tables", [])}
 
 

@@ -14,9 +14,9 @@
       "sandbox1": {"base_url": "https://YOURCOMPANY.sb01.workfront.com", "api_path": "/attask/api/PASTE_API_VERSION_HERE", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"}
     },
     "planning": {
-      "dev": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE", "default_currency": "PASTE_ISO_CURRENCY_CODE_HERE"},
-      "uat": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_UAT_WORKSPACE_ID_HERE"},
-      "production": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_PRODUCTION_WORKSPACE_ID_HERE"}
+      "dev": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE", "default_currency": "PASTE_ISO_CURRENCY_CODE_HERE", "section_name": "PASTE_SIDEBAR_SECTION_NAME_HERE", "share_with": [{"subjectId": "PASTE_USER_ID_HERE", "subjectType": "user", "role": "PASTE_ROLE_FROM_A_WORKSPACE_MANAGER_ENTRY_HERE"}]},
+      "uat": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_UAT_WORKSPACE_ID_HERE", "section_name": "PASTE_SIDEBAR_SECTION_NAME_HERE", "share_with": [{"subjectId": "PASTE_USER_ID_HERE", "subjectType": "user", "role": "PASTE_ROLE_FROM_A_WORKSPACE_MANAGER_ENTRY_HERE"}]},
+      "production": {"base_url": "https://YOURCOMPANY.workfront.com", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_PRODUCTION_WORKSPACE_ID_HERE", "section_name": "PASTE_SIDEBAR_SECTION_NAME_HERE", "share_with": [{"subjectId": "PASTE_USER_ID_HERE", "subjectType": "user", "role": "PASTE_ROLE_FROM_A_WORKSPACE_MANAGER_ENTRY_HERE"}]}
     }
   }
 }

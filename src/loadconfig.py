@@ -16,6 +16,9 @@ Other settings live here too, never in code:
     api_path   the path in front of the API routes. Planning defaults to /maestro/api (the documented pattern); Core has no default because it holds the API version, for
                example "/attask/api/v21.0", so a Core block without one is refused with a plain message.
     default_currency, currency_by_symbol   Planning: the ISO currency code to give a currency field (Airtable stores a symbol such as $, which is not a code).
+    share_with, section_name   Planning, per stage: who every record type the tool creates is shared with (a list of {"subjectId", "subjectType", "role"}; copy the role
+               string from a workspace manager's entry in GET /v2/permissions/workspaces/{workspaceId}/members), and the name of the sidebar section (recordTypeSection) the
+               new record types are placed in. See planning_sharing(). Without them a record type made by the API account is invisible in the Planning UI.
     The loader's `run` command reads these; the web pages never do.
 """
 import json, os
@@ -117,6 +120,36 @@ def credentials(data, system, environment=None):
         if _real(block.get(kind)):
             return SystemCredentials(environment, system, url, str(block[kind]).strip(), kind, ws, path, extra)
     return None
+
+
+def planning_sharing(data, stage):
+    """The sharing settings of a Planning stage: {"share_with": [{"subjectId", "subjectType", "role"}, ...], "section_name": "..."}, or None when the stage block has neither key
+    (nothing is configured). Raises ConfigError with a plain message when only one of them is given, or either is malformed or still a placeholder. Never repeats a value that
+    could be a secret (IDs and role names are not secrets, but the bearer token is never read here)."""
+    block = planning_blocks(data).get(str(stage or "").strip().lower())
+    if not isinstance(block, dict) or ("share_with" not in block and "section_name" not in block):
+        return None
+    where = "workfront.planning.%s" % str(stage).strip().lower()
+    if "share_with" not in block or "section_name" not in block:
+        raise ConfigError("config.json (%s) needs both share_with and section_name, or neither: %s is missing." % (where, "share_with" if "share_with" not in block else "section_name"))
+    sec = block.get("section_name")
+    if not isinstance(sec, str) or not _real(sec):
+        raise ConfigError("config.json (%s): section_name must be the name of a section in the Planning sidebar (not blank or a placeholder)." % where)
+    people = block.get("share_with")
+    if not isinstance(people, list) or not people:
+        raise ConfigError("config.json (%s): share_with must be a list with at least one {\"subjectId\", \"subjectType\", \"role\"}." % where)
+    out = []
+    for n, p in enumerate(people, 1):
+        if not isinstance(p, dict):
+            raise ConfigError("config.json (%s): share_with item %d must be an object with subjectId, subjectType and role." % (where, n))
+        bad = [k for k in ("subjectId", "subjectType", "role") if not isinstance(p.get(k), str) or not _real(p.get(k))]
+        if bad:
+            raise ConfigError("config.json (%s): share_with item %d needs a real %s (blank or placeholder values are refused)." % (where, n, ", ".join(bad)))
+        extra = sorted(set(p) - {"subjectId", "subjectType", "role"})
+        if extra:
+            raise ConfigError("config.json (%s): share_with item %d has keys Planning ignores (%s); only subjectId, subjectType and role are sent." % (where, n, ", ".join(extra)))
+        out.append({"subjectId": p["subjectId"].strip(), "subjectType": p["subjectType"].strip(), "role": p["role"].strip()})
+    return {"share_with": out, "section_name": sec.strip()}
 
 
 def status(data):
