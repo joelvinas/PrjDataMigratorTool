@@ -249,6 +249,8 @@ def attempted_type(field, defaults):
 
 
 PK_NAME = "AirtableRecordId"
+CONFLICT = "CONFLICT-"                              # an Airtable field whose name is taken by a field Planning will not let the tool delete or rename is created with this prefix
+RENAMED_PREFIX = "Unused default - "                  # a default field Planning will not delete is renamed with this, so its name cannot clash with an Airtable field
 DEFAULT_FIELDS = frozenset({"name", "description", "start date", "end date", "status"})      # what a new Planning record type comes with (owner, 19 November 2026)
 
 
@@ -259,7 +261,7 @@ def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id,
     A NEW record type loses every field except the ones this tool created; a REUSED one loses only a leftover default field by name, because a person may have added fields
     to it. A failed delete is a note, not the end of the run; steps 1 and 2 failing end it (returns False), with nothing deleted. Returns (ok, primary field ID).
     result["prepare"] = {field_id, created, primary, deleted: [{id, name, type}], failed: [{id, name, type, reason}], kept: [...]}."""
-    prep = result["prepare"] = {"field_id": None, "created": None, "primary": False, "deleted": [], "failed": [], "kept": [], "error": ""}
+    prep = result["prepare"] = {"field_id": None, "created": None, "primary": False, "deleted": [], "renamed": [], "failed": [], "kept": [], "protected": [], "taken": [], "error": ""}
     item = _item("P-K-" + table_id, "field", PK_NAME, rt_item["temp_id"], table_id, None, "text")
     ok, pk_id, err, how = _try(state, env, tr, item)
     if not ok:
@@ -279,17 +281,43 @@ def prepare_record_type(conn, state, env, tr, rt_item, rt_id, base_id, table_id,
         return False, pk_id
     mine = {r[0] for r in conn.execute("SELECT workfront_id FROM load_id_map WHERE system='planning' AND kind='field' AND status='created' AND environment=? AND workspace_key=? AND base_id=? AND table_id=? "
                                        "AND workfront_id IS NOT NULL", (env.name, state.workspace_id or "", base_id, table_id))} | {pk_id}
+    delete_refused = protected = False
     for f in sorted(fields, key=lambda x: (x["name"].lower(), x["id"])):
         if f["id"] in mine or (reused and f["name"].strip().lower() not in DEFAULT_FIELDS):
             prep["kept"].append(f)
             continue
-        out = tr.delete_field(f["id"])
-        if out["deleted"]:
-            prep["deleted"].append(f)
+        if protected:                                 # the first delete AND the first rename were refused: Planning protects these fields, so they are left alone
+            prep["protected"].append(f)
+            continue
+        if not delete_refused:
+            out = tr.delete_field(f["id"])
+            if out["deleted"]:
+                prep["deleted"].append(f)
+                continue
+            delete_refused = True                     # Planning refuses deletes (a 403 FORBIDDEN in the first real run): the rest are renamed without asking again
+            prep["delete_refused"] = ("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]
+            perms = tr.field_permissions(f["id"])
+            prep["permissions"] = perms
+            if perms:
+                prep["delete_refused"] += " (this token on the field %s: %s)" % (f["name"], ", ".join("%s=%s" % (k, str(v).lower()) for k, v in sorted(perms.items())))
+        new_name = RENAMED_PREFIX + f["name"]
+        out = tr.rename_field(f["id"], new_name)
+        if out["renamed"]:
+            prep["renamed"].append(dict(f, new_name=new_name))
+        elif not prep["renamed"]:                     # nothing was ever renamed and the rename is refused too (403 in the first real run): stop trying
+            protected = True
+            prep["rename_refused"] = ("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]
+            prep["protected"].append(f)
         else:
             prep["failed"].append(dict(f, reason=("HTTP %s: " % out["status"] if out.get("status") else "") + str(out["reason"])[:200]))
+    prep["taken"] = sorted({x["name"] for x in prep["protected"] + prep["failed"] + prep["kept"] if x["id"] not in mine and x["name"]}, key=str.lower)
+    if prep["renamed"]:
+        notes.append("Planning would not delete %d default field(s), so they were renamed with the prefix \"%s\" instead (%s). Workfront's answer to the delete: %s" % (len(prep["renamed"]), RENAMED_PREFIX.strip(), ", ".join(sorted(x["name"] for x in prep["renamed"])), prep.get("delete_refused") or "none"))
+    if prep["protected"]:
+        notes.append("Planning will neither delete nor rename its default fields through the API (%s). Delete: %s Rename: %s. They were left in place; an Airtable field with the same name is created with the prefix %s." % (
+            ", ".join(sorted(x["name"] for x in prep["protected"])), prep.get("delete_refused") or "none", prep.get("rename_refused") or "none", CONFLICT))
     if prep["failed"]:
-        notes.append("%d default field(s) could not be deleted from the record type (%s). Delete them by hand in Workfront Planning if a name clashes." % (len(prep["failed"]), ", ".join(sorted(x["name"] for x in prep["failed"]))))
+        notes.append("%d default field(s) could be neither deleted nor renamed (%s). An Airtable field with the same name is created with the prefix %s." % (len(prep["failed"]), ", ".join(sorted(x["name"] for x in prep["failed"])), CONFLICT))
     return True, pk_id
 
 
@@ -392,7 +420,11 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         planned = state.get(temp, env.name)
         longest = s.get("max_len") if s else None
         sent = f["field_name"]
-        row["sent_name"] = sent
+        taken = {x.lower() for x in (result.get("prepare") or {}).get("taken", [])}
+        send_name = CONFLICT + sent if sent.lower() in taken else sent
+        row["sent_name"] = send_name
+        if send_name != sent:
+            row["note"] = "the name is taken by a field Planning keeps in the record type, so the field is created as %s" % send_name
 
         def fallback_type():
             nonlocal long_count
@@ -432,7 +464,7 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
             loadable.append({"field_id": fid, "planning_id": planned, "kind": tm.kind(etype) or etype, "options": pt_opts, "linked_table_id": None, "single": False, "pass": "records", "raw": is_pre})
             continue
         if planned and not existing:                                                      # recorded as created, listing unavailable: trust the name
-            row.update(final_name=sent, planning_field_id=planned, outcome="clean", reason="already created by an earlier run (its type could not be read back)")
+            row.update(final_name=send_name, planning_field_id=planned, outcome="clean", reason="already created by an earlier run (its type could not be read back)")
             continue
 
         if is_array:
@@ -444,15 +476,15 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
 
         atype, src = attempted_type(f, schema["defaults"])
         row.update(attempted_type=atype, attempted_from=src)
-        it = _item(temp, "field", sent, rt_item["temp_id"], table_id, fid, atype, item_spec)
+        it = _item(temp, "field", send_name, rt_item["temp_id"], table_id, fid, atype, item_spec)
         ok1, wid, err1, _how = _try(state, env, tr, it)
         row.update(attempt1="created" if ok1 else "refused", attempt1_error=err1 or "", attempt1_error_code=_error_code(err1))
         if ok1:
             if atype == "long-text":
                 long_count += 1
-            row.update(final_name=sent, final_type=atype, planning_field_id=wid, outcome="clean", reason="")
+            row.update(final_name=send_name, final_type=atype, planning_field_id=wid, outcome="clean", reason="")
             if f["data_type"] == "dateTime" and atype == "date":
-                row["note"] = "the time of day is not kept: Planning's date type has no time"
+                row["note"] = (row["note"] + "; " if row["note"] else "") + "the time of day is not kept: Planning's date type has no time"
             opts = dict(tr._options.get(wid) or {})
             loadable.append({"field_id": fid, "planning_id": wid, "kind": tm.kind(atype) or atype, "options": opts, "linked_table_id": None, "single": False, "pass": "records", "raw": False})
             continue

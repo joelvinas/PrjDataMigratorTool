@@ -60,7 +60,7 @@ function renderResult(j) {
   const notes = $("notes");
   clear(notes);
   const pr = r.prepare;
-  if (pr) notes.appendChild(el("div", { class: "hint", text: "Preparatory step: AirtableRecordId " + (pr.primary ? "is the primary field" : "is NOT the primary field") + "; " + pr.deleted.length + " default field(s) deleted"
+  if (pr) notes.appendChild(el("div", { class: "hint", text: "Preparatory step: AirtableRecordId " + (pr.primary ? "is the primary field" : "is NOT the primary field") + "; " + pr.deleted.length + " default field(s) deleted, " + (pr.renamed || []).length + " renamed, " + (pr.protected || []).length + " protected (left in place)"
     + (pr.deleted.length ? " (" + pr.deleted.map((x) => x.name).sort().join(", ") + ")" : "") + (pr.error ? ". " + pr.error : "") + "." }));
   (r.notes || []).forEach((n) => notes.appendChild(el("div", { class: "banner warn", text: n })));
   if (r.db_note) notes.appendChild(el("div", { class: "hint", text: r.db_note }));

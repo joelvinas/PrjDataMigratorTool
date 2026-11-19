@@ -35,7 +35,7 @@ class Fake(object):
     """A fake Planning. It refuses the field types in `refuse_types` (400 with an error code), lists the fields it created, and bulk-creates records."""
     def __init__(self):
         self.reqs, self.n, self.r, self.fields, self.refuse_types, self.refuse_names, self.fail_index = [], 0, 0, {}, {"date", "formula"}, set(), set()
-        self.primary, self.types, self.refuse_delete, self.refuse_primary = {}, {}, set(), False
+        self.primary, self.types, self.refuse_delete, self.refuse_primary, self.refuse_rename = {}, {}, set(), False, set()
     def open(self, req, timeout=None):
         body = json.loads(req.data) if req.data else None
         m, full = req.get_method(), req.full_url
@@ -53,6 +53,15 @@ class Fake(object):
         if m == "GET" and "/record-types/" in u and not u.endswith("/fields"):
             rid = u.split("/record-types/")[1]
             return Resp(200, {"id": rid, "displayName": self.types[rid], "primaryFieldId": self.primary[rid], "primaryWorkspaceId": "wsDev"})
+        if m == "GET" and "/v2/permissions/fields/" in u:
+            return Resp(200, {"canView": True, "canEdit": True, "canDelete": False, "canAdd": True})
+        if m == "PATCH" and "/v2/fields/" in u:
+            fid = u.split("/v2/fields/")[1]
+            if fid in self.refuse_rename: refuse("RENAME_REFUSED")
+            for rid in self.fields:
+                for f in self.fields[rid]:
+                    if f["id"] == fid: f["displayName"] = body["displayName"]
+            return Resp(200, {"id": fid})
         if m == "PATCH" and "/record-types/" in u:
             rid = u.split("/record-types/")[1]
             if self.refuse_primary: refuse("PRIMARY_REFUSED")
@@ -264,12 +273,35 @@ fk7 = Fake(); fk7.refuse_primary = True
 res7, _c7 = go(fk7, "tX", db=dbp7)
 check("when the primary field cannot be set the run stops: no default field is deleted and no Airtable field is added",
       not res7["prepare"]["primary"] and "primary" in res7["prepare"]["error"] and not any(x[0] == "DELETE" for x in fk7.reqs) and len(fk7.posts("/fields")) == 1 and res7["fields"] == [] and res7["records"]["loaded"] == 0, res7["prepare"])
-# a delete Planning refuses is reported by name, and the run goes on
+# a delete Planning refuses (a 403 in the first real run) becomes a rename: no more deletes are tried, and no name can clash with an Airtable field
 dbp8 = os.path.join(tmp, "base8.db"); shutil.copyfile(dbp, dbp8)
 c8 = sqlite3.connect(dbp8); c8.execute("delete from load_id_map"); c8.execute("delete from target_mappings"); c8.execute("delete from record_pass_markers"); c8.commit(); c8.close()
-fk8 = Fake(); fk8.refuse_delete = {"DEF1_1"}
+fk8 = Fake(); fk8.refuse_delete = {"DEF1_%d" % i for i in range(5)}
 res8, _c8 = go(fk8, "tX", db=dbp8)
-check("a refused delete is a note naming the field, and the run still loads the table", [x["name"] for x in res8["prepare"]["failed"]] == ["Description"] and any("Description" in n for n in res8["notes"]) and res8["records"]["loaded"] == 3, (res8["prepare"], res8["notes"]))
+p8 = res8["prepare"]; rt8 = res8["record_type"]["planning_id"]
+check("when every delete is refused the default fields are renamed instead, with a prefix", sorted(x["new_name"] for x in p8["renamed"]) == ["Unused default - " + n for n in ("Description", "End Date", "Name", "Start Date", "Status")] and not p8["deleted"] and not p8["failed"], p8)
+check("the refusal note says what the token may do with the field (the permission flags)", "canDelete=false" in "".join(res8["notes"]) and p8["permissions"] == {"canView": True, "canEdit": True, "canDelete": False, "canAdd": True}, res8["notes"])
+check("after the first refused delete no other delete is tried", len([x for x in fk8.reqs if x[0] == "DELETE"]) == 1 and len([x for x in fk8.reqs if x[0] == "PATCH" and "/v2/fields/" in x[1]]) == 5)
+check("the renamed fields are in Planning under their new names, and the run still loads the table", {f["displayName"] for f in fk8.fields[rt8]} >= {"Unused default - Name", "AirtableRecordId", "Order Name"} and "Name" not in {f["displayName"] for f in fk8.fields[rt8]}
+      and res8["records"]["loaded"] == 3 and any("renamed" in n for n in res8["notes"]), (p8, res8["notes"]))
+# neither a delete nor a rename works (403 FORBIDDEN in the first real run): one try of each, then the defaults are left alone and a clashing Airtable name gets the CONFLICT- prefix
+dbp9 = os.path.join(tmp, "base9.db"); shutil.copyfile(dbp, dbp9)
+c9 = sqlite3.connect(dbp9); c9.execute("delete from load_id_map"); c9.execute("delete from target_mappings"); c9.execute("delete from record_pass_markers")
+c9.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tZ', ?, 'Clash Table')", (BASE,))
+for fid, nm in (("fzN", "Name"), ("fzS", "status"), ("fzO", "Other")):
+    c9.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values (?,?,?,?,?,?,'2026-01-01 10:00:00.000000')", (BASE, "tZ", "Clash Table", fid, nm, "singleLineText"))
+c9.commit(); c9.close()
+save("tZ", [{"id": "recZ%d" % i, "fields": {"fzN": "n%d" % i, "fzS": "s%d" % i, "fzO": "o%d" % i}} for i in (1, 2)])
+fk9 = Fake(); fk9.refuse_delete = {"DEF1_%d" % i for i in range(5)}; fk9.refuse_rename = {"DEF1_%d" % i for i in range(5)}
+res9, _c9 = go(fk9, "tZ", db=dbp9)
+p9 = res9["prepare"]; by9 = {f["field_id"]: f for f in res9["fields"]}; rt9 = res9["record_type"]["planning_id"]
+check("when the delete and the rename are both refused only one of each is tried, and the five defaults are left alone", len([x for x in fk9.reqs if x[0] == "DELETE"]) == 1 and len([x for x in fk9.reqs if x[0] == "PATCH" and "/v2/fields/" in x[1]]) == 1
+      and sorted(x["name"] for x in p9["protected"]) == ["Description", "End Date", "Name", "Start Date", "Status"] and not p9["renamed"] and not p9["deleted"], p9)
+check("an Airtable field whose name a kept default field holds is created as CONFLICT-<name>, whatever the letter case", by9["fzN"]["sent_name"] == "CONFLICT-Name" and by9["fzS"]["sent_name"] == "CONFLICT-status" and by9["fzO"]["sent_name"] == "Other"
+      and {f["displayName"] for f in fk9.fields[rt9]} >= {"CONFLICT-Name", "CONFLICT-status", "Other", "Name", "Status"}, [f["displayName"] for f in fk9.fields[rt9]])
+check("the clash is explained in the field's note and in the run's notes, and the records still load", "CONFLICT-Name" in by9["fzN"]["note"] and any("CONFLICT-" in n for n in res9["notes"]) and res9["records"]["loaded"] == 2 and by9["fzN"]["outcome"] == "clean", (by9["fzN"], res9["notes"]))
+# a delete Planning accepts for some fields and refuses for none: nothing is renamed
+check("when deletes work nothing is renamed", not pre["renamed"] and not any(x[0] == "PATCH" and "/v2/fields/" in x[1] for x in fk.reqs))
 
 # ---- nothing secret anywhere
 everything = json.dumps(res, default=sorted) + json.dumps(resy, default=sorted) + fields_html + api_html + csv_text
