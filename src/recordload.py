@@ -21,6 +21,7 @@ proven in the first DEV run; marked in docs/LOADER_PLAN.md): the value formats P
 record IDs) and the link update route.
 """
 import datetime
+import html
 import json
 import os
 import re
@@ -122,17 +123,29 @@ def iso_timestamp(value, date_only):
     return d.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (d.microsecond // 1000)
 
 
+_RICH_OPEN = '<p class="react-spectrum-RichTextEditor-paragraph" dir="ltr" style="margin: 0px; padding: 0px;"><span style="white-space: pre-wrap;">'
+_RICH_CLOSE = "</span></p>"
+
+
+def long_text_value(text):
+    """A Planning long-text field takes an object, not a plain string: {"content": the text, "contentHTML": the same text (HTML-escaped) in the editor's paragraph markup}.
+    The span keeps line breaks (white-space: pre-wrap)."""
+    return {"content": text, "contentHTML": _RICH_OPEN + html.escape(text, quote=True) + _RICH_CLOSE}
+
+
 def convert(f, value):
     """(True, value for Planning), or (False, short reason with no value in it). An empty value is (True, None): it is simply left out."""
     if _empty(value):
         return True, None
     if f.get("raw"):                       # an Emergency mode PRE- text field: no conversion, no cleaning
-        return True, raw_text(value)
+        text = raw_text(value)
+        return True, long_text_value(text) if f.get("kind") == "long-text" else text
     k = f["kind"]
     if k in ("text", "long-text", "rich-text"):
         if isinstance(value, (list, dict)):
             return False, "the value is not plain text"
-        return True, str(value) if not isinstance(value, str) else value
+        text = str(value) if not isinstance(value, str) else value
+        return True, long_text_value(text) if k == "long-text" else text
     if k in ("number", "percentage", "currency"):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False, "the value is not a number"
