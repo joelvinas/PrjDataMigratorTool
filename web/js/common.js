@@ -148,7 +148,7 @@ const NAV_PAGES = [
   { key: "postman", href: "/postman", label: "Postman tests", sub: "Planning API checks" },
   { key: "load", href: "/load", label: "Stage 4: Map and load", sub: "Record map and attachments" },
   { key: "loadtable", href: "/loadtable", label: "Load a table", sub: "One table into Planning, step by step" },
-  { key: "emergency", href: "/emergency", label: "\u{1F6A8} Emergency mode", sub: "One table, whatever works" },
+  { key: "emergency", href: "/emergency", label: "\u{1F6A8} Git-R-Done", sub: "One table, whatever works" },
 ];
 const NAV_BOTTOM = [{ key: "log", href: "/log", label: "API call log", sub: "Audit trail" }];
 

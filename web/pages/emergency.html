@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Emergency mode - Migration Control Plane</title>
+<title>Git-R-Done - Migration Control Plane</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body data-page="emergency">
@@ -22,7 +22,7 @@
 <div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
 <main>
 <section class="card context" id="ctxCard">
-  <h2>&#128680; Emergency mode</h2>
+  <h2>&#128680; Git-R-Done</h2>
   <p class="hint">Pushes <strong>one table</strong> into the <strong>dev</strong> Workspace of config.json in one click. Names are sent exactly as Airtable has them. Each field is tried as its real Planning type; when Planning refuses it, it is created as a text field named <code>PRE-</code> + the field name (long text when the longest value is over 255 characters, at most 20 long-text fields per record type). Arrays are stored as raw JSON text in a PRE- field. Links and attachments are skipped for later. A failing field or record never stops the run. Running it again reuses the record type and fields and sends only the records not yet loaded.</p>
   <div class="row">
     <label for="baseId">Base ID</label>

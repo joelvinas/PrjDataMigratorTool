@@ -86,7 +86,7 @@ try:
     slog = open("server.log", encoding="utf-8", errors="replace").read() if os.path.exists("server.log") else ""
     check("the server's own log holds neither", TOKEN not in slog and "SECRETVALUE" not in slog)
     s, page = call("GET", "/emergency", raw=True)[0:2]
-    check("the page is served, and the navigation lists it with the siren", s == 200 and b"Emergency mode" in page and "\\u{1F6A8}" in open(os.path.join("web", "js", "common.js"), encoding="utf-8").read())
+    check("the page is served, and the navigation lists it with the siren", s == 200 and b"Git-R-Done" in page and "\\u{1F6A8}" in open(os.path.join("web", "js", "common.js"), encoding="utf-8").read())
 finally:
     open("config.json", "w", encoding="utf-8").write(orig)
     srv.shutdown()

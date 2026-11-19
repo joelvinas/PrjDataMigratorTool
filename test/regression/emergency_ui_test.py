@@ -38,7 +38,7 @@ try:
         pg.goto(B + "/emergency")
         pg.wait_for_function("document.getElementById('dbBadge').textContent.includes('connected')")
         pg.wait_for_function("document.getElementById('wsId').textContent.trim() === 'wsDev'")
-        check("the page is in the left navigation with the siren and is the current page", "Emergency mode" in pg.eval_on_selector("#sidenav a.current", "e => e.textContent") and "\U0001F6A8" in pg.eval_on_selector("#sidenav a.current", "e => e.textContent"))
+        check("the page is in the left navigation with the siren and is the current page", "Git-R-Done" in pg.eval_on_selector("#sidenav a.current", "e => e.textContent") and "\U0001F6A8" in pg.eval_on_selector("#sidenav a.current", "e => e.textContent"))
         check("opening the page sent nothing to Workfront", fake.reqs == [] and not starts())
         check("the dev Workspace ID comes from config.json, shown read-only, with no token on the page", pg.eval_on_selector("#wsId", "e => e.tagName") == "OUTPUT" and TOKEN not in pg.content())
         check("there is no stage picker and no run-all: one Go button", pg.locator("#stageSel").count() == 0 and pg.locator("#btnGo").count() == 1 and pg.is_disabled("#btnGo"))
