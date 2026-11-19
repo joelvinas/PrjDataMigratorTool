@@ -106,6 +106,10 @@ for fid, nm, ty in F:
 for i in range(1, 23):                                       # 22 formulas whose values are long: the cap of 20 long-text fields must hold
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values (?,?,?,?,?,?,'2026-01-01 10:00:00.000000')",
               (BASE, "tY", "Many Notes", "fY%02d" % i, "Memo %02d" % i, "formula"))
+c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tS', ?, 'Sparse Notes')", (BASE,))
+for fid, nm in (("fZNull", "Always Empty"), ("fZNoFile", "Empty Per Profile"), ("fZLong", "Wordy Formula")):   # fZNoFile has no record file entry: only the profile says it is empty
+    c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, updated_at) values (?,?,?,?,?,?,3,?,'2026-01-01 10:00:00.000000')",
+              (BASE, "tS", "Sparse Notes", fid, nm, "formula", 3 if fid != "fZLong" else 0))
 c.commit(); c.close()
 os.makedirs(os.path.join(extract, BASE))
 def save(tid, recs):
@@ -114,6 +118,7 @@ long_text = SECRET + " " + "x" * 300
 save("tX", [{"id": "recX%d" % i, "fields": {"fName": SECRET + " order %d" % i, "fDate": "2026-03-0%d" % i, "fNote": long_text, "fTags": ["Red", "Blue"], "fForm": SECRET + " short", "fFormBig": long_text,
                                             "fLink": ["recZ1"], "fAtt": [{"id": "att1", "url": "http://x/y"}], "fNum": i * 10, "fOdd": SECRET + " odd"}} for i in range(1, 4)])
 save("tY", [{"id": "recY1", "fields": {"fY%02d" % i: long_text for i in range(1, 23)}}])
+save("tS", [{"id": "recS%d" % i, "fields": {"fZNull": None if i == 1 else "", "fZNoFile": None, "fZLong": long_text}} for i in range(1, 4)])
 cfgp = os.path.join(tmp, "config.json")
 json.dump({"token": "patFAKEairtable.0000000000000000000000", "workfront": {"planning": {"dev": {"base_url": "https://acme.my.workfront.com", "bearer_token": TOKEN, "workspace_id": "wsDev", "record_batch_size": 2,
                                                                                               "default_currency": "USD"}}}}, open(cfgp, "w"))
@@ -181,6 +186,17 @@ texts = [f for f in resy["fields"] if f["outcome"] == "pre-converted" and f["fin
 check("at most 20 fields of a record type become long text; the extra is plain text and logged as possibly truncated", len(longs) == 20 and len(texts) == 1 and "possibly truncated" in texts[0]["note"], (len(longs), len(texts)))
 check("a field Planning refuses in both attempts is failed, with both errors recorded, and the run still loads the records", [f["outcome"] for f in resy["fields"]].count("failed") == 1 and resy["records"]["loaded"] == 1
       and [f for f in resy["fields"] if f["outcome"] == "failed"][0]["attempt2"] == "refused", resy["counts"])
+
+# ---- a refused type AND all-empty data keeps the PRE- field as plain text, so it does not use a long-text slot
+fk3 = Fake()
+dbz = os.path.join(tmp, "zcopy.db"); shutil.copyfile(dbp, dbz)               # a second database, so the no-record-file run starts without the first run's state
+resz, _c = go(fk3, "tS")
+bz = {f["field_id"]: f for f in resz["fields"]}
+check("a refused field whose values are all empty becomes PRE- text, not long text", bz["fZNull"]["outcome"] == "pre-converted" and bz["fZNull"]["final_type"] == "text" and bz["fZNoFile"]["final_type"] == "text", bz)
+check("a refused field with a long value still becomes PRE- long text", bz["fZLong"]["final_type"] == "long-text")
+resz2, _c = go(Fake(), "tS", db=dbz, fetch_doc=None, reader=lambda *a: (_ for _ in ()).throw(em.rl.RecordLoadError("no file")))
+bz2 = {f["field_id"]: f for f in resz2["fields"]}
+check("with no record file, the Stage 1 null count decides: all empty is text, otherwise long text (length unknown)", bz2["fZNoFile"]["final_type"] == "text" and bz2["fZNull"]["final_type"] == "text" and bz2["fZLong"]["final_type"] == "long-text", bz2)
 
 # ---- a record failing does not stop the others
 fk4 = Fake(); fk4.fail_index = {1}
