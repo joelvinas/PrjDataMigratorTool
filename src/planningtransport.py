@@ -17,8 +17,16 @@ NOT yet verified, so marked in docs/LOADER_PLAN.md and meant to be proven in the
     back to its displayName. Whether options can change afterwards is sandbox item S4;
   * a reference field is created on each side of a two-way pair as its own field, with createBackReference false (Postman test 4 decides whether to use it);
   * how a duplicate record type name is refused (a 409, or FIELD_DISPLAY_NAME_NOT_UNIQUE / "already exists" text, is treated as a name conflict).
+Sharing (the API account that creates a record type is its only member and the record type is in no sidebar section, so nobody else can see it). With a `sharing` setting
+(loadconfig.planning_sharing) every record type this transport creates is, right after the create call:
+    PATCH /v2/permissions/record-types/{id}/members/bulk   body {"grant": [{"subjectId", "subjectType", "role"}], "inheritViewOnly": false}   (204 = accepted, NOT proof)
+    GET   /v2/permissions/record-types/{id}/members        the grant is verified: every configured subject must be listed (the endpoint ignores unknown body keys and still answers 204)
+    GET   /v2/workspaces/{id}                              the COMPLETE recordTypeSections array is read,
+    PATCH /v2/workspaces/{id}   body {"recordTypeSections": [the whole array, with only the new ID added to the named section]}   then read back and checked
+A failure of either step never fails the create: it is kept in share_results and shown in the run output. A reused record type is checked the same way (ensure_shared).
 A description over the 512 characters the plan allows is refused here and never cut. Nothing is sent by describe().
 """
+import copy
 import re
 
 import datatypes as dt
@@ -40,12 +48,14 @@ class UnmatchedReply(HttpError):
 class PlanningTransport(object):
     system = "planning"
 
-    def __init__(self, http):
+    def __init__(self, http, sharing=None):
         if not http.creds.workspace_id:
             raise ValueError("The Planning settings in config.json need a workspace_id (the DEV Workspace to load into).")
         self.http, self.workspace_id = http, http.creds.workspace_id
         self.extra = http.creds.extra or {}
         self._options = {}          # field ID -> {displayName: option key}
+        self.sharing = sharing      # {"share_with": [...], "section_name": "..."} from loadconfig.planning_sharing, or None (then record types are NOT shared)
+        self.share_results = []     # one dict per record type shared or checked: {record_type_id, members, section, problems, notes}
 
     # ---- what would be sent
     def _currency(self, spec):
@@ -133,7 +143,130 @@ class PlanningTransport(object):
             raise HttpError("The create call worked but its reply holds no ID, so the item cannot be recorded.")
         if item["kind"] == "field":
             self._remember(str(new), reply.get("options"))
+        if item["kind"] == "record_type":
+            self.share_record_type(str(new))        # never raises: a sharing problem is recorded, and must not lose the new ID
         return str(new)
+
+    # ---- sharing and sidebar placement (see the module docstring). Every call goes through self.http, so it is in the API log.
+    def get_members(self, record_type_id):
+        reply = self.http.request("GET", "/v2/permissions/record-types/%s/members" % record_type_id)
+        members = reply.get("members") if isinstance(reply, dict) else None
+        if not isinstance(members, list):
+            raise HttpError("The members reply has no members list, so the sharing cannot be checked.")
+        return [m for m in members if isinstance(m, dict)]
+
+    def _missing_subjects(self, members):
+        have = {(str(m.get("subjectId")), str(m.get("subjectType") or "").lower()): m for m in members}
+        return [s for s in self.sharing["share_with"] if (s["subjectId"], s["subjectType"].lower()) not in have], have
+
+    def share_record_type(self, record_type_id, force=True):
+        """Grant the configured subjects on the record type and put it in the configured sidebar section, then verify both by reading back. force=False (a record type that
+        already existed) first reads the members and grants only the subjects that are missing. NEVER raises. Returns, and records in share_results,
+        {record_type_id, members: ok|failed|not done, section: ok|failed|not done, problems: [plain text], notes: [plain text]}."""
+        res = {"record_type_id": str(record_type_id), "members": "not done", "section": "not done", "problems": [], "notes": []}
+        self.share_results.append(res)
+        if not self.sharing:
+            res["problems"].append("NOT SHARED: share_with and section_name are not set for this stage in config.json, so only the API account can see this record type.")
+            return res
+        try:
+            self._grant(res, record_type_id, force)
+        except Exception as e:                      # one failed step must not stop the run, and must not be silent
+            res["members"] = "failed"
+            res["problems"].append(self._plain("Sharing", e))
+        try:
+            self._place(res, record_type_id)
+        except Exception as e:
+            res["section"] = "failed"
+            res["problems"].append(self._plain("Sidebar placement", e))
+        return res
+
+    def ensure_shared(self, record_type_id):
+        """For a record type that already existed: grant only what is missing and place it if it is in no section. Never raises."""
+        return self.share_record_type(record_type_id, force=False)
+
+    @staticmethod
+    def _plain(step, e):
+        if isinstance(e, HttpError) and e.status == 404:
+            return "%s failed: Workfront has no such record type (was it deleted?). Run 'loader.py planning-reset' to forget the old IDs. (%s)" % (step, e)
+        return "%s failed: %s" % (step, lr.scrub(e))
+
+    def _grant(self, res, rt, force):
+        grant = self.sharing["share_with"]
+        if not force:
+            missing, _have = self._missing_subjects(self.get_members(rt))
+            if not missing:
+                res["members"] = "ok"
+                res["notes"].append("already shared with every configured subject")
+                return
+            grant = missing
+        # exactly these keys: the endpoint ignores unknown ones and still answers 204, so a wrong body would look like success
+        body = {"grant": [{"subjectId": g["subjectId"], "subjectType": g["subjectType"], "role": g["role"]} for g in grant], "inheritViewOnly": False}
+        self.http.request("PATCH", "/v2/permissions/record-types/%s/members/bulk" % rt, body)
+        missing, have = self._missing_subjects(self.get_members(rt))        # a 204 is not proof
+        if missing:
+            res["members"] = "failed"
+            res["problems"].append("Sharing NOT confirmed: the grant call was accepted but %d configured subject(s) are not listed as members: %s." % (len(missing), ", ".join(m["subjectId"] for m in missing)))
+            return
+        res["members"] = "ok"
+        for g in self.sharing["share_with"]:
+            got = have.get((g["subjectId"], g["subjectType"].lower()))
+            if got is not None and got.get("role") not in (None, g["role"]):
+                res["notes"].append("subject %s is a member with the role %r, not the configured %r" % (g["subjectId"], got.get("role"), g["role"]))
+
+    @staticmethod
+    def _norm(text):
+        return " ".join(str(text or "").split()).lower()
+
+    def _sections(self):
+        w = self.http.request("GET", "/v2/workspaces/%s" % self.workspace_id)
+        secs = w.get("recordTypeSections") if isinstance(w, dict) else None
+        if not isinstance(secs, list):
+            raise HttpError("The Workspace reply has no recordTypeSections list, so it was left alone (a partial list could hide the other record types).")
+        return secs
+
+    @staticmethod
+    def _ids_of(secs):
+        return {str(i) for s in secs if isinstance(s, dict) for i in (s.get("recordTypeIds") or [])}
+
+    def _place(self, res, rt):
+        """Add the record type to the named section. Reads the WHOLE array, changes only that section (or appends a new one), sends the WHOLE array back, reads it again."""
+        name, rt = self.sharing["section_name"], str(rt)
+        notes_before = list(res["notes"])
+        for attempt in range(3):
+            secs = copy.deepcopy(self._sections())
+            before = self._ids_of(secs)
+            holder = next((s for s in secs if isinstance(s, dict) and rt in [str(i) for i in (s.get("recordTypeIds") or [])]), None)
+            if holder is not None:
+                res["section"] = "ok"
+                res["notes"].append("already in the sidebar section %r" % holder.get("displayName"))
+                return
+            target = next((s for s in secs if isinstance(s, dict) and self._norm(s.get("displayName")) == self._norm(name)), None)
+            res["notes"] = list(notes_before)
+            if target is None:
+                secs.append({"displayName": name, "recordTypeIds": [rt]})
+                res["notes"].append("created the sidebar section %r" % name)
+            else:
+                if not isinstance(target.get("recordTypeIds"), list):
+                    target["recordTypeIds"] = []
+                target["recordTypeIds"].append(rt)
+            try:
+                self.http.request("PATCH", "/v2/workspaces/%s" % self.workspace_id, {"recordTypeSections": secs})
+                break
+            except HttpError as e:
+                if e.status == 409 and attempt < 2:         # a write conflict: read the array again and redo the merge
+                    continue
+                raise
+        after = self._sections()
+        named = next((s for s in after if isinstance(s, dict) and self._norm(s.get("displayName")) == self._norm(name)), None)
+        lost = sorted(before - self._ids_of(after))
+        if named is None or rt not in [str(i) for i in (named.get("recordTypeIds") or [])]:
+            res["section"] = "failed"
+            res["problems"].append("Sidebar placement NOT confirmed: the Workspace was updated but the record type is not in the section %r when read back." % name)
+        elif lost:
+            res["section"] = "failed"
+            res["problems"].append("Sidebar placement changed other record types: %d ID(s) that were in a section are gone after the update (%s). Check the Workspace sidebar." % (len(lost), ", ".join(lost[:10])))
+        else:
+            res["section"] = "ok"
 
     def _remember(self, field_id, options):
         self._options[field_id] = {str(o.get("displayName")): str(o.get("name") if o.get("name") not in (None, "") else o.get("displayName"))
