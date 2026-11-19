@@ -206,4 +206,16 @@ for bad in (["--target-option", "nonsense"], ["--target-option", "planning_name.
     except SystemExit as e:
         code = e.code
     check("a bad --target-option is refused: %s" % bad[1], code not in (0, None))
+
+# export: the data we hold, in the template's columns
+exp = fio.export_csv([
+    {"field_id": "fB", "original": "Beta", "table_name": "T", "data_type": "number", "target_type": "number", "core_target_type": "NUMBER", "core_display_type": "NUMB",
+     "targets": {"planning_name": {"candidate": "Beta", "status": "approved", "approved_name": "Beta Done"}, "core_name": {"candidate": "Beta"}, "core_label": {"candidate": "Beta"}}},
+    {"field_id": "fA", "original": "Alpha", "table_name": "T", "data_type": "singleLineText", "targets": {"planning_name": {"candidate": "Alpha"}}},
+    {"field_id": "fX", "original": "Gone", "table_name": "T", "data_type": "number", "abandoned": True, "targets": {}}])
+erows = list(csv.reader(io.StringIO(exp.lstrip("﻿"))))
+check("export has the template header", tuple(erows[0]) == fio.TEMPLATE_HEADER)
+check("export is sorted and skips abandoned fields", [r[0] for r in erows[1:]] == ["fA", "fB"], erows)
+check("export uses the approved name, else the candidate, and the stored types",
+      erows[2][3] == "Beta Done" and erows[2][4] == "Beta" and erows[2][6:] == ["number", "NUMBER", "NUMB"] and erows[1][6:] == ["", "", ""], erows)
 sys.exit(0 if ok else 1)
