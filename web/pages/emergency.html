@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emergency mode - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="emergency">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="ctxCard">
+  <h2>&#128680; Emergency mode</h2>
+  <p class="hint">Pushes <strong>one table</strong> into the <strong>dev</strong> Workspace of config.json in one click. Names are sent exactly as Airtable has them. Each field is tried as its real Planning type; when Planning refuses it, it is created as a text field named <code>PRE-</code> + the field name (long text when the longest value is over 255 characters, at most 20 long-text fields per record type). Arrays are stored as raw JSON text in a PRE- field. Links and attachments are skipped for later. A failing field or record never stops the run. Running it again reuses the record type and fields and sends only the records not yet loaded.</p>
+  <div class="row">
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <label for="wsId">Workspace ID (dev, from config.json)</label>
+    <output id="wsId" class="wsid" aria-live="polite">(not read yet)</output>
+  </div>
+  <div class="row">
+    <label for="tableSel">Table</label>
+    <select id="tableSel"><option value="">Choose a table...</option></select>
+    <button id="btnGo" type="button" class="primary" disabled>Go</button>
+    <button id="btnCancel" type="button" hidden>Cancel</button>
+  </div>
+  <div id="pageMessage" class="msg"></div>
+  <div id="progress" class="hint" aria-live="polite"></div>
+</section>
+
+<section class="card" id="resultCard" hidden aria-live="polite">
+  <h2>Result</h2>
+  <div id="resultMsg" class="msg"></div>
+  <div class="tablewin" id="countWin"><table id="countGrid" class="grid compact">
+    <thead><tr><th>What</th><th class="num">Count</th></tr></thead><tbody></tbody>
+  </table></div>
+  <p id="files" class="hint"></p>
+  <div id="notes"></div>
+  <h3>Fields</h3>
+  <div class="tablewin" id="fieldWin" hidden><table id="fieldGrid" class="grid compact">
+    <thead><tr><th data-sort="text">Airtable field</th><th data-sort="text">Airtable type</th><th data-sort="text">Name sent</th><th data-sort="text">Attempted type</th><th data-sort="text">Outcome</th><th data-sort="text">Actual name</th><th data-sort="text">Actual type</th><th>Why / error</th><th class="num" data-sort="num">Max length</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/emergency.js"></script>
+</body>
+</html>

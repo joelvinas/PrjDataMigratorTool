@@ -48,6 +48,9 @@ import loadrun
 import recordmap
 import tableload
 import coretargets
+import emergency
+import emergency_report
+import recordload
 import selectvalues
 import fieldnames_io as names_io
 import fieldnames_report as names_report
@@ -5617,17 +5620,179 @@ def api_loadtable_cancel(_body=None):
 
 
 # --------------------------------------------------------------------------
+# Emergency mode: ONE table into the DEV Workspace of config.json in one click (src/emergency.py does the work; this is the HTTP and job layer). The Workspace comes from
+# config.json only. A result holds field names, IDs, counts and short scrubbed reasons: never a record value and never a token. Two MHTML reports and a CSV are written to
+# out/emergency/ and served back by name only.
+# --------------------------------------------------------------------------
+EMERGENCY_FILE_RE = re.compile(r"^[A-Za-z0-9_-]+\.(csv|mhtml)$")
+
+
+def emergency_out_dir():
+    return os.path.join(BASE_DIR, "out", "emergency")
+
+
+def _em_context(send):
+    """The DEV settings (Emergency mode never uses another stage). Raises AppError with a plain message and no secret."""
+    try:
+        return tableload.planning_context(CONFIG_PATH, emergency.STAGE, send)
+    except tableload.LoadError as e:
+        raise AppError(loadconfig.redact(e.message, _lt_secrets()), e.status)
+
+
+def api_emergency_setup(q):
+    out = {"configured": False, "problem": None, "stage": emergency.STAGE, "workspace_id": "", "tables": []}
+    try:
+        data = loadconfig.read_config(CONFIG_PATH)
+        c = loadconfig.credentials(data, "planning", emergency.STAGE) if emergency.STAGE in loadconfig.planning_blocks(data) else None
+        if c is not None and c.workspace_id:
+            out.update(configured=True, workspace_id=c.workspace_id)
+        else:
+            out["problem"] = "The dev stage is not configured in config.json (section workfront.planning, block dev, with base_url, bearer_token and workspace_id). Emergency mode loads into the dev Workspace only."
+    except loadconfig.ConfigError as e:
+        out["problem"] = str(e)
+    if (q.get("base_id") or [""])[0]:
+        try:
+            with db() as conn:
+                out["tables"] = _lt_call(tableload.table_choices, conn, _names_base(q))
+        except AppError as e:
+            out["tables_problem"] = e.message
+    return _lt_out(out)
+
+
+class EmergencyJob:
+    def __init__(self, base, table_id, ws, db_path):
+        self.id = str(int(time.time() * 1000))
+        self.base, self.table_id, self.ws, self.db_path = base, table_id, ws, db_path
+        self.status, self.error, self.result, self.progress, self.files = "running", None, None, {}, None
+        self.started_at, self.finished_at = utc_now(), None
+        self.cancel = threading.Event()
+
+    def set_progress(self, p):
+        self.progress = dict(p)
+
+
+EMJOB = {"current": None}
+_emjob_lock = threading.Lock()
+
+
+def _em_fetch_doc(job):
+    """Re-read one table from Airtable (only when its saved file is missing). Every page goes through api_call, so it is logged; the records stay in memory."""
+    def fetch(base_id, table_id):
+        path = "/v0/%s/%s" % (quote(base_id, safe=""), quote(table_id, safe=""))
+        records, offset = [], None
+        while True:
+            q = {"pageSize": PAGE_SIZE, "returnFieldsByFieldId": "true"}
+            if offset:
+                q["offset"] = offset
+            body = api_call(purpose="emergency_reread", path=path, query=q, base_id=base_id, table_id=table_id, cancel=job.cancel, records_key="records")
+            records.extend(r for r in (body.get("records") or []) if isinstance(r, dict))
+            offset = body.get("offset")
+            if not offset:
+                break
+        return {"format": recordload.DOC_FORMAT, "table_id": table_id, "records": records}
+    return fetch
+
+
+def _run_emergency_job(job):
+    secrets = _lt_secrets()
+    try:
+        ctx = _em_context(True)
+        tr = tableload.transport(ctx)
+        ws_name = (tableload.workspace_status(ctx, tr) or {}).get("name") or ""            # one read of the Workspace, before the run's calls are recorded
+        cfg, _problem = load_config()
+        base_name = next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or ""
+        calls = emergency.CallLog()
+        tr.http.recorder = calls
+        with db(job.db_path) as conn:
+            res = emergency.run_table(conn, job.base, job.table_id, ctx, tr, extract_dir(), calls, fetch_doc=_em_fetch_doc(job), progress=job.set_progress, should_stop=job.cancel.is_set)
+            res["workspace_name"], res["base_name"] = ws_name, base_name
+            airtable_rows = []
+            if res.get("reread"):
+                airtable_rows = [dict(r) for r in conn.execute("SELECT * FROM api_call_log WHERE purpose='emergency_reread' AND base_id=? AND table_id=? AND timestamp>=? ORDER BY call_id",
+                                                               (job.base, job.table_id, job.started_at))]
+        redact = lambda t: scrub(loadconfig.redact(t, secrets))
+        job.files = emergency_report.write_reports(res, emergency_out_dir(), to_mhtml, REPORT_CSS, airtable_rows, redact)
+        slim = {k: v for k, v in res.items() if k not in ("calls",)}
+        slim["call_count"] = len(res["calls"])
+        slim["files"] = job.files
+        job.result = _lt_out(slim)
+        job.status = "cancelled" if res.get("cancelled") else "done"
+    except (AppError, emergency.EmergencyError) as e:
+        job.status, job.error = "failed", loadconfig.redact(getattr(e, "message", str(e)), secrets)
+    except Cancelled:
+        job.status = "cancelled"
+    except Exception as e:
+        job.status, job.error = "failed", "Unexpected error: " + loadconfig.redact(loadrun.scrub(e), secrets)
+        print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+    finally:
+        job.finished_at = utc_now()
+
+
+def api_emergency_start(body):
+    """Start one Go run. The page must send the table and the Workspace ID exactly as shown (the same confirmation the Load a table page asks for). One run at a time."""
+    base = _names_base(body)
+    table = str(body.get("table_id") or "").strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    ctx = _em_context(True)
+    conf = body.get("confirm")
+    if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
+        raise AppError("Confirm the table and the Workspace ID exactly as shown before anything is sent.")
+    with db() as conn:
+        if table not in {t["table_id"] for t in _lt_call(tableload.table_choices, conn, base)}:
+            raise AppError("That table is not in this base or is out of scope.", 404)
+    with _emjob_lock:
+        cur = EMJOB["current"]
+        if cur and cur.status == "running":
+            raise AppError("An Emergency mode run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
+        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"])
+        EMJOB["current"] = job
+    threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id}
+
+
+def api_emergency_status(_q=None):
+    job = EMJOB["current"]
+    if not job:
+        return {"job": None}
+    return _lt_out({"job": {"id": job.id, "base_id": job.base, "table_id": job.table_id, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
+                            "finished_at": job.finished_at, "progress": job.progress, "result": job.result}})
+
+
+def api_emergency_cancel(_body=None):
+    job = EMJOB["current"]
+    if not job or job.status != "running":
+        raise AppError("No Emergency mode run is going.")
+    job.cancel.set()
+    return {"cancelling": True}
+
+
+def api_emergency_report(q):
+    """One report file of the last runs, by plain name (letters, digits, hyphen, underscore and one of the two extensions); never a path."""
+    name = (q.get("file") or [""])[0]
+    if not EMERGENCY_FILE_RE.match(name):
+        raise AppError("Not a report file name.", 404)
+    path = os.path.join(emergency_out_dir(), name)
+    if not os.path.isfile(path):
+        raise AppError("That report file does not exist (it may have been deleted).", 404)
+    with open(path, "rb") as f:
+        data = f.read()
+    ctype = "text/csv; charset=utf-8" if name.endswith(".csv") else "application/x-mimearchive"
+    return (data, ctype, {"Content-Disposition": 'attachment; filename="%s"' % name})
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 HTML = "text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("pages/setup.html", HTML), "/setup": ("pages/setup.html", HTML),
-          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML),
+          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML), "/emergency": ("pages/emergency.html", HTML),
           "/log": ("pages/log.html", HTML),
           "/style.css": ("css/style.css", "text/css; charset=utf-8"),
           "/common.js": ("js/common.js", JS), "/setup.js": ("js/setup.js", JS),
-          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
+          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/emergency.js": ("js/emergency.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
@@ -5647,11 +5812,12 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/automations/report.mhtml": api_auto_report_mhtml, "/api/automations/report/status": api_auto_report_status,
               "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
               "/api/names/review": api_names_review, "/api/datatypes/review": api_datatypes_review, "/api/lookups/review": api_lookups_review, "/api/names/report": api_names_report,
-              "/api/names/import-template.csv": api_names_import_template, "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml}
+              "/api/names/import-template.csv": api_names_import_template, "/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml,
+              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
-               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel,
+               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/emergency/start": api_emergency_start, "/api/emergency/cancel": api_emergency_cancel,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/lookups/assign": api_lookups_assign, "/api/lookups/unassign": api_lookups_unassign, "/api/lookups/rename": api_lookups_rename, "/api/lookups/delete": api_lookups_delete, "/api/datatypes/default": api_datatypes_default,
