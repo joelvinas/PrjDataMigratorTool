@@ -52,10 +52,15 @@ F = {f["field_id"]: f for f in T["tOrd"]["fields"]}
 # ---- converting values
 c = rl.convert
 check("text, number, date, boolean convert; an empty value is simply left out", c(F["fTitle"], "Hello") == (True, "Hello") and c(F["fQty"], 3) == (True, 3) and c(F["fQty"], 2.5) == (True, 2.5)
-      and c(F["fDue"], "2026-03-04") == (True, "2026-03-04") and c(F["fDue"], "2026-03-04T10:00:00.000Z") == (True, "2026-03-04") and c(F["fDone"], True) == (True, True)
+      and c(F["fDue"], "2026-03-04") == (True, "2026-03-04T00:00:00.000Z") and c(F["fDue"], "2026-03-04T10:00:00.000Z") == (True, "2026-03-04T00:00:00.000Z") and c(F["fDone"], True) == (True, True)
       and c(F["fTitle"], None) == (True, None) and c(F["fTitle"], "") == (True, None) and c(F["fTags"], []) == (True, None))
 check("selects become option keys; an option Planning does not have is refused without naming the value", c(F["fStat"], "Open") == (True, "optOpen") and c(F["fTags"], ["Gift", "Rush"]) == (True, ["optGift", "optRush"])
       and c(F["fStat"], "SECRET-VALUE") == (False, "a select value has no matching option in Planning"))
+its = rl.iso_timestamp
+check("every date goes out as yyyy-MM-ddTHH:mm:ss.SSSZ in UTC, with midnight when there is no time",
+      its("2026-11-19", False) == "2026-11-19T00:00:00.000Z" and its("2026-11-19T10:30:00Z", False) == "2026-11-19T10:30:00.000Z"
+      and its("2026-11-19T10:30:00.5+02:00", False) == "2026-11-19T08:30:00.500Z" and its("2026-11-19T10:30:00", False) == "2026-11-19T10:30:00.000Z"
+      and its("2026-13-45", True) is None)
 bad = [c(F["fQty"], "3"), c(F["fQty"], True), c(F["fDue"], "tomorrow"), c(F["fTitle"], ["a"])]
 check("a value of the wrong shape is refused with a short reason and no value in it", all(b[0] is False and "tomorrow" not in b[1] for b in bad), bad)
 
@@ -87,7 +92,7 @@ r = rl.load_records(conn, "appL", T, "x", tr, "dev", "wsDev", batch=2, dry_run=F
 check("the records pass sends the tables in ID order, in batches, and counts every record once", r["created"] == 5 and r["failed"] == 0 and [len(x) for x in tr.calls] == [2, 2, 1], (r, [len(x) for x in tr.calls]))
 sent = [b for call in tr.calls for b in call]
 check("each body holds the record type and the field values keyed by Planning field ID, with no link field and no empty value", sent[0] == {"recordTypeId": "RTC", "fields": {"FN": "Acme"}}
-      and {"recordTypeId": "RTO", "fields": {"FT": "One", "FQ": 2, "FS": "optOpen"}} in sent and {"recordTypeId": "RTO", "fields": {"FT": "Two", "FD": "2026-05-06", "FB": True, "FG": ["optRush"]}} in sent
+      and {"recordTypeId": "RTO", "fields": {"FT": "One", "FQ": 2, "FS": "optOpen"}} in sent and {"recordTypeId": "RTO", "fields": {"FT": "Two", "FD": "2026-05-06T00:00:00.000Z", "FB": True, "FG": ["optRush"]}} in sent
       and {"recordTypeId": "RTO", "fields": {"FT": "Three"}} in sent, sent)
 check("a value of the wrong shape leaves the field out and is counted as a problem, never as text", [t["problems"] for t in r["tables"] if t["table_id"] == "tOrd"] == [1])
 u1 = rm.lookup(conn, "appL", "tOrd", "recO1")

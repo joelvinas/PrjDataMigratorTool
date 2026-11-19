@@ -20,6 +20,7 @@ VERIFIED (Postman test 5, 17 November 2026): the bulk route is per record type a
 proven in the first DEV run; marked in docs/LOADER_PLAN.md): the value formats Planning accepts (dates as ISO text, percentages as Airtable's fraction, a link as a list of
 record IDs) and the link update route.
 """
+import datetime
 import json
 import os
 import re
@@ -105,6 +106,22 @@ def raw_text(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def iso_timestamp(value, date_only):
+    """Planning needs every date as yyyy-MM-ddTHH:mm:ss.SSSZ (UTC), even a date with no time (then midnight). A date field keeps its calendar day as written; a date and time is
+    converted to UTC (a value with no zone is taken as UTC). None when the text is not a real date."""
+    try:
+        if date_only or len(value) == 10:
+            d = datetime.datetime.strptime(value[:10], "%Y-%m-%d")
+        else:
+            v = value.strip().replace("Z", "+00:00").replace("z", "+00:00").replace(" ", "T", 1)
+            d = datetime.datetime.fromisoformat(v)
+            if d.tzinfo is not None:
+                d = d.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+    return d.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (d.microsecond // 1000)
+
+
 def convert(f, value):
     """(True, value for Planning), or (False, short reason with no value in it). An empty value is (True, None): it is simply left out."""
     if _empty(value):
@@ -123,7 +140,10 @@ def convert(f, value):
     if k in ("date", "datetime"):
         if not (isinstance(value, str) and _DATE.match(value)):
             return False, "the value is not a date"
-        return True, value[:10] if k == "date" else value
+        stamp = iso_timestamp(value, k == "date")
+        if stamp is None:
+            return False, "the value is not a date"
+        return True, stamp
     if k == "boolean":
         return True, bool(value)
     if k in ("single-select", "multi-select"):
