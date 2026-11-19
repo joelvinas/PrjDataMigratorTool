@@ -383,7 +383,7 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
 
         if is_array:
             row.update(attempted_type="(not attempted: an array)", attempted_from="arrays are stored as raw JSON text", attempt1="not attempted")
-            ok2, wid, ptype = make_pre("an array from Airtable, stored exactly as received as raw JSON text in a PRE- field")
+            ok2, wid, ptype = make_pre("an array or object from Airtable, stored exactly as received as raw JSON text in a PRE- field")
             if ok2:
                 loadable.append({"field_id": fid, "planning_id": wid, "kind": ptype, "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True})
             continue
@@ -397,6 +397,8 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
             if atype == "long-text":
                 long_count += 1
             row.update(final_name=sent, final_type=atype, planning_field_id=wid, outcome="clean", reason="")
+            if f["data_type"] == "dateTime" and atype == "date":
+                row["note"] = "the time of day is not kept: Planning's date type has no time"
             opts = dict(tr._options.get(wid) or {})
             loadable.append({"field_id": fid, "planning_id": wid, "kind": tm.kind(atype) or atype, "options": opts, "linked_table_id": None, "single": False, "pass": "records", "raw": False})
             continue
