@@ -56,6 +56,12 @@ check("text, number, date, boolean convert; an empty value is simply left out", 
       and c(F["fTitle"], None) == (True, None) and c(F["fTitle"], "") == (True, None) and c(F["fTags"], []) == (True, None))
 check("selects become option keys; an option Planning does not have is refused without naming the value", c(F["fStat"], "Open") == (True, "optOpen") and c(F["fTags"], ["Gift", "Rush"]) == (True, ["optGift", "optRush"])
       and c(F["fStat"], "SECRET-VALUE") == (False, "a select value has no matching option in Planning"))
+LT = {"field_id": "fLong", "planning_id": "FL", "kind": "long-text", "options": {}, "pass": "records"}
+lt = c(LT, 'Fish & "chips"\n<b>')
+check("a long-text value goes out as {content, contentHTML}: the paragraph markup, the text HTML-escaped, line breaks kept", lt == (True, {"content": 'Fish & "chips"\n<b>',
+      "contentHTML": '<p class="react-spectrum-RichTextEditor-paragraph" dir="ltr" style="margin: 0px; padding: 0px;"><span style="white-space: pre-wrap;">Fish &amp; &quot;chips&quot;\n&lt;b&gt;</span></p>'}), lt)
+check("a raw (Emergency PRE-) long-text field gets the same shape, a raw plain-text one stays a string, and an empty long-text value is left out",
+      c(dict(LT, raw=True), ["a"])[1]["content"] == '["a"]' and c({"kind": "text", "raw": True}, "x") == (True, "x") and c(LT, "") == (True, None))
 its = rl.iso_timestamp
 check("every date goes out as yyyy-MM-ddTHH:mm:ss.SSSZ in UTC, with midnight when there is no time",
       its("2026-11-19", False) == "2026-11-19T00:00:00.000Z" and its("2026-11-19T10:30:00Z", False) == "2026-11-19T10:30:00.000Z"
