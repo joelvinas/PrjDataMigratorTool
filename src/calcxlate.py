@@ -28,11 +28,14 @@ OPERATORS = {"+": "+", "-": "-", "*": "*", "/": "/", "=": "=", "!=": "!=", "<>":
 BLANK_TEST = "ISBLANK"                   # X = BLANK() becomes ISBLANK(X)
 # Functions kept for a person to decide, with why. Anything else not in FUNCTIONS is reported as having no verified equivalent.
 MANUAL_REVIEW = {
-    "DATETIME_DIFF": "the unit argument needs an explicit rule for each unit",
     "DATETIME_FORMAT": "no verified Workfront equivalent takes a format string; each distinct format needs its own decision",
-    "WORKDAY_DIFF": "a business day count with no verified Workfront equivalent; inclusive and exclusive end dates, weekend starts and holidays all need testing",
     "WEEKNUM": "week numbering may differ at year boundaries; edge dates need testing against Airtable",
 }
+DAY_UNITS = ("days", "d")                # the only DATETIME_DIFF units translated: Workfront DATEDIFF counts calendar days (owner, 22 November 2026)
+BLANK_TEXT = '""'                        # two double quotes express blank (owner, 22 November 2026)
+DATEDIFF_NOTE = "DATEDIFF is written with the dates swapped (Airtable counts first minus second); the sign Workfront gives is not verified"
+WEEKDAYDIFF_NOTE = "WEEKDAYDIFF counts working days by the organization's schedule in Workfront, not Monday to Friday; inclusive and exclusive end dates and weekend starts are not verified"
+BLANK_NOTE = "BLANK() is written as an empty text value (\"\")"
 CONCAT_NOTE = "CONCAT with several arguments is assumed to accept any number of parts"
 
 
@@ -104,7 +107,8 @@ class _Emitter(object):
             test = BLANK_TEST + "(" + self.emit(other) + ")"
             if op == "=":
                 return test
-            return self.bad("a not-blank test (!= BLANK()) has no verified Workfront form")
+            self.warnings.add(BLANK_NOTE)
+            return self.emit(other, 3) + "!=" + BLANK_TEXT
         if op not in OPERATORS:
             return self.bad("the operator %s has no verified Workfront equivalent" % op)
         p = cp.PREC[op]
@@ -116,10 +120,28 @@ class _Emitter(object):
             return self.flatten(node[2], op) + self.flatten(node[3], op)
         return [node]
 
+    def date_diff(self, args):
+        if len(args) != 3 or args[2][0] != "str":
+            return self.bad("DATETIME_DIFF is translated only with a typed unit")
+        if args[2][1].lower() not in DAY_UNITS:
+            return self.bad("DATETIME_DIFF in the unit '%s' is not translated: only days are (DATEDIFF counts calendar days)" % args[2][1])
+        self.warnings.add(DATEDIFF_NOTE)
+        return "DATEDIFF(" + self.emit(args[1]) + "," + self.emit(args[0]) + ")"
+
     def call(self, node):
         name, args = node[1], node[2]
         if name == "BLANK":
-            return self.bad("BLANK() used as a value has no verified Workfront equivalent (only X = BLANK() is translated, as ISBLANK)")
+            if args:
+                return self.bad("BLANK with arguments has no verified Workfront form")
+            self.warnings.add(BLANK_NOTE)
+            return BLANK_TEXT
+        if name == "DATETIME_DIFF":
+            return self.date_diff(args)
+        if name == "WORKDAY_DIFF":
+            if len(args) != 2:
+                return self.bad("WORKDAY_DIFF with %d arguments is not translated: WEEKDAYDIFF takes two dates and does not consider holidays" % len(args))
+            self.warnings.add(WEEKDAYDIFF_NOTE)
+            return "WEEKDAYDIFF(" + ",".join(self.emit(a) for a in args) + ")"
         spec = FUNCTIONS.get(name)
         if spec is None:
             why = MANUAL_REVIEW.get(name)

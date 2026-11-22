@@ -69,13 +69,18 @@ check("X = BLANK() becomes ISBLANK(X), either way round", T("IF({fldA}=BLANK(),1
 check("a warning when CONCAT takes more than two parts", cx.CONCAT_NOTE in T('CONCATENATE({fldA}, "-", {fldB})').warnings and cx.CONCAT_NOTE not in T("{fldA} & {fldB}").warnings)
 
 # ---- blocked: unsupported
-for text, word in (("DATETIME_DIFF({fldA},{fldB},'days')", "DATETIME_DIFF"), ("DATETIME_FORMAT({fldA},'LL')", "format"), ("WORKDAY_DIFF({fldA},{fldB})", "WORKDAY_DIFF"),
-                   ("WEEKNUM({fldA})", "WEEKNUM"), ("REGEX_MATCH({fldA},'x')", "REGEX_MATCH"), ("IF({fldA}, 1)", "IF with 2 arguments"), ("IF({fldA}!=BLANK(),1,0)", "not-blank"),
-                   ("IF({fldA}=0,BLANK(),1)", "BLANK()"), ("TRUE", "TRUE"), ("1 + $", "could not be read")):
+for text, word in (("DATETIME_DIFF({fldA},{fldB},'months')", "months"), ("DATETIME_DIFF({fldA},{fldB})", "typed unit"), ("DATETIME_FORMAT({fldA},'LL')", "format"),
+                   ("WORKDAY_DIFF({fldA},{fldB},'2026-01-01')", "holidays"), ("WEEKNUM({fldA})", "WEEKNUM"), ("REGEX_MATCH({fldA},'x')", "REGEX_MATCH"),
+                   ("IF({fldA}, 1)", "IF with 2 arguments"), ("TRUE", "TRUE"), ("1 + $", "could not be read")):
     r = T(text)
     check("unsupported: %s" % text, r.status == "BLOCKED_UNSUPPORTED_FUNCTION" and r.expression is None and word in r.reason, (r.status, r.reason))
-check("a manual-review function gives its reason", "unit argument" in T("DATETIME_DIFF({fldA},{fldB},'days')").reason)
-check("functions are listed even when blocked", T("IF({fldA}, DATETIME_DIFF(1,2,'d'), 0)").functions == ["DATETIME_DIFF", "IF"])
+check("a manual-review function gives its reason", "format" in T("DATETIME_FORMAT({fldA},'LL')").reason)
+check("DATETIME_DIFF in days becomes DATEDIFF with the dates swapped", T("DATETIME_DIFF({fldA},{fldB},'days')").expression == "DATEDIFF({DE:FieldB},{DE:FieldA})" and T("DATETIME_DIFF({fldA},{fldB},'d')").expression == "DATEDIFF({DE:FieldB},{DE:FieldA})")
+check("DATEDIFF and WEEKDAYDIFF carry a warning", cx.DATEDIFF_NOTE in T("DATETIME_DIFF({fldA},{fldB},'days')").warnings and cx.WEEKDAYDIFF_NOTE in T("WORKDAY_DIFF({fldA},{fldB})").warnings)
+check("WORKDAY_DIFF becomes WEEKDAYDIFF", T("WORKDAY_DIFF({fldA},{fldB})").expression == "WEEKDAYDIFF({DE:FieldA},{DE:FieldB})", T("WORKDAY_DIFF({fldA},{fldB})").expression)
+check("BLANK() as a value is two double quotes", T("IF({fldA}=0,BLANK(),1)").expression == 'IF({DE:FieldA}=0,"",1)' and cx.BLANK_NOTE in T("IF({fldA}=0,BLANK(),1)").warnings, T("IF({fldA}=0,BLANK(),1)").expression)
+check("X != BLANK() compares with two double quotes", T("IF({fldA}!=BLANK(),1,0)").expression == 'IF({DE:FieldA}!="",1,0)', T("IF({fldA}!=BLANK(),1,0)").expression)
+check("functions are listed even when blocked", T("IF({fldA}, DATETIME_DIFF(1,2,'months'), 0)").functions == ["DATETIME_DIFF", "IF"])
 check("a string with a quote is not guessed", T("'say \"hi\"'").status == "BLOCKED_UNSUPPORTED_FUNCTION")
 
 # ---- blocked: missing reference
@@ -83,7 +88,7 @@ r = T("{fldBase}*{fldNope}")
 check("missing target field", r.status == "BLOCKED_MISSING_REFERENCE" and r.missing == ["fldNope"] and r.expression is None and "fldNope" in r.reason and r.references == ["fldBase", "fldNope"], (r.status, r.reason, r.references))
 r = T("{Base Price}*2")
 check("a reference by name is a missing reference", r.status == "BLOCKED_MISSING_REFERENCE" and r.missing == ["Base Price"])
-r = T("{fldNope}+DATETIME_DIFF(1,2,'d')")
+r = T("{fldNope}+DATETIME_DIFF(1,2,'months')")
 check("unsupported wins, and the reason also names the missing target", r.status == "BLOCKED_UNSUPPORTED_FUNCTION" and "fldNope" in r.reason, r.reason)
 check("a name with a space still translates, with a warning", T("{fldSp}+1").expression == "{DE:Has Space}+1" and any("Has Space" in w for w in T("{fldSp}+1").warnings))
 
@@ -102,7 +107,7 @@ check("a formula that reads itself is a loop", cx.order_formulas({"a": {"a"}})[1
 check("the order is repeatable", cx.order_formulas({"b": {"a"}, "a": set(), "c": set()}) == cx.order_formulas({"c": set(), "a": set(), "b": {"a"}}))
 
 # ---- shapes seen in a sample schema translate, or block for a stated reason
-real = [("ROUND(({fldA}-{fldB})/{fldA},3)", "TRANSLATABLE"), ("IF({fldA}=0,BLANK(),ROUND(({fldA}-{fldB})/{fldA},3))", "BLOCKED_UNSUPPORTED_FUNCTION"),
+real = [("ROUND(({fldA}-{fldB})/{fldA},3)", "TRANSLATABLE"), ("IF({fldA}=0,BLANK(),ROUND(({fldA}-{fldB})/{fldA},3))", "TRANSLATABLE"),
         ("{fldA} * {fldB}", "TRANSLATABLE"), ('CONCATENATE({fldA}, "-", {fldB}, "-2")', "TRANSLATABLE"), ('IF({fldFlag}, "yes-3", "no-3")', "TRANSLATABLE")]
 check("sample shapes", all(T(t).status == s for t, s in real), [(t, T(t).status) for t, s in real if T(t).status != s])
 check("ROUND with a nested division keeps its brackets", T("ROUND(({fldA}-{fldB})/{fldA},3)").expression == "ROUND(({DE:FieldA}-{DE:FieldB})/{DE:FieldA},3)", T("ROUND(({fldA}-{fldB})/{fldA},3)").expression)
