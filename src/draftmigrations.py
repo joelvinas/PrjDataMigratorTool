@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrations 021, 022 and 023 (the data type mapping), 024 (lookup lists) and 025 (Git-R-Done field results): check for them and apply them. Standard library only.
+"""Migrations 021, 022 and 023 (the data type mapping), 024 (lookup lists), 025 (Git-R-Done field results) and 026 (the Core bulk field crosswalk): check for them and apply them. Standard library only.
 
 Why this is separate: these migrations are drafts until the owner confirms they are applied, so they are not in DatabaseSchemaLibrary.sql, the embedded DDL
 or sql/apply_migrations.py, and the app does not refuse a database that lacks them. This module is how the app (database connect) and the owner's script
@@ -9,9 +9,10 @@ Schema only: no record value is read or written.
 import os
 
 SQL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
-FILES = {21: "migration_021_add_data_type_mapping.sql", 22: "migration_022_add_core_display_type.sql", 23: "migration_023_add_rule_text_and_new_types.sql", 24: "migration_024_add_lookup_lists.sql", 25: "migration_025_add_emergency_field_results.sql"}
+FILES = {21: "migration_021_add_data_type_mapping.sql", 22: "migration_022_add_core_display_type.sql", 23: "migration_023_add_rule_text_and_new_types.sql", 24: "migration_024_add_lookup_lists.sql", 25: "migration_025_add_emergency_field_results.sql", 26: "migration_026_add_core_field_crosswalk.sql"}
 TABLES_024 = ("lookup_lists", "field_lookup_decisions", "lookup_list_events")
 TABLES_025 = ("emergency_field_results",)
+TABLES_026 = ("core_field_crosswalk",)
 TABLES_021 = ("data_type_defaults", "field_type_decisions", "data_type_events")
 
 
@@ -45,6 +46,9 @@ def pending(conn):
     m25 = [t for t in TABLES_025 if t not in have]
     if m25:
         out.append({"migration": 25, "missing": m25})
+    m26 = [t for t in TABLES_026 if t not in have]
+    if m26:
+        out.append({"migration": 26, "missing": m26})
     return out
 
 
@@ -52,8 +56,8 @@ def describe(items):
     """One plain sentence for the Setup page and the command line, or '' when nothing is pending."""
     if not items:
         return ""
-    return ("The data type mapping, the lookup lists or the Git-R-Done results table are not set up in this database yet (migration%s %s). Back up the file, then run: "
-            "python sql/apply_migrations.py <this database file>, and connect again. Until then the Data types and Lookup lists pages can show values but not save them, and Git-R-Done does not save its field results to the database."
+    return ("The data type mapping, the lookup lists, the Git-R-Done results table or the Core field crosswalk are not set up in this database yet (migration%s %s). Back up the file, then run: "
+            "python sql/apply_migrations.py <this database file>, and connect again. Until then the Data types and Lookup lists pages can show values but not save them, and Git-R-Done does not save its field results to the database, and the Core fields page does not keep its crosswalk between runs."
             % ("s" if len(items) > 1 else "", ", ".join("%03d" % i["migration"] for i in items)))
 
 
@@ -113,6 +117,8 @@ def apply(conn):
         run(24)
     if 25 in todo:
         run(25)
+    if 26 in todo:
+        run(26)
     conn.commit()
     seed(conn)   # a database built from the library has the tables but not the default mapping rows or the view
     return ran

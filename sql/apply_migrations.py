@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply every migration (001 to 025) to an existing database in one run. Standard library only.
+"""Apply every migration (001 to 026) to an existing database in one run. Standard library only.
 
     python sql/apply_migrations.py path/to/your.db
 
@@ -8,7 +8,7 @@ up to date. It never changes data. The only drops are the removal of the empty p
 import os, re, sqlite3, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-import draftmigrations  # noqa: E402  (021 to 025: data types, lookup lists, Git-R-Done results)
+import draftmigrations  # noqa: E402  (021 to 026: data types, lookup lists, Git-R-Done results, Core field crosswalk)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -58,7 +58,7 @@ def main():
     conn.executescript(open(os.path.join(HERE, "migration_019_add_field_writer_decisions.sql"), encoding="utf-8").read())
     conn.executescript(open(os.path.join(HERE, "migration_020_add_core_parents.sql"), encoding="utf-8").read())
     conn.commit()
-    ran = draftmigrations.apply(conn)   # 021 to 025, each only if still missing
+    ran = draftmigrations.apply(conn)   # 021 to 026, each only if still missing
     dropped, kept = [], []
     for old in ("form_fields", "form_sections", "automation_steps", "automation_catalog"):   # children before parents
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)).fetchone():

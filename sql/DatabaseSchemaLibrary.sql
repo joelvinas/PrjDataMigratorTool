@@ -801,3 +801,22 @@ CREATE TABLE emergency_field_results (
 );
 
 CREATE INDEX idx_emergency_results_table ON emergency_field_results(base_id, table_id, run_at);
+
+-- 23. The Core fields created by the Core fields in bulk page (migration 026)
+CREATE TABLE core_field_crosswalk (
+    crosswalk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production')),
+    airtable_field_id TEXT NOT NULL,       -- the field_id column of the upload (an Airtable field ID); several rows may share it
+    workfront_name TEXT NOT NULL,
+    workfront_label TEXT,
+    workfront_data_type TEXT NOT NULL,     -- CURC, DATE, NMBR or TEXT
+    workfront_display_type TEXT NOT NULL,  -- CHCK or TEXT
+    workfront_description TEXT,
+    workfront_is_required INTEGER NOT NULL DEFAULT 0 CHECK(workfront_is_required IN (0, 1)),
+    parameter_id TEXT NOT NULL,            -- the Core PARAM ID Workfront returned
+    last_update_date TEXT,                 -- the parameter's lastUpdateDate as Workfront reported it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (environment, parameter_id),
+    UNIQUE (environment, airtable_field_id, workfront_name)
+);
+CREATE INDEX idx_core_field_crosswalk_env ON core_field_crosswalk(environment, airtable_field_id);
