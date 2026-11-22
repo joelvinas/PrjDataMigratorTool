@@ -113,8 +113,11 @@ class Http(object):
         # error_text}. The path holds no query and the dict holds no header, token or request body. `record_text` False keeps the error CODE only (a record call's error text
         # could echo a value).
         self.recorder, self.record_text = None, True
+        # `record_full` True adds the whole (cleaned, at most MAX_BODY characters) text of a refused reply to its recorder entry as `response_text`, for a report that must show
+        # what Workfront said. Off by default, so every other report is unchanged.
+        self.record_full = False
 
-    def _record(self, method, path, status, t0, headers=None, request_id=None, error=None):
+    def _record(self, method, path, status, t0, headers=None, request_id=None, error=None, raw=None):
         if self.recorder is None:
             return
         rid = request_id
@@ -127,8 +130,11 @@ class Http(object):
         text = None
         if error:
             text = self.clean(error) if self.record_text else ("(text withheld: it may echo a record value)" if status else self.clean(error))
-        self.recorder({"method": method, "path": path, "status": status, "duration_ms": int((time.monotonic() - t0) * 1000), "request_id": str(rid)[:80] if rid else None,
-                       "error_code": code, "error_text": text})
+        entry = {"method": method, "path": path, "status": status, "duration_ms": int((time.monotonic() - t0) * 1000), "request_id": str(rid)[:80] if rid else None,
+                 "error_code": code, "error_text": text}
+        if self.record_full and raw is not None and status:
+            entry["response_text"] = lc.redact(lr.scrub(read_text(raw, headers)[0], MAX_BODY), self.secrets)
+        self.recorder(entry)
 
     def clean(self, text):
         return lc.redact(lr.scrub(text, 400), self.secrets)
@@ -155,14 +161,14 @@ class Http(object):
                 status, raw = e.code, e.read()
                 if 300 <= status < 400:
                     err = "The server answered with a redirect (%d), which is not followed so the credentials stay with the configured address." % status
-                    self._record(method, path, status, t0, e.headers, error=err)
+                    self._record(method, path, status, t0, e.headers, error=err, raw=raw)
                     raise HttpError(err, status)
                 if status not in RETRY_STATUS:
                     err = self._failure(status, raw, e.headers)
-                    self._record(method, path, status, t0, e.headers, error=err)
+                    self._record(method, path, status, t0, e.headers, error=err, raw=raw)
                     raise HttpError(err, status)
                 last = HttpError(self._failure(status, raw, e.headers), status)
-                self._record(method, path, status, t0, e.headers, error=str(last))
+                self._record(method, path, status, t0, e.headers, error=str(last), raw=raw)
             except (urllib.error.URLError, OSError) as e:
                 last = HttpError(self.clean("Could not reach the server: %s" % getattr(e, "reason", e)), None)
                 self._record(method, path, None, t0, error=str(last))
@@ -173,7 +179,7 @@ class Http(object):
                 try:
                     parsed = json.loads(read_text(raw, heads)[0])
                 except ValueError:
-                    self._record(method, path, status, t0, heads, error="The server's answer (HTTP %d) was not JSON." % status)
+                    self._record(method, path, status, t0, heads, error="The server's answer (HTTP %d) was not JSON." % status, raw=raw)
                     raise HttpError("The server's answer (HTTP %d) was not JSON." % status, status)
                 self._record(method, path, status, t0, heads, request_id=(parsed.get("requestId") if isinstance(parsed, dict) else None))
                 return parsed

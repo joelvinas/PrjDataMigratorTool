@@ -49,6 +49,9 @@ import loadrun
 import recordmap
 import tableload
 import coretargets
+import corefields
+import corefields_report
+import workfronthttp
 import emergency
 import emergency_report
 import extractcsv
@@ -5975,17 +5978,312 @@ def api_extract_csv(body):
 
 
 # --------------------------------------------------------------------------
+# Core bulk field creator (/corefields): a CSV of custom fields -> a grid -> a scan of Workfront Core -> POST /param per row, with a crosswalk and a reset. The logic is in
+# src/corefields.py; this is the session and the job layer. The grid lives in memory (one list for the whole app); the crosswalk is the table core_field_crosswalk (draft
+# migration 026) or, until it is applied, memory. Reports and the crosswalk CSV hold field metadata and IDs only: never a record value and never a credential.
+# --------------------------------------------------------------------------
+COREFIELDS_FILE_RE = re.compile(r"^CoreFields_[A-Za-z0-9_-]+\.mhtml$")
+CF = {"rows": [], "filename": "", "env": "", "scan": None, "reports": {}, "job": None, "mem": {}, "uploaded_at": None}
+_cf_lock = threading.RLock()
+
+
+def corefields_out_dir():
+    return os.path.join(BASE_DIR, "out", "corefields")
+
+
+class CoreFieldsJob:
+    def __init__(self, op, env, actor, reason, db_path):
+        self.id = str(int(time.time() * 1000))
+        self.op, self.env, self.actor, self.reason, self.db_path = op, env, actor, reason, db_path
+        self.status, self.error, self.progress, self.summary, self.report = "running", None, {}, {}, None
+        self.started_at, self.finished_at = utc_now(), None
+        self.cancel = threading.Event()
+
+    def set_progress(self, p):
+        self.progress = dict(p)
+
+
+def _cf_environments():
+    try:
+        data = loadconfig.read_config(CONFIG_PATH)
+    except loadconfig.ConfigError:
+        return []
+    st = loadconfig.status(data)["core"]
+    return [{"name": e, "configured": bool(st.get(e)), "production": e == "production"} for e in loadconfig.ENVIRONMENTS]
+
+
+def _cf_http(env, secrets):
+    """The HTTP client for one Core environment of config.json (base_url, api_path and the key). Plain AppError when it is not usable; never a secret in a message."""
+    if env not in loadconfig.ENVIRONMENTS:
+        raise AppError("Choose a Workfront environment from the list.")
+    try:
+        data = loadconfig.read_config(CONFIG_PATH)
+        creds = loadconfig.credentials(data, "core", env)
+    except loadconfig.ConfigError as e:
+        raise AppError(loadconfig.redact(str(e), secrets))
+    if creds is None:
+        raise AppError("The Core environment %s is not configured in config.json (workfront.core.%s needs base_url, api_path and api_key)." % (env, env))
+    if not creds.api_path:
+        raise AppError("The Core settings for %s in config.json need an api_path that holds the API version, for example /attask/api/v21.0." % env)
+    return workfronthttp.Http(creds, secrets)
+
+
+def _cf_actor(body, what):
+    actor = "".join(ch for ch in str(body.get("actor") or "") if ch >= " ").strip()[:80]
+    if not actor:
+        raise AppError("Enter your name before %s: it is written in the report." % what)
+    return actor
+
+
+def _cf_busy():
+    j = CF["job"]
+    return bool(j and j.status == "running")
+
+
+def _cf_set_env(env):
+    """Choosing another environment makes the scan stale: the per-row scan results are cleared, and a new scan is needed before anything is created."""
+    if env != CF["env"]:
+        CF["env"], CF["scan"] = env, None
+        for r in CF["rows"]:
+            r.update(parameterId="", lastUpdateDate="", status="", message="", checked=True)
+
+
+def _cf_crosswalk_entries(env):
+    try:
+        with db() as conn:
+            cw = corefields.Crosswalk(conn, CF["mem"])
+            return cw.entries(env), cw.persistent
+    except AppError:
+        return [], False
+
+
+def _cf_state():
+    job = CF["job"]
+    rows = [dict(r) for r in CF["rows"]]
+    entries, persistent = _cf_crosswalk_entries(CF["env"]) if CF["env"] else ([], False)
+    have = {(e["airtable_field_id"], e["workfront_name"]) for e in entries}
+    for r in rows:
+        r["in_crosswalk"] = (r["field_id"], r["name"]) in have
+    scan = CF["scan"]
+    complete = bool(scan and scan["env"] == CF["env"] and scan["complete"])
+    return {"filename": CF["filename"], "environment": CF["env"], "rows": rows, "scan": scan, "scan_complete": complete, "reports": dict(CF["reports"]),
+            "crosswalk_saved": persistent, "can_create": complete and not _cf_busy() and any(r["checked"] and not r["parameterId"] for r in rows),
+            "can_reset": not _cf_busy() and any(r["in_crosswalk"] for r in rows), "production_phrase": loadrun.PRODUCTION_PHRASE, "reset_phrase": corefields.RESET_PHRASE,
+            "job": None if not job else {"id": job.id, "op": job.op, "environment": job.env, "status": job.status, "error": job.error, "progress": job.progress, "summary": job.summary,
+                                        "started_at": job.started_at, "finished_at": job.finished_at, "report": job.report}}
+
+
+def api_corefields_setup(_q=None):
+    with _cf_lock:
+        try:
+            with db() as conn:
+                saved = corefields.table_exists(conn)
+            connected = True
+        except AppError:
+            saved, connected = False, False
+        return _lt_out({"environments": _cf_environments(), "db_connected": connected, "crosswalk_saved": saved, "header": corefields.HEADER, "data_types": list(corefields.DATA_TYPES),
+                        "display_types": list(corefields.DISPLAY_TYPES), "production_phrase": loadrun.PRODUCTION_PHRASE, "reset_phrase": corefields.RESET_PHRASE})
+
+
+def api_corefields_template(_q=None):
+    return (corefields.template_csv().encode("utf-8"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="core-fields-template.csv"'})
+
+
+def api_corefields_state(_q=None):
+    with _cf_lock:
+        return _lt_out(_cf_state())
+
+
+def api_corefields_upload(body):
+    """Read and validate the CSV. Any problem refuses the whole file (the answer lists every problem with its row); a good file replaces the grid and clears the scan."""
+    with _cf_lock:
+        if _cf_busy():
+            raise AppError("An operation is still running. Wait for it or cancel it before uploading another list.", 409)
+        rows, problems = corefields.parse_upload(body.get("csv_base64"))
+        if problems:
+            raise AppError("The file was not loaded: %d problem(s) found. Fix them and upload it again." % len(problems), 400, {"problems": problems[:200], "problem_count": len(problems)})
+        CF.update(rows=rows, filename=str(body.get("filename") or "")[:120], scan=None, reports={}, job=None, uploaded_at=utc_now())
+        return _lt_out(_cf_state())
+
+
+def api_corefields_environment(body):
+    with _cf_lock:
+        if _cf_busy():
+            raise AppError("An operation is still running.", 409)
+        env = str(body.get("environment") or "")
+        if env not in loadconfig.ENVIRONMENTS:
+            raise AppError("Choose a Workfront environment from the list.")
+        _cf_set_env(env)
+        return _lt_out(_cf_state())
+
+
+def api_corefields_select(body):
+    """Tick or untick rows. `checked` is {row number: true/false}; `all` ticks or unticks every row that has no parameterId. A row that already has a parameterId cannot be ticked."""
+    with _cf_lock:
+        if _cf_busy():
+            raise AppError("An operation is still running.", 409)
+        by_n = {r["n"]: r for r in CF["rows"]}
+        if isinstance(body.get("all"), bool):
+            for r in CF["rows"]:
+                r["checked"] = body["all"] and not r["parameterId"]
+        for k, v in (body.get("checked") or {}).items():
+            r = by_n.get(int(k)) if str(k).isdigit() else None
+            if r is not None and isinstance(v, bool):
+                r["checked"] = v and not r["parameterId"]
+        return _lt_out(_cf_state())
+
+
+def _cf_write_report(job, status, rows, log, notes):
+    secrets = _lt_secrets()
+    redact = lambda t: scrub(loadconfig.redact(t, secrets))
+    return corefields_report.write_report({"op": job.op, "env": job.env, "actor": job.actor, "reason": job.reason, "started_at": job.started_at, "finished_at": job.finished_at, "status": status,
+                                           "error": job.error, "summary": job.summary, "rows": rows, "entries": log.entries, "notes": notes}, corefields_out_dir(), to_mhtml, REPORT_CSS, redact)
+
+
+def _run_corefields_job(job):
+    secrets = _lt_secrets()
+    log = corefields.CallLog()
+    rows = CF["rows"]
+    notes = []
+    final = "failed"                                          # job.status stays "running" until the report is written, so a poll never sees "done" without its report
+    try:
+        http = _cf_http(job.env, secrets)
+        http.recorder, http.record_full = log, True
+        with db(job.db_path) as conn:
+            cw = corefields.Crosswalk(conn, CF["mem"])
+            if not cw.persistent:
+                notes.append("The crosswalk table core_field_crosswalk is not in this database yet (draft migration 026), so crosswalk rows are kept in memory until the app stops. Download the crosswalk CSV before then.")
+            if job.op == "scan":
+                job.summary = corefields.scan(rows, http, log, job.cancel.is_set, job.set_progress)
+                CF["scan"] = {"env": job.env, "complete": True, "at": utc_now(), "found": job.summary["found"]} if job.summary["complete"] else None
+            elif job.op == "create":
+                job.summary = corefields.create(rows, job.env, http, cw, log, job.cancel.is_set, job.set_progress)
+            else:
+                job.summary = corefields.reset(rows, job.env, http, cw, log, job.cancel.is_set, job.set_progress)
+                CF["scan"] = None                            # what exists in Workfront changed: the next create needs a fresh scan
+        s = job.summary
+        final = "cancelled" if s.get("cancelled") else ("stopped on error" if s.get("error") else "done")
+        if s.get("error"):
+            job.error = "Stopped at row %s (%s): %s" % (s["error"]["row"], s["error"]["name"], s["error"]["message"])
+    except AppError as e:
+        job.error = loadconfig.redact(e.message, secrets)
+    except Exception as e:
+        job.error = "Unexpected error: " + loadconfig.redact(loadrun.scrub(e), secrets)
+        print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+    finally:
+        job.finished_at = utc_now()
+        try:
+            job.report = _cf_write_report(job, final, [dict(r) for r in rows], log, notes)
+            CF["reports"][job.op] = job.report
+        except Exception as e:                                # the report is the record of what was sent: say so loudly if it cannot be written
+            job.error = ((job.error + " ") if job.error else "") + "The report could not be written: " + loadconfig.redact(loadrun.scrub(e), secrets)
+            print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+        job.status = final                                    # last: the report and the finish time are already in place
+
+
+def _cf_start(op, body):
+    with _cf_lock:
+        if _cf_busy():
+            raise AppError("An operation is already running. Wait for it or cancel it.", 409)
+        if not CF["rows"]:
+            raise AppError("Upload a list of fields first.")
+        secrets = _lt_secrets()
+        env = str(body.get("environment") or CF["env"] or "")
+        _cf_http(env, secrets)                                # refuses an environment that is not configured, before anything is queued
+        actor, reason = "", ""
+        if op in ("create", "reset"):
+            actor = _cf_actor(body, "creating fields" if op == "create" else "resetting fields")
+        if op == "scan":
+            if body.get("scan_ok") is not True:
+                raise AppError("Confirm that Workfront may be scanned before anything is sent.")
+        elif op == "create":
+            scan = CF["scan"]
+            if not (scan and scan["env"] == env and scan["complete"]):
+                raise AppError("Scan Workfront first (CHECK FIELDS): creating is locked until a scan of %s has completed." % env)
+            if not any(r["checked"] and not r["parameterId"] for r in CF["rows"]):
+                raise AppError("No ticked row is waiting to be created.")
+            if env == "production" and body.get("confirm_phrase") != loadrun.PRODUCTION_PHRASE:
+                raise AppError("Production needs a deliberate extra step: type %s exactly." % loadrun.PRODUCTION_PHRASE)
+        else:
+            if body.get("confirm") is not True:
+                raise AppError("Tick Confirm to unlock the reset before it runs.")
+            reason = " ".join(str(body.get("reason") or "").split())[:300]
+            if len(reason) < 3:
+                raise AppError("Say why you are resetting these fields: the reason is written in the report.")
+            if env == "production" and body.get("confirm_phrase") != corefields.RESET_PHRASE:
+                raise AppError("Resetting in production needs a deliberate extra step: type %s exactly." % corefields.RESET_PHRASE)
+            entries, _persistent = _cf_crosswalk_entries(env)
+            have = {(e["airtable_field_id"], e["workfront_name"]) for e in entries}
+            if not any((r["field_id"], r["name"]) in have for r in CF["rows"]):
+                raise AppError("None of the listed fields was created by this tool in %s, so there is nothing to reset. (A field that already existed in Workfront is never deleted here.)" % env)
+        _cf_set_env(env)
+        job = CoreFieldsJob(op, env, actor, reason, STATE["db_path"])
+        CF["job"] = job
+    threading.Thread(target=_run_corefields_job, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id}
+
+
+def api_corefields_scan(body):
+    return _cf_start("scan", body)
+
+
+def api_corefields_create(body):
+    return _cf_start("create", body)
+
+
+def api_corefields_reset(body):
+    return _cf_start("reset", body)
+
+
+def api_corefields_cancel(_body=None):
+    job = CF["job"]
+    if not job or job.status != "running":
+        raise AppError("Nothing is running.")
+    job.cancel.set()
+    return {"cancelling": True}
+
+
+def api_corefields_crosswalk(q):
+    """The crosswalk CSV: the listed fields in file order, then any other crosswalk row of the environment. Available at any time after an upload."""
+    with _cf_lock:
+        env = CF["env"] or (q.get("environment") or [""])[0]
+        if env not in loadconfig.ENVIRONMENTS:
+            raise AppError("Choose a Workfront environment first.")
+        secrets = _lt_secrets()
+        names = {b.get("baseId"): b.get("name") or "" for b in (load_config()[0].get("bases") or [])}
+        with db() as conn:
+            cw = corefields.Crosswalk(conn, CF["mem"])
+            entries = cw.entries(env)
+            info = corefields.airtable_info(conn, {r["field_id"] for r in CF["rows"]} | {e["airtable_field_id"] for e in entries}, names)
+        data = corefields.crosswalk_csv(CF["rows"], env, entries, info, lambda t: loadconfig.redact(t, secrets))
+        return (data, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="core-fields-crosswalk_%s_%s.csv"' % (env, _stamp())})
+
+
+def api_corefields_report(q):
+    """One report by plain file name, from out/corefields (never a path)."""
+    name = (q.get("file") or [""])[0]
+    if not COREFIELDS_FILE_RE.match(name):
+        raise AppError("Not a report file name.", 404)
+    path = os.path.join(corefields_out_dir(), name)
+    if not os.path.isfile(path):
+        raise AppError("That report file does not exist (it may have been deleted).", 404)
+    with open(path, "rb") as f:
+        data = f.read()
+    return (data, "application/x-mimearchive", {"Content-Disposition": 'attachment; filename="%s"' % name})
+
+
+# --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
 HTML ="text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("pages/setup.html", HTML), "/setup": ("pages/setup.html", HTML),
-          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML), "/emergency": ("pages/emergency.html", HTML), "/extractcsv": ("pages/extractcsv.html", HTML),
+          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML), "/emergency": ("pages/emergency.html", HTML), "/corefields": ("pages/corefields.html", HTML), "/extractcsv": ("pages/extractcsv.html", HTML),
           "/log": ("pages/log.html", HTML),
           "/style.css": ("css/style.css", "text/css; charset=utf-8"),
           "/common.js": ("js/common.js", JS), "/setup.js": ("js/setup.js", JS),
-          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/emergency.js": ("js/emergency.js", JS), "/extractcsv.js": ("js/extractcsv.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
+          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/emergency.js": ("js/emergency.js", JS), "/corefields.js": ("js/corefields.js", JS), "/extractcsv.js": ("js/extractcsv.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
@@ -6006,11 +6304,15 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/export/automation_usage.csv": api_export_automation_usage, "/api/export/automation_links.csv": api_export_automation_links,
               "/api/names/review": api_names_review, "/api/datatypes/review": api_datatypes_review, "/api/lookups/review": api_lookups_review, "/api/names/report": api_names_report,
               "/api/names/import-template.csv": api_names_import_template, "/api/names/export.csv": api_names_export,"/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml,
+              "/api/corefields/setup": api_corefields_setup, "/api/corefields/state": api_corefields_state, "/api/corefields/template.csv": api_corefields_template,
+              "/api/corefields/crosswalk.csv": api_corefields_crosswalk, "/api/corefields/report": api_corefields_report,
               "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
-               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
+               "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/corefields/upload": api_corefields_upload, "/api/corefields/environment": api_corefields_environment, "/api/corefields/select": api_corefields_select,
+               "/api/corefields/scan": api_corefields_scan, "/api/corefields/create": api_corefields_create, "/api/corefields/reset": api_corefields_reset, "/api/corefields/cancel": api_corefields_cancel,
+               "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/lookups/assign": api_lookups_assign, "/api/lookups/unassign": api_lookups_unassign, "/api/lookups/rename": api_lookups_rename, "/api/lookups/delete": api_lookups_delete, "/api/datatypes/default": api_datatypes_default,

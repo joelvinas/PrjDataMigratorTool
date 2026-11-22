@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Core fields in bulk - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="corefields">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="uploadCard">
+  <h2>Core fields in bulk</h2>
+  <p class="hint">Create Workfront Core custom fields (parameters) from a CSV. The columns are <code>field_id, name, label, dataType, displayType, description, isRequired</code>, spelled exactly like that. One <code>field_id</code> (an Airtable field ID) may appear on several rows. Every row is checked on upload: names must be unique and free of characters Workfront does not allow, <code>dataType</code> is one of CURC, DATE, NMBR, TEXT and <code>displayType</code> is one of CHCK, TEXT (capitals). One bad row refuses the whole file, and the problems are listed.</p>
+  <p class="hint">Order of work: <strong>1</strong> choose the environment and enter your name, <strong>2</strong> upload the list, <strong>3</strong> CHECK FIELDS (a read-only scan of Workfront for names that already exist), <strong>4</strong> CREATE NEW FIELDS. Creating stays locked until a scan has completed. Each environment is a section of <code>config.json</code> (<code>workfront.core</code>).</p>
+  <div class="row">
+    <label for="envSel">Workfront environment</label>
+    <select id="envSel"><option value="">Choose an environment...</option></select>
+    <label for="actor">Your name</label>
+    <input id="actor" type="text" maxlength="80" autocomplete="off" placeholder="Written in the reports">
+  </div>
+  <div class="row">
+    <label for="csvFile">CSV file</label>
+    <input id="csvFile" type="file" accept=".csv,text/csv">
+    <button id="btnUpload" type="button" class="primary" disabled>Upload and validate</button>
+    <a href="/api/corefields/template.csv" download>Download the template</a>
+  </div>
+  <div id="pageMessage" class="msg" aria-live="polite"></div>
+  <div id="problemWin" class="tablewin" hidden><table id="problemGrid" class="grid compact">
+    <thead><tr><th class="num">File row</th><th>Column</th><th>Problem</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" id="gridCard" hidden>
+  <h2>Fields to create <span id="gridCount" class="hint"></span></h2>
+  <div class="row">
+    <button id="btnCheck" type="button" class="primary" disabled>CHECK FIELDS</button>
+    <button id="btnAll" type="button">Tick all</button>
+    <button id="btnNone" type="button">Untick all</button>
+    <span id="scanNote" class="hint" aria-live="polite"></span>
+  </div>
+  <div class="tablewin" id="fieldWin"><table id="fieldGrid" class="grid compact">
+    <thead><tr><th>Create</th><th class="num">Row</th><th>field_id</th><th>name</th><th>label</th><th>dataType</th><th>displayType</th><th>description</th><th>isRequired</th><th>parameterId</th><th>lastUpdateDate</th><th>Status</th></tr></thead><tbody></tbody>
+  </table></div>
+  <div class="row">
+    <button id="btnCreate" type="button" class="primary" disabled>CREATE NEW FIELDS</button>
+    <span id="createPhraseBox" hidden><label for="createPhrase">Type CREATE IN PRODUCTION to allow it</label> <input id="createPhrase" type="text" autocomplete="off"></span>
+    <button id="btnCancel" type="button" hidden>Cancel</button>
+    <span id="progress" class="hint" aria-live="polite"></span>
+  </div>
+  <div class="row">
+    <label for="resetConfirm"><input id="resetConfirm" type="checkbox"> Confirm: unlock RESET</label>
+    <button id="btnReset" type="button" disabled>RESET listed fields</button>
+    <label for="resetReason">Reason</label>
+    <input id="resetReason" type="text" maxlength="300" autocomplete="off" placeholder="Written in the reset report">
+    <span id="resetPhraseBox" hidden><label for="resetPhrase">Type DELETE FIELDS IN PRODUCTION to allow it</label> <input id="resetPhrase" type="text" autocomplete="off"></span>
+  </div>
+  <p class="hint">RESET deletes, one at a time from the top, each listed field that <strong>this tool created</strong> in the chosen environment (the crosswalk says which), then removes its crosswalk row. A field that was already in Workfront when it was scanned is never deleted. It stops at the first error. A new CHECK FIELDS is needed afterwards.</p>
+  <div id="resultMsg" class="msg" aria-live="polite"></div>
+  <p id="downloads" class="hint"></p>
+  <p id="crosswalkNote" class="hint"></p>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/corefields.js"></script>
+</body>
+</html>
