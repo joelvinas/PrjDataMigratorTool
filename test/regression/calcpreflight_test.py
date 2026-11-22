@@ -56,7 +56,7 @@ R = rows(r1)
 check("the abandoned formula is left out; the others are all there", sorted(R) == ["fldBad", "fldBroken", "fldComm", "fldDep", "fldDepBad", "fldLoop1", "fldLoop2", "fldMiss", "fldNoName"], sorted(R))
 c = R["fldComm"]
 check("the commission formula is translatable with its expression and type", c[0] == "TRANSLATABLE" and c[2] == "{DE:base_price}*0.15" and c[4] == "SalesPersonCommission" and c[5] == "NMBR", c)
-check("a translatable item notes the displayType that is not known yet", "displayType" in c[1] and c[6] is None, c)
+check("a calculated field gets the displayType CALC", c[6] == "CALC" and "displayType" not in (c[1] or ""), c)
 check("a formula that reads a formula is ordered after it", R["fldDep"][0] == "TRANSLATABLE" and R["fldDep"][3] > c[3] and R["fldDep"][2] == "{DE:SalesPersonCommission}+1", (R["fldDep"], c[3]))
 check("an unsupported unit is BLOCKED_UNSUPPORTED_FUNCTION", R["fldBad"][0] == "BLOCKED_UNSUPPORTED_FUNCTION" and "months" in R["fldBad"][1] and R["fldBad"][2] is None, R["fldBad"])
 check("reading a blocked formula is BLOCKED_DEPENDENCY, naming it", R["fldDepBad"][0] == "BLOCKED_DEPENDENCY" and "Months" in R["fldDepBad"][1], R["fldDepBad"])
@@ -138,7 +138,7 @@ r6 = cpf.run(conn, ENV, B, "tblMore", "CAT3", "More", "JV")
 R6 = rows(r6)
 check("a data type that differs from the existing field is a conflict", R6["fldMm"][0] == "BLOCKED_MISSING_REFERENCE" and "TEXT" in R6["fldMm"][1] and "NMBR" in R6["fldMm"][1], R6["fldMm"])
 check("two formulas of one table with one name both conflict", R6["fldD1"][0] == R6["fldD2"][0] == "BLOCKED_MISSING_REFERENCE" and "share the name" in R6["fldD1"][1], (R6["fldD1"], R6["fldD2"]))
-check("a person's displayType is used, and the dataType comes from the result type", R6["fldTx"][0] == "TRANSLATABLE" and R6["fldTx"][5] == "TEXT" and R6["fldTx"][6] == "TEXT", R6["fldTx"])
+check("a displayType chosen for ordinary fields is ignored: CALC, and the dataType comes from the result type", R6["fldTx"][0] == "TRANSLATABLE" and R6["fldTx"][5] == "TEXT" and R6["fldTx"][6] == "CALC", R6["fldTx"])
 
 # ---- refusals
 for args, word in (((conn, "nowhere", B, SP, "CAT1", "x", "JV"), "environment"), ((conn, ENV, B, SP, "bad id!", "x", "JV"), "custom form"), ((conn, ENV, B, "tblNone", "CAT1", "x", "JV"), "no formula"),

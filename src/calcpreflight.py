@@ -14,8 +14,8 @@ itself blocked or part of a loop (BLOCKED_DEPENDENCY); a referenced field has no
 a field already in Core (BLOCKED_MISSING_REFERENCE; a conflict says "Target field conflict" in the reason, because migration 027 has no fifth status); otherwise TRANSLATABLE.
 "Exists in Core" means a row in core_field_crosswalk (made or scanned by the Core fields page) or calc_formula_crosswalk; this module does not ask Workfront.
 
-Provisional (owner, 22 November 2026): the calculated field's displayType is not known yet, so CALC_DISPLAY_TYPE is None and every translatable item says so in its notes; a person's
-choice on the Data types page (field_names.core_display_type) is used when present. The result type comes from the formula's result_type through RESULT_TYPES unless a person set a type.
+The displayType of a calculated field is CALC (owner, 22 November 2026: "generally"; provisional until a sandbox test). It is always CALC here: a displayType a person chose on the Data
+types page is for ordinary fields, and CALC is not on that list. The dataType comes from the formula's result_type through RESULT_TYPES unless a person set a Core type.
 """
 import hashlib
 import json
@@ -33,7 +33,7 @@ TABLES = ("calc_preflight_runs", "calc_preflight_items", "calc_formula_crosswalk
 # Airtable result type of a formula -> Core dataType (CURC, DATE, DTTM, NMBR, RICH, TEXT). Provisional until tested with a calculated field in a sandbox.
 RESULT_TYPES = {"number": "NMBR", "percent": "NMBR", "rating": "NMBR", "duration": "NMBR", "currency": "CURC", "singleLineText": "TEXT", "multilineText": "TEXT", "email": "TEXT",
                 "url": "TEXT", "phoneNumber": "TEXT", "singleSelect": "TEXT", "date": "DATE", "dateTime": "DTTM"}
-CALC_DISPLAY_TYPE = None   # the displayType of a calculated field: not yet known (owner is asking Workfront); None means "not set", so the push must wait
+CALC_DISPLAY_TYPE = "CALC"   # the displayType of a calculated field (owner, 22 November 2026: "generally CALC"); provisional until a sandbox test
 CONFLICT = "Target field conflict: "
 
 
@@ -187,11 +187,9 @@ def run(conn, environment, base_id, table_id, category_id, category_name, actor,
             continue
         notes = list(f["tr"].warnings)
         ctype = f["core_target_type"] or RESULT_TYPES.get(f["result_type"] or "")
-        cdisp = f["core_display_type"] or CALC_DISPLAY_TYPE
+        cdisp = CALC_DISPLAY_TYPE
         if not ctype:
             notes.append("No Core dataType could be chosen for the result type '%s'; set one on the Data types page." % (f["result_type"] or "unknown"))
-        if not cdisp:
-            notes.append("The displayType of a calculated field is not known yet; the push needs it.")
         f["ctype"], f["cdisp"], f["reuse"] = ctype, cdisp, None
         problem = ""
         if len(same[f["target"]]) > 1:
