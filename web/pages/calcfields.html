@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calculated fields - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="calcfields">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="startCard">
+  <h2>Calculated fields: preflight</h2>
+  <p class="hint">Translates the Airtable formula fields of one table into Workfront Core calculated field expressions and reports what can and cannot be translated. <strong>This page only reads the schema and the crosswalks and saves its answer; it sends nothing to Workfront.</strong> Creating the fields and writing the expressions is a separate, later step that works from the run you approve here.</p>
+  <p class="hint">A formula field is translated only when every field it reads has a target in the crosswalk (made on <a href="/corefields">Core fields in bulk</a>) and it has an approved Core name on <a href="/names">Field names</a>. Several formula fields that share one approved Core name become ONE Core field, placed on each form with that form's own expression. A calculated field gets the displayType <code id="displayTypeNote">CALC</code>. The translations are provisional until each function has been tried in a sandbox.</p>
+  <div class="row">
+    <label for="envSel">Core environment</label>
+    <select id="envSel"><option value="">Choose an environment...</option></select>
+    <label for="tableSel">Table</label>
+    <select id="tableSel"><option value="">Choose a table...</option></select>
+  </div>
+  <div class="row">
+    <label for="categoryId">Custom form (category) ID</label>
+    <input id="categoryId" type="text" maxlength="64" autocomplete="off" placeholder="The CTGY ID of the form">
+    <label for="categoryName">Form name</label>
+    <input id="categoryName" type="text" maxlength="120" autocomplete="off" placeholder="For the report (optional)">
+  </div>
+  <div class="row">
+    <label for="actor">Your initials</label>
+    <input id="actor" type="text" maxlength="40" autocomplete="off" placeholder="Saved with the run">
+    <button id="btnRun" type="button" class="primary" disabled>Run preflight</button>
+    <span id="runNote" class="hint" aria-live="polite"></span>
+  </div>
+  <div id="pageMessage" class="msg" aria-live="polite"></div>
+</section>
+
+<section class="card" id="runsCard" hidden>
+  <h2>Earlier runs for this table</h2>
+  <div class="tablewin" id="runsWin"><table id="runsGrid" class="grid compact">
+    <thead><tr><th class="num">Run</th><th>When (UTC)</th><th>By</th><th>Environment</th><th>Form</th><th>State</th><th class="num">Can translate</th><th class="num">Blocked</th><th>Open</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" id="reportCard" hidden>
+  <h2>Report <span id="reportTitle" class="hint"></span></h2>
+  <div id="counts" class="row"></div>
+  <div id="driftNote" class="banner warn" hidden></div>
+  <p class="hint"><a id="csvLink" href="#" download>Download this report as a CSV</a> (formula and expression text, no record data).</p>
+
+  <h3>Can be translated <span id="okCount" class="hint"></span></h3>
+  <p class="hint">In the order the work must be done: a formula comes after the formulas it reads. Check each expression against the Airtable formula before approving.</p>
+  <div class="tablewin" id="okWin"><table id="okGrid" class="grid compact">
+    <thead><tr><th class="num">Order</th><th>Airtable field</th><th>Core field</th><th>dataType</th><th>displayType</th><th>Airtable formula</th><th>Workfront expression</th><th>Notes</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+
+  <h3>Missing reference or Core name <span id="missCount" class="hint"></span></h3>
+  <p class="hint">Fix by building or naming fields: a field the formula reads has no target in the crosswalk, the formula has no approved Core name, or its target field conflicts with a field already in Core.</p>
+  <div class="tablewin" id="missWin"><table id="missGrid" class="grid compact">
+    <thead><tr><th>Airtable field</th><th>Airtable formula</th><th>Reason</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+
+  <h3>Unsupported function <span id="unsCount" class="hint"></span></h3>
+  <p class="hint">Fix by hand: the formula uses something with no verified Workfront equivalent, or Airtable reports it as not valid.</p>
+  <div class="tablewin" id="unsWin"><table id="unsGrid" class="grid compact">
+    <thead><tr><th>Airtable field</th><th>Airtable formula</th><th>Reason</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+
+  <h3>Depends on a blocked formula <span id="depCount" class="hint"></span></h3>
+  <p class="hint">Clears itself once the formula it reads is fixed (or when a loop between formulas is broken).</p>
+  <div class="tablewin" id="depWin"><table id="depGrid" class="grid compact">
+    <thead><tr><th>Airtable field</th><th>Airtable formula</th><th>Reason</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+
+  <h3>Functions found in these formulas</h3>
+  <div class="tablewin" id="fnWin"><table id="fnGrid" class="grid compact">
+    <thead><tr><th>Function</th><th class="num">Calls</th><th class="num">Formulas</th><th>Translated</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" id="approveCard" hidden>
+  <h2>Approval</h2>
+  <p id="approveState" class="hint"></p>
+  <div class="row">
+    <label for="approveReason">Reason</label>
+    <input id="approveReason" type="text" maxlength="500" autocomplete="off" placeholder="Why this run is right to push">
+    <span id="approveWrap" class="tipwrap"><button id="btnApprove" type="button" class="primary" disabled>Approve this run</button></span>
+  </div>
+  <p class="hint">Approving saves your initials, the time and the reason on the run. It sends nothing. If the schema or the crosswalk has changed since the run, approval is refused and a new preflight is needed.</p>
+  <div id="approveMsg" class="msg" aria-live="polite"></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/calcfields.js"></script>
+</body>
+</html>
