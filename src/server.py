@@ -51,7 +51,9 @@ import tableload
 import coretargets
 import corefields
 import corefields_report
+import calcforms
 import calcpreflight
+import calcpush
 import workfronthttp
 import emergency
 import emergency_report
@@ -6433,7 +6435,8 @@ def api_calcfields_setup(_q=None):
         if e.status == 409:
             raise
         tables, connected = [], False
-    return {"db_connected": connected, "tables": tables, "environments": list(loadconfig.ENVIRONMENTS), "display_type": calcpreflight.CALC_DISPLAY_TYPE}
+    return {"db_connected": connected, "tables": tables, "environments": list(loadconfig.ENVIRONMENTS), "display_type": calcpreflight.CALC_DISPLAY_TYPE, "forms": CALC["forms"],
+            "forms_filename": CALC["forms_filename"], "forms_at": CALC["forms_at"], "production_phrase": loadrun.PRODUCTION_PHRASE}
 
 
 def api_calcfields_preflight(body):
@@ -6442,9 +6445,14 @@ def api_calcfields_preflight(body):
     table = str(body.get("table_id") or "")
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table.")
-    name = "".join(ch for ch in str(body.get("category_name") or "") if ch >= " ").strip()[:120]
+    cid = str(body.get("category_id") or "").strip()
+    listed = {f["category_id"]: f["name"] for f in CALC["forms"]}
+    if not listed:
+        raise AppError("Upload the list of valid forms first: the form must be chosen from it.", 409)
+    if cid not in listed:
+        raise AppError("That form is not on the list of valid forms. Choose one from the list, or upload a list that holds it.", 409)
     with db() as conn:
-        run_id = _cp(calcpreflight.run, conn, str(body.get("environment") or ""), base, table, str(body.get("category_id") or "").strip(), name, body.get("actor"))
+        run_id = _cp(calcpreflight.run, conn, str(body.get("environment") or ""), base, table, cid, listed[cid], body.get("actor"))
         return {"run_id": run_id, "report": _cp(calcpreflight.report, conn, run_id), "drift": _cp(calcpreflight.drift, conn, run_id)}
 
 
@@ -6493,6 +6501,153 @@ def api_calcfields_report_csv(q):
     return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="calculated-fields-run%d_%s.csv"' % (run_id, _stamp())})
 
 
+# ---- the list of valid forms, and the push
+# The list of valid custom forms is held in memory (one list for the whole app, like the Core fields grid): upload it again after the app restarts. The tool reads or writes only a
+# form whose ID is on it. The push runs as a background job with progress and Cancel; every Workfront call it makes is logged in calc_push_log.
+CALC = {"forms": [], "forms_filename": "", "forms_at": None, "job": None}
+_calc_lock = threading.RLock()
+
+
+def _calc_form_ids():
+    return [f["category_id"] for f in CALC["forms"]]
+
+
+class CalcPushJob:
+    def __init__(self, run_id, env, actor, item_ids, db_path):
+        self.id = str(int(time.time() * 1000))
+        self.run_id, self.env, self.actor, self.item_ids, self.db_path = run_id, env, actor, item_ids, db_path
+        self.status, self.error, self.progress, self.summary = "running", None, {}, {}
+        self.started_at, self.finished_at = utc_now(), None
+        self.cancel = threading.Event()
+
+    def set_progress(self, p):
+        self.progress = dict(p)
+
+
+def api_calcfields_forms_template(_q=None):
+    return (calcforms.template_csv().encode("utf-8"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="valid-forms-template.csv"'})
+
+
+def api_calcfields_forms_upload(body):
+    """Read and validate the CSV of valid forms (category_id, name). Any problem refuses the whole file and lists every problem with its row; a good file replaces the list."""
+    forms, problems = calcforms.parse_upload(body.get("csv_base64"))
+    if problems:
+        raise AppError("The file was not loaded: %d problem(s) found. Fix them and upload it again." % len(problems), 400, {"problems": problems[:200], "problem_count": len(problems)})
+    with _calc_lock:
+        CALC.update(forms=forms, forms_filename=str(body.get("filename") or "")[:120], forms_at=utc_now())
+        return {"forms": forms, "filename": CALC["forms_filename"], "uploaded_at": CALC["forms_at"]}
+
+
+def _calc_push_busy():
+    j = CALC["job"]
+    return bool(j and j.status == "running")
+
+
+def api_calcfields_form_check(body):
+    """One read-only GET of the form of a saved run, to see that it exists in Workfront and what it is called. Only a form on the list of valid forms can be read, and the call is
+    written to the push log of that run. Needs the person's confirmation: it does contact Workfront."""
+    if body.get("confirm") is not True:
+        raise AppError("Confirm that Workfront may be read before anything is sent.")
+    with db() as conn:
+        run_id = _calc_run_id(body)
+        run = _cp(calcpreflight._run_row, conn, run_id)
+        listed = {f["category_id"]: f["name"] for f in CALC["forms"]}
+        if run["category_id"] not in listed:
+            raise AppError("The form %s is not on the list of valid forms. Upload the list that holds it first." % run["category_id"], 409)
+        secrets = _lt_secrets()
+        http = _cf_http(run["environment"], secrets)
+        log = calcpush.CallLog(conn, run_id)
+        http.recorder = log
+        log.set("check_form")
+        try:
+            form = calcpush.read_form(http, run["category_id"])
+        except workfronthttp.HttpError as e:
+            raise AppError(loadconfig.redact(str(e), secrets), 502)
+        except calcpush.PushError as e:
+            raise AppError(e.message, e.status)
+    return _lt_out({"run_id": run_id, "category_id": run["category_id"], "environment": run["environment"], "found_name": form["name"], "listed_name": listed[run["category_id"]],
+                    "name_matches": form["name"].strip().casefold() == listed[run["category_id"]].strip().casefold(), "fields_on_form": len(form["associations"])})
+
+
+def calcfields_out_dir():
+    return os.path.join(BASE_DIR, "out", "calcfields")
+
+
+def _calc_backup(run, raw):
+    """Keep the form as it was read before the update (IDs, names and the settings of each field on it: metadata only), in out/calcfields."""
+    os.makedirs(calcfields_out_dir(), exist_ok=True)
+    path = os.path.join(calcfields_out_dir(), "FormBackup_run%d_%s_%s.json" % (run["run_id"], run["category_id"], datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=1, sort_keys=True)
+
+
+def _run_calc_push(job):
+    secrets = _lt_secrets()
+    final = "failed"                                      # job.status stays "running" until everything is written, so a poll never sees "done" early
+    try:
+        http = _cf_http(job.env, secrets)
+        with db(job.db_path) as conn:
+            job.summary = calcpush.push(conn, job.run_id, http, _calc_form_ids(), job.cancel.is_set, job.set_progress, job.item_ids, backup=_calc_backup)
+        s = job.summary
+        final = "cancelled" if s.get("cancelled") else ("stopped on error" if s.get("fatal") else "done")
+        if s.get("fatal"):
+            job.error = "Stopped: " + s["fatal"]
+    except calcpush.PushError as e:
+        job.error = loadconfig.redact(e.message, secrets)
+    except AppError as e:
+        job.error = loadconfig.redact(e.message, secrets)
+    except Exception as e:
+        job.error = "Unexpected error: " + loadconfig.redact(loadrun.scrub(e), secrets)
+        print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+    finally:
+        job.finished_at = utc_now()
+        job.status = final
+
+
+def api_calcfields_push(body):
+    """Start the push of an approved run (or resume one: only what is not done is sent; item_ids limits a retry to those items)."""
+    with _calc_lock:
+        if _calc_push_busy():
+            raise AppError("A push is already running. Wait for it or cancel it.", 409)
+        if body.get("confirm") is not True:
+            raise AppError("Confirm the push before anything is sent.")
+        actor = "".join(ch for ch in str(body.get("actor") or "") if ch >= " ").strip()[:40]
+        if not actor:
+            raise AppError("Enter your initials before pushing: they are recorded.")
+        item_ids = body.get("item_ids")
+        if item_ids is not None and not (isinstance(item_ids, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in item_ids)):
+            raise AppError("The items to retry must be a list of numbers.")
+        with db() as conn:
+            run_id = _calc_run_id(body)
+            try:
+                run = calcpush.check_ready(conn, run_id, _calc_form_ids())
+            except calcpush.PushError as e:
+                raise AppError(e.message, e.status)
+        _cf_http(run["environment"], _lt_secrets())          # refuses an environment that is not configured, before anything is queued
+        if run["environment"] == "production" and body.get("confirm_phrase") != loadrun.PRODUCTION_PHRASE:
+            raise AppError("Production needs a deliberate extra step: type %s exactly." % loadrun.PRODUCTION_PHRASE)
+        job = CalcPushJob(run_id, run["environment"], actor, item_ids, STATE["db_path"])
+        CALC["job"] = job
+    threading.Thread(target=_run_calc_push, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id}
+
+
+def api_calcfields_push_status(_q=None):
+    j = CALC["job"]
+    if j is None:
+        return {"job": None}
+    return _lt_out({"job": {"id": j.id, "run_id": j.run_id, "environment": j.env, "actor": j.actor, "status": j.status, "error": j.error, "progress": j.progress, "summary": j.summary,
+                            "started_at": j.started_at, "finished_at": j.finished_at}})
+
+
+def api_calcfields_push_cancel(_body=None):
+    j = CALC["job"]
+    if not j or j.status != "running":
+        raise AppError("Nothing is running.")
+    j.cancel.set()
+    return {"cancelling": True}
+
+
 HTML ="text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
@@ -6525,13 +6680,14 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/import-template.csv": api_names_import_template, "/api/names/export.csv": api_names_export,"/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml,
               "/api/corefields/setup": api_corefields_setup, "/api/corefields/state": api_corefields_state, "/api/corefields/template.csv": api_corefields_template,
               "/api/corefields/crosswalk.csv": api_corefields_crosswalk, "/api/corefields/report": api_corefields_report,
-              "/api/calcfields/setup": api_calcfields_setup, "/api/calcfields/runs": api_calcfields_runs, "/api/calcfields/report": api_calcfields_report, "/api/calcfields/report.csv": api_calcfields_report_csv,
+              "/api/calcfields/setup": api_calcfields_setup, "/api/calcfields/forms/template.csv": api_calcfields_forms_template, "/api/calcfields/push/status": api_calcfields_push_status, "/api/calcfields/runs": api_calcfields_runs, "/api/calcfields/report": api_calcfields_report, "/api/calcfields/report.csv": api_calcfields_report_csv,
               "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/corefields/upload": api_corefields_upload, "/api/corefields/environment": api_corefields_environment, "/api/corefields/select": api_corefields_select,
-               "/api/calcfields/preflight": api_calcfields_preflight, "/api/calcfields/approve": api_calcfields_approve,
+               "/api/calcfields/preflight": api_calcfields_preflight, "/api/calcfields/forms/upload": api_calcfields_forms_upload, "/api/calcfields/form/check": api_calcfields_form_check,
+               "/api/calcfields/push": api_calcfields_push, "/api/calcfields/push/cancel": api_calcfields_push_cancel, "/api/calcfields/approve": api_calcfields_approve,
                "/api/corefields/scan": api_corefields_scan, "/api/corefields/create": api_corefields_create, "/api/corefields/reset": api_corefields_reset, "/api/corefields/cancel": api_corefields_cancel,
                "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,

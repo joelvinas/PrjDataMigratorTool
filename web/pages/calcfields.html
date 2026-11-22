@@ -21,9 +21,28 @@
 <div id="globalError" class="banner error" hidden></div>
 <div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
 <main>
+<section class="card context" id="formsCard">
+  <h2>Valid custom forms</h2>
+  <p class="hint">The tool only reads or changes a custom form whose ID is on this list. Upload a CSV with two columns, spelled exactly <code>category_id, name</code> (the form's ID and its name). The list is kept in memory, so upload it again after the app restarts.</p>
+  <div class="row">
+    <label for="formsFile">CSV file</label>
+    <input id="formsFile" type="file" accept=".csv,text/csv">
+    <button id="btnForms" type="button" class="primary" disabled>Upload and validate</button>
+    <a href="/api/calcfields/forms/template.csv" download>Download the template</a>
+    <span id="formsNote" class="hint" aria-live="polite"></span>
+  </div>
+  <div id="formsMessage" class="msg" aria-live="polite"></div>
+  <div id="formsProblemWin" class="tablewin" hidden><table id="formsProblemGrid" class="grid compact">
+    <thead><tr><th class="num">File row</th><th>Column</th><th>Problem</th></tr></thead><tbody></tbody>
+  </table></div>
+  <div class="tablewin" id="formsWin" hidden><table id="formsGrid" class="grid compact">
+    <thead><tr><th>category_id</th><th>name</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
 <section class="card context" id="startCard">
   <h2>Calculated fields: preflight</h2>
-  <p class="hint">Translates the Airtable formula fields of one table into Workfront Core calculated field expressions and reports what can and cannot be translated. <strong>This page only reads the schema and the crosswalks and saves its answer; it sends nothing to Workfront.</strong> Creating the fields and writing the expressions is a separate, later step that works from the run you approve here.</p>
+  <p class="hint">Translates the Airtable formula fields of one table into Workfront Core calculated field expressions and reports what can and cannot be translated. <strong>The preflight only reads the schema and the crosswalks and saves its answer; it sends nothing to Workfront.</strong> Creating the fields and writing the expressions is a separate step, further down, that works from a run you approve.</p>
   <p class="hint">A formula field is translated only when every field it reads has a target in the crosswalk (made on <a href="/corefields">Core fields in bulk</a>) and it has an approved Core name on <a href="/names">Field names</a>. Several formula fields that share one approved Core name become ONE Core field, placed on each form with that form's own expression. A calculated field gets the displayType <code id="displayTypeNote">CALC</code>. The translations are provisional until each function has been tried in a sandbox.</p>
   <div class="row">
     <label for="envSel">Core environment</label>
@@ -32,10 +51,8 @@
     <select id="tableSel"><option value="">Choose a table...</option></select>
   </div>
   <div class="row">
-    <label for="categoryId">Custom form (category) ID</label>
-    <input id="categoryId" type="text" maxlength="64" autocomplete="off" placeholder="The CTGY ID of the form">
-    <label for="categoryName">Form name</label>
-    <input id="categoryName" type="text" maxlength="120" autocomplete="off" placeholder="For the report (optional)">
+    <label for="formSel">Custom form</label>
+    <select id="formSel"><option value="">Upload the list of valid forms first</option></select>
   </div>
   <div class="row">
     <label for="actor">Your initials</label>
@@ -63,7 +80,7 @@
   <h3>Can be translated <span id="okCount" class="hint"></span></h3>
   <p class="hint">In the order the work must be done: a formula comes after the formulas it reads. Check each expression against the Airtable formula before approving.</p>
   <div class="tablewin" id="okWin"><table id="okGrid" class="grid compact">
-    <thead><tr><th class="num">Order</th><th>Airtable field</th><th>Core field</th><th>dataType</th><th>displayType</th><th>Airtable formula</th><th>Workfront expression</th><th>Notes</th></tr></thead>
+    <thead><tr><th class="num">Order</th><th>Airtable field</th><th>Core field</th><th>dataType</th><th>displayType</th><th>Airtable formula</th><th>Workfront expression</th><th>Notes</th><th>Push</th></tr></thead>
     <tbody></tbody>
   </table></div>
 
@@ -105,6 +122,24 @@
   </div>
   <p class="hint">Approving saves your initials, the time and the reason on the run. It sends nothing. If the schema or the crosswalk has changed since the run, approval is refused and a new preflight is needed.</p>
   <div id="approveMsg" class="msg" aria-live="polite"></div>
+</section>
+
+<section class="card" id="pushCard" hidden>
+  <h2>Push to Workfront</h2>
+  <p class="hint">Works from the approved run only. It creates each calculated field (an existing field with the same name and the right type is used instead, never an error), adds the new fields to the end of the custom form, keeping every field already on it exactly as it was, and only then writes the expressions. A formula that fails does not stop the others; press Retry to send only what is not done. Every call is logged. <strong>This is the one step that changes Workfront.</strong></p>
+  <div class="row">
+    <span id="checkWrap" class="tipwrap"><button id="btnCheckForm" type="button">Check the form in Workfront (read only)</button></span>
+    <span id="formCheck" class="hint" aria-live="polite"></span>
+  </div>
+  <div class="row">
+    <span id="phraseBox" hidden><label for="pushPhrase">Type CREATE IN PRODUCTION to allow it</label> <input id="pushPhrase" type="text" autocomplete="off"></span>
+    <span id="pushWrap" class="tipwrap"><button id="btnPush" type="button" class="primary" disabled>Push to Workfront</button></span>
+    <span id="retryWrap" class="tipwrap"><button id="btnRetry" type="button" disabled>Retry the failed items</button></span>
+    <button id="btnCancelPush" type="button" hidden>Cancel</button>
+    <span id="pushProgress" class="hint" aria-live="polite"></span>
+  </div>
+  <div id="pushMsg" class="msg" aria-live="polite"></div>
+  <div id="formNotes" class="banner warn" hidden></div>
 </section>
 </main>
 </div>

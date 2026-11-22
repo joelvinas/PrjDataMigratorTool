@@ -111,3 +111,36 @@ class Opener(object):
         if status >= 400:
             raise urllib.error.HTTPError(req.full_url, status, "x", None, io.BytesIO(json.dumps(out).encode()))
         return Resp(status, out)
+
+
+# ------------------------------------------------------------------ the fake served over HTTP, for the tests that drive the real server
+API = "/attask/api/v21.0"
+
+
+def start(fake, port):
+    """Serve `fake` on 127.0.0.1:port (the API root is /attask/api/v21.0). Returns the server; call .shutdown() when done."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def _do(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n)) if n else None
+            u = urllib.parse.urlparse(self.path)
+            code, out = fake.handle(self.command, u.path[len(API):], {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}, body, self.headers.get("apiKey"))
+            data = json.dumps(out).encode()
+            self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        do_GET = do_POST = do_PUT = do_DELETE = _do
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def set_config(port, key, envs=("sandbox1", "production")):
+    """Add the Core settings for `envs` (all pointing at the fake) to config.json in the current folder; returns the original text so the caller can put it back."""
+    orig = open("config.json", encoding="utf-8").read()
+    cfg = json.loads(orig)
+    cfg["workfront"] = {"core": {e: {"base_url": "http://127.0.0.1:%d" % port, "api_path": API, "api_key": key} for e in envs}}
+    json.dump(cfg, open("config.json", "w"))
+    return orig

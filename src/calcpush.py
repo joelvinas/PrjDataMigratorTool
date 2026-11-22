@@ -292,9 +292,8 @@ class _Pusher(object):
                 self.fail(it, "verify", "The expression was written, but Workfront read back %s instead of the one sent. Check the field in Workfront." % shown)
 
 
-def push(conn, run_id, http, valid_form_ids, should_stop=lambda: False, progress=lambda p: None, item_ids=None, backup=None):
-    """Run the push of an approved run (or resume one that was started). Returns {"run_id", "state", "counts", "failed": [...], "fatal", "cancelled", "nothing_to_do"}. Raises PushError, with
-    nothing sent, when the run is not approved, the form is not on the list, the schema drifted, or a named item is not part of the run."""
+def check_ready(conn, run_id, valid_form_ids):
+    """The run row, or PushError (nothing sent) when the run is not approved, its form is not on the list of valid forms, or the formula fields changed since the preflight."""
     try:
         run = cpf._run_row(conn, run_id)
     except cpf.PreflightError as e:
@@ -306,6 +305,13 @@ def push(conn, run_id, http, valid_form_ids, should_stop=lambda: False, progress
     changes = cpf.drift(conn, run_id)
     if changes:
         raise PushError("Run a new preflight first: " + " ".join(changes))
+    return run
+
+
+def push(conn, run_id, http, valid_form_ids, should_stop=lambda: False, progress=lambda p: None, item_ids=None, backup=None):
+    """Run the push of an approved run (or resume one that was started). Returns {"run_id", "state", "counts", "failed": [...], "fatal", "cancelled", "nothing_to_do"}. Raises PushError, with
+    nothing sent, when the run is not approved, the form is not on the list, the schema drifted, or a named item is not part of the run."""
+    run = check_ready(conn, run_id, valid_form_ids)
     now = utc_now()
     for r in conn.execute("SELECT item_id FROM calc_preflight_items WHERE run_id=? AND status='TRANSLATABLE'", (run_id,)).fetchall():
         conn.execute("INSERT OR IGNORE INTO calc_push_items (item_id, step_done, updated_at) VALUES (?, 'none', ?)", (r[0], now))
