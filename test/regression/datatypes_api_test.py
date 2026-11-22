@@ -44,10 +44,10 @@ check("a bad base ID is refused", get("/api/datatypes/review?base_id=nope")[0] =
 # ---- connecting reports the draft migrations as pending without blocking, and the script fixes it
 import subprocess
 s, r = post("/api/db/connect", {"path": "datatypes_api.db"})
-check("connect on an older database is not ready, and names the pending migrations and the command", s == 200 and r["ready"] is False and "data_type_defaults" in r["missing_tables"] and [p["migration"] for p in r["pending_migrations"]] == [21, 22, 23, 24, 25, 26]
+check("connect on an older database is not ready, and names the pending migrations and the command", s == 200 and r["ready"] is False and "data_type_defaults" in r["missing_tables"] and [p["migration"] for p in r["pending_migrations"]] == [21, 22, 23, 24, 25, 26, 27]
       and "sql/apply_migrations.py" in r["pending_message"], r.get("pending_message"))
 p = subprocess.run([sys.executable, os.path.join("sql", "apply_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)
-check("the script applies 021 to 026", p.returncode == 0 and "021, 022, 023, 024, 025, 026" in p.stdout, p.stdout + p.stderr)
+check("the script applies 021 to 027", p.returncode == 0 and "021, 022, 023, 024, 025, 026, 027" in p.stdout, p.stdout + p.stderr)
 s, r = post("/api/db/connect", {"path": "datatypes_api.db"})
 check("after the script nothing is pending and the database is ready", r["ready"] is True and r["pending_migrations"] == [] and r["pending_message"] == "", r.get("pending_message"))
 p = subprocess.run([sys.executable, os.path.join("sql", "apply_migrations.py"), "datatypes_api.db"], capture_output=True, text=True)

@@ -1,4 +1,4 @@
--- Migration 027 (DRAFT, NOT APPLIED, NOT folded into DatabaseSchemaLibrary.sql, the embedded DDL in server.py or apply_migrations.py): the calculated fields page.
+-- Migration 027 (applied; folded into the schema library, the embedded DDL and apply_migrations.py): the calculated fields page.
 -- Adds FIVE tables. Additive only, safe to run more than once. Touches no existing table.
 -- Holds metadata only: Airtable field IDs, formula text, the translated expression text, statuses, reasons, Workfront IDs, call outcomes. No record value, no credential,
 -- no Authorization header, no request or response body.
@@ -13,7 +13,7 @@
 --                                      on form InStoreSales:       IF({DE:total}<200, {DE:total}*0.03, {DE:total}*0.07)
 -- The durable record of each placement is calc_formula_crosswalk, keyed by (environment, category_id, parameter_id), which is the key the crosswalk of migration 026 does not have.
 --
--- Fold-in happens only after the owner confirms this migration is applied (CLAUDE.md).
+-- Applied by the owner and folded in on 22 November 2026; apply_migrations.py runs it through src/draftmigrations.py for older databases.
 
 -- One row per preflight run: what was chosen, who approved it, and the fingerprints used to detect drift before a push.
 CREATE TABLE IF NOT EXISTS calc_preflight_runs (

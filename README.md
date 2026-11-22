@@ -115,7 +115,7 @@ airtable-migration-control/
 │   ├── migration_015_add_relationship_directions.sql  applied 2026-11-14: link direction columns
 │   ├── migration_016_load_id_map_workspace_key.sql  applied 2026-11-14: workspace_key in the load_id_map key
 │   ├── migration_017_add_record_id_map.sql         applied 2026-11-14: the record ID map (4 tables)
-│   └── apply_migrations.py             applies 001 to 026 to an existing database in one run (safe to repeat)
+│   └── apply_migrations.py             applies 001 to 027 to an existing database in one run (safe to repeat)
 └── test/
     ├── sample_schema.json           10 tables: 1 self-link, 1 cycle, 2 two-way link pairs, 3 views
     ├── sample_schema_errors.json    tables used to trigger 429 / 403 / capped cardinality
@@ -297,7 +297,7 @@ Easiest, with Python only (no SQLite client needed):
 python sql/apply_migrations.py path/to/your.db
 ```
 
-Migrations 021 to 026 (the data type mapping, the lookup lists, the Git-R-Done field results and the Core field crosswalk) are part of the same run, and a new database made by step 1 already has them: the tables are in `DatabaseSchemaLibrary.sql` and the embedded DDL, and the default type mapping is filled in when the tables are created. A database made before they existed is brought up to date by the command above; it never changes data.
+Migrations 021 to 027 (the data type mapping, the lookup lists, the Git-R-Done field results, the Core field crosswalk and the calculated fields tables) are part of the same run, and a new database made by step 1 already has them: the tables are in `DatabaseSchemaLibrary.sql` and the embedded DDL, and the default type mapping is filled in when the tables are created. A database made before they existed is brought up to date by the command above; it never changes data.
 
 It adds only the columns and tables that are missing, so it is safe to run more than once, and it never changes existing data. The app never alters existing tables itself; if columns are missing, it says so and points to this command. Migration 005 also drops the old placeholder tables `form_sections` and `form_fields`, and migration 006 drops `automation_catalog` and `automation_steps`, but only if they are empty (a placeholder with rows is kept and reported). The raw statements are in `sql/migration_001_add_columns.sql`, `sql/migration_002_add_field_options.sql`, `sql/migration_003_add_tables_and_views.sql` and `sql/migration_004_add_attachment_stats.sql` if you prefer a SQLite client. Existing rows keep `NULL` in the new columns, and the new tables stay empty, until each base's schema is ingested again (the attachment statistics fill in when you next run profiling) (re-ingest is safe: it refreshes the settings and keeps the profile statistics).
 

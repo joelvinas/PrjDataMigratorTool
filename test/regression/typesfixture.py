@@ -32,10 +32,10 @@ def fill_defaults(conn, base_id, actor="JV"):
 
 
 def strip_drafts(conn):
-    """Take a database built from DatabaseSchemaLibrary.sql back to how it was before migrations 021 to 026, so a test can check the 'migration not applied yet' paths
-    and the apply script on an older database. Drops the eight tables, the view and the column field_names.core_display_type."""
+    """Take a database built from DatabaseSchemaLibrary.sql back to how it was before migrations 021 to 027, so a test can check the 'migration not applied yet' paths
+    and the apply script on an older database. Drops the thirteen tables, the view and the column field_names.core_display_type."""
     conn.execute("DROP VIEW IF EXISTS field_data_types")
-    for t in ("data_type_events", "field_type_decisions", "data_type_defaults", "lookup_list_events", "field_lookup_decisions", "lookup_lists", "emergency_field_results", "core_field_crosswalk"):
+    for t in ("data_type_events", "field_type_decisions", "data_type_defaults", "lookup_list_events", "field_lookup_decisions", "lookup_lists", "emergency_field_results", "core_field_crosswalk", "calc_push_log", "calc_push_items", "calc_formula_crosswalk", "calc_preflight_items", "calc_preflight_runs"):
         conn.execute('DROP TABLE IF EXISTS "%s"' % t)
     if "core_display_type" in {r[1] for r in conn.execute("PRAGMA table_info(field_names)")}:
         conn.execute("ALTER TABLE field_names DROP COLUMN core_display_type")
