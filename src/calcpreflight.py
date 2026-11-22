@@ -255,10 +255,10 @@ def report(conn, run_id):
     run_row = _run_row(conn, run_id)
     items = []
     for r in conn.execute("SELECT i.item_id, i.formula_field_id, f.field_name, i.status, i.reason, i.source_formula, i.referenced_field_ids, i.functions_found, i.depends_on, i.push_order, "
-                          "i.translated_expression, i.target_name, i.target_label, i.workfront_data_type, i.workfront_display_type, i.reuse_parameter_id "
-                          "FROM calc_preflight_items i LEFT JOIN airtable_fields f ON f.field_id = i.formula_field_id WHERE i.run_id=? ORDER BY COALESCE(i.push_order, 1000000), i.formula_field_id", (run_id,)):
+                          "i.translated_expression, i.target_name, i.target_label, i.workfront_data_type, i.workfront_display_type, i.reuse_parameter_id, p.step_done, p.last_error "
+                          "FROM calc_preflight_items i LEFT JOIN airtable_fields f ON f.field_id = i.formula_field_id LEFT JOIN calc_push_items p ON p.item_id = i.item_id WHERE i.run_id=? ORDER BY COALESCE(i.push_order, 1000000), i.formula_field_id", (run_id,)):
         d = dict(zip(("item_id", "field_id", "field_name", "status", "reason", "source_formula", "referenced", "functions", "depends_on", "push_order", "expression", "target_name", "target_label",
-                      "data_type", "display_type", "reuse_parameter_id"), r))
+                      "data_type", "display_type", "reuse_parameter_id", "push_step", "push_error"), r))
         for k in ("referenced", "functions", "depends_on"):
             d[k] = json.loads(d[k] or "[]")
         items.append(d)
@@ -274,14 +274,15 @@ def report(conn, run_id):
 
 
 def drift(conn, run_id):
-    """What changed since the snapshot, in plain words; empty when nothing did. Recomputes the two fingerprints from the run's own items."""
+    """What changed since the snapshot, in plain words; empty when nothing did. Recomputes the two fingerprints from the run's own items. Once a push has started (state pushing
+    or pushed) only the formula fields are compared: the push itself adds placements and fields to the crosswalk, which is not drift."""
     run_row = _run_row(conn, run_id)
     items = conn.execute("SELECT formula_field_id, referenced_field_ids, target_name FROM calc_preflight_items WHERE run_id=?", (run_id,)).fetchall()
     schema, cross = fingerprints(conn, run_row["environment"], run_row["category_id"], [i[0] for i in items], [x for i in items for x in json.loads(i[1] or "[]")], [i[2] for i in items])
     out = []
     if schema != run_row["schema_hash"]:
         out.append("A formula field changed (its formula, result type or existence) since the preflight.")
-    if cross != run_row["crosswalk_hash"]:
+    if cross != run_row["crosswalk_hash"] and run_row["state"] not in ("pushing", "pushed"):
         out.append("The crosswalk changed (a target field, or a placement on a form) since the preflight.")
     return out
 
