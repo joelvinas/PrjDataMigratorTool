@@ -20,9 +20,28 @@ function applyButtons() {
   $("btnUpload").disabled = !(cf.setup && cf.setup.db_connected) || b || !$("csvFile").files.length;
   $("btnCheck").disabled = !haveRows || !env || b;
   $("btnAll").disabled = $("btnNone").disabled = !haveRows || b;
-  $("btnCreate").disabled = !(st && st.can_create) || b || !$("actor").value.trim() || (env === "production" && $("createPhrase").value !== cf.setup.production_phrase);
-  $("btnReset").disabled = !(st && st.can_reset) || b || !$("resetConfirm").checked || !$("actor").value.trim() || $("resetReason").value.trim().length < 3
-    || (env === "production" && $("resetPhrase").value !== cf.setup.reset_phrase);
+  // CREATE: every reason it is locked is listed in the hover text, so nobody has to guess.
+  const why = [];
+  if (b) why.push("An operation is running.");
+  else if (haveRows && st.create_blocker) why.push(st.create_blocker);
+  if (haveRows && !$("actor").value.trim()) why.push("Enter your name (it is written in the report).");
+  if (env === "production" && $("createPhrase").value !== cf.setup.production_phrase) why.push("Type the production phrase.");
+  if (!env) why.push("Choose a Workfront environment.");
+  if (!haveRows) why.push("Upload a CSV first.");
+  $("btnCreate").disabled = !(st && st.can_create) || why.length > 0;
+  $("createWrap").title = why.join("\n");
+  // RESET: red, and unlocked only by a completed scan, the confirmation, a reason and a name.
+  const rwhy = [];
+  if (b) rwhy.push("An operation is running.");
+  if (haveRows && !st.scan_complete) rwhy.push("Locked until CHECK FIELDS has completed: the reset deletes the fields the scan found, using the parameterIds it fills in.");
+  else if (haveRows && !st.rows.some((r) => r.parameterId)) rwhy.push("None of the listed fields exists in " + (env || "the environment") + " (no parameterId), so there is nothing to delete.");
+  if (!$("resetConfirm").checked) rwhy.push("Tick the confirmation.");
+  if ($("resetReason").value.trim().length < 3) rwhy.push("Give a reason.");
+  if (!$("actor").value.trim()) rwhy.push("Enter your name.");
+  if (env === "production" && $("resetPhrase").value !== cf.setup.reset_phrase) rwhy.push("Type the production phrase.");
+  if (!haveRows) rwhy.push("Upload a CSV first.");
+  $("btnReset").disabled = !(st && st.can_reset) || rwhy.length > 0;
+  $("resetWrap").title = rwhy.join("\n");
   $("resetConfirm").disabled = !(st && st.can_reset) || b;
   $("btnCancel").hidden = !b;
   $("createPhraseBox").hidden = env !== "production";
@@ -58,8 +77,6 @@ function renderDownloads() {
   const parts = [el("a", { href: "/api/corefields/crosswalk.csv", text: "fields and crosswalk (.csv)" })];
   [["scan", "scan report (.mhtml)"], ["create", "create report (.mhtml)"], ["reset", "reset report (.mhtml)"]].forEach((p) => { if (st.reports[p[0]]) parts.push(fileLink(p[0], st.reports[p[0]], p[1])); });
   parts.forEach((a, i) => { if (i) box.appendChild(document.createTextNode(" | ")); box.appendChild(a); });
-  $("crosswalkNote").textContent = st.crosswalk_saved ? "The crosswalk is saved in the database (core_field_crosswalk)."
-    : "The crosswalk table (draft migration 026) is not applied to this database yet, so the crosswalk is kept only until the app stops. Download the CSV after each run.";
 }
 
 function renderJob() {
@@ -132,8 +149,10 @@ async function create() {
 }
 
 async function reset() {
-  const n = cf.st.rows.filter((r) => r.in_crosswalk).length;
-  if (!window.confirm("DELETE " + n + " field(s) from Workfront Core (" + envNow() + ")?\n\nOnly fields this tool created are deleted, from the top of the list, stopping at the first error. This cannot be undone.")) return;
+  const hit = cf.st.rows.filter((r) => r.parameterId);
+  const list = hit.slice(0, 15).map((r) => r.name + " (" + r.parameterId + ")").join("\n") + (hit.length > 15 ? "\n... and " + (hit.length - 15) + " more" : "");
+  if (!window.confirm("WARNING: PERMANENT DELETION\n\nDELETE " + hit.length + " field(s) from Workfront Core (" + envNow() + ")?\n\n" + list
+    + "\n\nThis includes fields that already existed before this tool created anything, and the values stored in them. It cannot be undone. It runs from the top of the list and stops at the first error.")) return;
   showGlobalError("");
   await api("POST", "/api/corefields/reset", { environment: envNow(), actor: $("actor").value, reason: $("resetReason").value, confirm: $("resetConfirm").checked, confirm_phrase: $("resetPhrase").value });
   $("resetConfirm").checked = false;

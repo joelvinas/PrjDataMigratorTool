@@ -67,7 +67,11 @@ try:
         cells = pg.eval_on_selector("#fieldGrid tbody tr", "r => Array.from(r.cells).map(c => c.textContent)")
         check("the grid lists the file in order, with empty parameterId and lastUpdateDate", names == ["Color Code", "Color Flag", "Budget Amount"] and cells[9] == "" and cells[10] == "" and pg.locator("#fieldGrid tbody input:checked").count() == 3, (names, cells))
         check("CREATE is locked until a scan has completed, and the page says so", pg.is_disabled("#btnCreate") and "locked" in pg.inner_text("#scanNote"))
-        check("RESET is locked, and Confirm cannot be ticked while nothing was created here", pg.is_disabled("#btnReset") and pg.is_disabled("#resetConfirm"))
+        tip = pg.get_attribute("#createWrap", "title")
+        check("hovering the locked CREATE explains why: run CHECK FIELDS first, and a new CSV scans only its own fields", "CHECK FIELDS" in tip and "scans only those fields" in tip and "Enter your name" in tip, tip)
+        check("RESET is red, carries a warning, and is locked with its reasons on hover", pg.is_disabled("#btnReset") and "destroy" in pg.get_attribute("#btnReset", "class") and "rgb(179, 38, 30)" == pg.eval_on_selector("#btnReset", "e => getComputedStyle(e).backgroundColor")
+              and "⚠" in pg.inner_text("#btnReset") and "PERMANENTLY DELETES" in pg.inner_text("#resetWarn") and "CHECK FIELDS" in pg.get_attribute("#resetWrap", "title"), pg.get_attribute("#resetWrap", "title"))
+        check("the confirmation cannot be ticked before a scan", pg.is_disabled("#resetConfirm"))
 
         fake.params["X1"] = {"ID": "X1", "name": "Color Flag", "lastUpdateDate": "2026-01-02 03:04:05"}
         answer["accept"] = True
@@ -79,7 +83,7 @@ try:
         check("a scan report link appears", pg.locator("#downloads a", has_text="scan report").count() == 1)
         check("CREATE is still locked until a name is entered", pg.is_disabled("#btnCreate"))
         pg.fill("#actor", "J Tester")
-        check("CREATE unlocks after the scan and a name", pg.is_enabled("#btnCreate"))
+        check("CREATE unlocks after the scan and a name, and its hover text is empty", pg.is_enabled("#btnCreate") and pg.get_attribute("#createWrap", "title") == "")
 
         n0 = len([r for r in fake.reqs if r[0] == "POST"])
         answer["accept"] = False
@@ -91,17 +95,19 @@ try:
         cells = pg.eval_on_selector_all("#fieldGrid tbody tr", "rs => rs.map(r => Array.from(r.cells).map(c => c.textContent))")
         check("created fields show their new parameterId and lastUpdateDate; the grid and the message agree", cells[0][9] == "P0001" and cells[0][10] and cells[2][9] == "P0002" and "2 of 2 field(s) created" in pg.inner_text("#resultMsg"), cells)
         check("the crosswalk CSV and the create report are offered", pg.locator("#downloads a", has_text="crosswalk").count() == 1 and pg.locator("#downloads a", has_text="create report").count() == 1)
-        check("the page says the crosswalk is not saved to the database yet (migration 026 not applied)", "migration 026" in pg.inner_text("#crosswalkNote"))
 
-        check("RESET stays locked until Confirm is ticked AND a reason is typed", pg.is_disabled("#btnReset") and pg.is_enabled("#resetConfirm"))
+        check("RESET stays locked until the confirmation is ticked AND a reason is typed", pg.is_disabled("#btnReset") and pg.is_enabled("#resetConfirm"))
         pg.check("#resetConfirm")
-        check("Confirm alone does not unlock RESET", pg.is_disabled("#btnReset"))
-        pg.fill("#resetReason", "rehearsal finished")
-        check("Confirm plus a reason unlocks RESET", pg.is_enabled("#btnReset"))
+        check("the confirmation alone does not unlock RESET, and the hover says what is missing", pg.is_disabled("#btnReset") and "Give a reason" in pg.get_attribute("#resetWrap", "title"))
+        pg.fill("#resetReason", "wrong dataType")
+        check("confirmation plus a reason unlocks RESET", pg.is_enabled("#btnReset"))
+        answer["accept"] = False
+        pg.click("#btnReset")
+        check("the delete pop-up warns it is permanent and lists the fields, including the one that already existed; declining deletes nothing", any("PERMANENT DELETION" in m and "Color Flag (X1)" in m and "already existed" in m for m in dialogs) and len(fake.params) == 3, dialogs[-1])
+        answer["accept"] = True
         pg.click("#btnReset")
         pg.wait_for_function("document.getElementById('resultMsg').textContent.includes('Reset in sandbox1: done')")
-        check("RESET deleted only what this tool created, kept the pre-existing field, and locked itself again", "2 of 2 field(s) deleted" in pg.inner_text("#resultMsg") and "X1" in fake.params and len(fake.params) == 1
-              and pg.is_disabled("#btnReset") and not pg.is_checked("#resetConfirm") and pg.is_disabled("#btnCreate"))
+        check("RESET deleted all three listed fields (the existing one too), and locked itself again", "3 of 3 field(s) deleted" in pg.inner_text("#resultMsg") and fake.params == {} and pg.is_disabled("#btnReset") and not pg.is_checked("#resetConfirm") and pg.is_disabled("#btnCreate"))
 
         pg.select_option("#envSel", "production")
         check("choosing production reveals the typed-phrase boxes and keeps CREATE locked", pg.is_visible("#createPhraseBox") and pg.is_visible("#resetPhraseBox") and pg.is_disabled("#btnCreate"))

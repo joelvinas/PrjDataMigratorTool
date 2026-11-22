@@ -1,14 +1,12 @@
--- Migration 026 (DRAFT, not applied): the crosswalk of the Core bulk field creator. Adds ONE table. Additive only, safe to run more than once. Touches no existing table.
+-- Migration 026 (applied; folded into the schema library and the embedded DDL): the crosswalk of the Core bulk field creator. Adds ONE table. Additive only, safe to run more than once. Touches no existing table.
 -- Holds field metadata and Workfront IDs only (names, labels, types, descriptions, the new parameterId). No record value and no credential.
 --
 -- Why: the existing field_crosswalk keeps one dev ID and one prod ID per Airtable field. The Core bulk field creator (page /corefields) needs several Core fields per
 -- Airtable field ID, one set per Core environment (sandbox1, sandbox2, preview, production), and the facts of what was sent (name, label, dataType, displayType,
--- description, isRequired) beside the new parameterId and its lastUpdateDate. One row per Core field this tool created. The Reset button deletes the parameter in Workfront
--- and then deletes its row here; it never deletes a parameter that has no row (a field that already existed was not made by this tool).
--- Until the owner applies it, the page still works and the crosswalk lives in memory for the session and in the CSV download, but nothing is kept between runs.
+-- description, isRequired) beside the parameterId and its lastUpdateDate. One row per Core field this tool created or, after a scan, deleted again. The Reset button deletes
+-- the listed parameters in Workfront (the person's intent: fields added wrongly are removed so they can be recreated) and then deletes their rows here.
 --
--- Not folded into DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py until the owner confirms it is applied (a test requires the library
--- file to equal the embedded DDL, and the app refuses a database that lacks an expected table).
+-- Applied by the owner and folded into DatabaseSchemaLibrary.sql and the embedded DDL in server.py; apply_migrations.py runs it through src/draftmigrations.py for older databases.
 
 CREATE TABLE IF NOT EXISTS core_field_crosswalk (
     crosswalk_id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -63,6 +63,12 @@ def client(fake):
     log = cf.CallLog(); h.recorder, h.record_full = log, True
     return h, log
 
+def mkcw():
+    """A crosswalk over a fresh in-memory database that holds the table of migration 026."""
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    c.executescript(open(os.path.join(ROOT, "sql", "migration_026_add_core_field_crosswalk.sql"), encoding="utf-8").read())
+    return cf.Crosswalk(c)
+
 def upload(rows, header=None):
     text = ",".join(header or cf.HEADER) + "\r\n" + "".join(",".join('"%s"' % c.replace('"', '""') for c in r) + "\r\n" for r in rows)
     return cf.parse_upload(base64.b64encode(text.encode("utf-8")).decode())
@@ -119,8 +125,7 @@ s = cf.scan(rows2, h2, l2)
 check("a scan that hits an error stops there, is NOT complete and says which row", not s["complete"] and s["error"]["row"] == 3 and s["scanned"] == 2 and rows2[2]["status"] == "scan failed" and rows2[3]["status"] == "", s)
 
 # ---- create
-fake = FakeCore(); http, log = client(fake); mem = {}
-cw = cf.Crosswalk(None, mem)
+fake = FakeCore(); http, log = client(fake); cw = mkcw()
 rows, _ = upload(GOOD); cf.scan(rows, http, log); fake.reqs.clear()
 fake.refuse["Budget Amount"] = (400, {"error": {"class": "DuplicateNameException", "message": "DUPLICATE_NAME_XYZ for key " + KEY}})
 c = cf.create(rows, "sandbox1", http, cw, log)
@@ -139,33 +144,37 @@ fake.refuse.clear(); fake.no_date = True; fake.reqs.clear()
 c = cf.create(rows, "sandbox1", http, cw, log)
 check("a second press continues with the rest only (nothing is created twice); a reply with no lastUpdateDate is completed by one read", c["created"] == 3 and c["error"] is None and [x[3]["name"] for x in fake.reqs if x[0] == "POST"] == ["Budget Amount", "Start Day", "Unit Count"]
       and all(r["lastUpdateDate"] for r in rows) and len([x for x in fake.reqs if x[0] == "GET"]) == 3 and len(cw.entries("sandbox1")) == 5, (c, fake.reqs))
-f3 = FakeCore(); h3, l3 = client(f3); r3, _ = upload(GOOD); cw3 = cf.Crosswalk(None, {}); k = {"n": 0}
+f3 = FakeCore(); h3, l3 = client(f3); r3, _ = upload(GOOD); cw3 = mkcw(); k = {"n": 0}
 def after_first(): k["n"] += 1; return k["n"] > 1
 c = cf.create(r3, "sandbox1", h3, cw3, l3, after_first)
 check("Cancel ends the run after the call in progress", c["cancelled"] and c["created"] == 1 and len(f3.params) == 1, c)
 f4 = FakeCore(); h4, l4 = client(f4)
 r4, _ = upload(GOOD); r4[0]["checked"] = False
-c = cf.create(r4, "sandbox1", h4, cf.Crosswalk(None, {}), l4)
+c = cf.create(r4, "sandbox1", h4, mkcw(), l4)
 check("an unticked row is never created", "Color Code" not in [p["name"] for p in f4.params.values()] and c["created"] == 4, c)
 
-# ---- reset
-fake = FakeCore(); http, log = client(fake); cw = cf.Crosswalk(None, {})
-fake.params["X9"] = {"ID": "X9", "name": "Start Day", "lastUpdateDate": "2026-01-01 00:00:00"}       # pre-existing: not made by this tool
+# ---- reset: deletes EXISTING fields on purpose
+fake = FakeCore(); http, log = client(fake); cw = mkcw()
+fake.params["X9"] = {"ID": "X9", "name": "Start Day", "lastUpdateDate": "2026-01-01 00:00:00"}       # already in Workfront: not made by this tool
 rows, _ = upload(GOOD); cf.scan(rows, http, log); cf.create(rows, "sandbox1", http, cw, log)
 fake.reqs.clear()
 fake.refuse_delete = {"P0003"}
 out = cf.reset(rows, "sandbox1", http, cw, log)
 dels = [x for x in fake.reqs if x[0] == "DELETE"]
-check("reset deletes from the top and stops at the first error: two deleted, the third refused, the fourth never tried", out["deleted"] == 2 and out["error"]["row"] == 3 and [x[1] for x in dels] == ["/param/P0001", "/param/P0002", "/param/P0003"], (out, dels))
-check("after each delete its crosswalk row is gone and the grid row is cleared; the refused one stays recorded; the key is not in the message", [e["parameter_id"] for e in cw.entries("sandbox1")] == ["P0003", "P0004"]
-      and rows[0]["parameterId"] == "" and rows[0]["status"] == "deleted" and rows[2]["parameterId"] == "P0003" and rows[2]["status"] == "delete failed" and KEY not in rows[2]["message"], rows[2])
+check("reset deletes from the top and stops at the first error: two deleted, the third refused, the rest never tried", out["deleted"] == 2 and out["error"]["row"] == 3 and [x[1] for x in dels] == ["/param/P0001", "/param/P0002", "/param/P0003"], (out, dels))
+check("after each delete its crosswalk row is gone and the grid row is cleared and ticked; the refused one stays recorded; the key is not in the message", [e["parameter_id"] for e in cw.entries("sandbox1")] == ["P0003", "P0004"]
+      and rows[0]["parameterId"] == "" and rows[0]["status"] == "deleted" and rows[0]["checked"] and rows[2]["parameterId"] == "P0003" and rows[2]["status"] == "delete failed" and KEY not in rows[2]["message"], rows[2])
 fake.refuse_delete.clear(); fake.reqs.clear()
 out = cf.reset(rows, "sandbox1", http, cw, log)
-check("the pre-existing field (found by the scan, not made here) is never deleted, and the crosswalk ends empty", out["deleted"] == 2 and out["skipped_not_created_here"] == 3 and "X9" in fake.params and "P0003" not in fake.params
-      and "X9" not in [x[1].rsplit("/", 1)[1] for x in fake.reqs if x[0] == "DELETE"] and cw.entries("sandbox1") == [], (out, list(fake.params)))
-other = cf.Crosswalk(None, {"production": [{"airtable_field_id": "fldA1", "workfront_name": "Color Code", "parameter_id": "PZ"}]})
-fake.reqs.clear(); out = cf.reset(upload(GOOD)[0], "sandbox1", http, other, log)
-check("a crosswalk row of another environment is not touched by a reset in this one", out["deleted"] == 0 and not [x for x in fake.reqs if x[0] == "DELETE"] and len(other.entries("production")) == 1)
+check("a field that already existed (found by the scan) IS deleted too, and the crosswalk ends empty: that is the purpose of the reset", out["deleted"] == 3 and out["error"] is None and sorted(x[1] for x in fake.reqs if x[0] == "DELETE") == ["/param/P0003", "/param/P0004", "/param/X9"]
+      and fake.params == {} and cw.entries("sandbox1") == [], (out, list(fake.params)))
+check("every row is cleared and a second reset sends nothing", all(r["parameterId"] == "" for r in rows) and (fake.reqs.clear() or True) and cf.reset(rows, "sandbox1", http, cw, log)["deleted"] == 0 and not fake.reqs)
+cw = mkcw(); rows, _ = upload(GOOD[:2]); cw.add("sandbox1", rows[0], "PGONE", "d"); cw.add("production", rows[0], "PZ", "d"); fake.reqs.clear()
+out = cf.reset(rows, "sandbox1", http, cw, log)
+check("a crosswalk row whose field the scan did not find loses only the crosswalk row (no call), and another environment's row is untouched", out["deleted"] == 0 and out["crosswalk_only_cleared"] == 1 and not fake.reqs and cw.entries("sandbox1") == [] and len(cw.entries("production")) == 1, out)
+rows, _ = upload(GOOD[:2]); rows[0]["parameterId"] = "../../proj"; fake.reqs.clear()
+out = cf.reset(rows, "sandbox1", http, cw, log)
+check("a parameterId that is not a plain ID is refused before anything is sent", out["error"] and out["deleted"] == 0 and not fake.reqs, out)
 
 # ---- the crosswalk CSV
 info = {"fldA1": ("appBase1", "Sample Shop", "tblT1", "Orders", "Colour", "singleLineText")}
@@ -186,7 +195,7 @@ job = {"op": "create", "env": "sandbox1", "actor": "J Tester", "reason": "", "st
 html = rep.build_html(job, "")
 check("a report with no API call still says so (a report exists whatever the number of operations)", "No call was made to Workfront" in html and "J Tester" in html and "Where it stopped" in html)
 fake = FakeCore(); http, log = client(fake); fake.refuse["B"] = (400, {"error": {"message": "DUPLICATE_NAME_XYZ " + KEY}}); r5, _ = upload([["f1", "A", "", "TEXT", "TEXT", "", ""], ["f2", "B", "", "TEXT", "TEXT", "", ""]])
-cf.create(r5, "sandbox1", http, cf.Crosswalk(None, {}), log)
+cf.create(r5, "sandbox1", http, mkcw(), log)
 job.update(entries=log.entries, rows=[dict(r) for r in r5])
 html = rep.build_html(job, "", lambda t: lc.redact(t, {KEY}))
 check("the report lists every attempt with its request, what was sent and the whole refusal; no key and no header appears", "POST /param" in html and "DUPLICATE_NAME_XYZ" in html and KEY not in html and "apikey" not in html.lower() and "&quot;isRequired&quot;: false" in html, html[-900:])
@@ -194,18 +203,20 @@ mh = rep.write_report(job, os.path.join("tmp_cf_report"), lambda h, t: h.encode(
 check("the report file is named by operation, environment and time", re.match(r"^CoreFields_create_sandbox1_20261122-100000\.mhtml$", mh) is not None, mh)
 import shutil; shutil.rmtree("tmp_cf_report", ignore_errors=True)
 
-# ---- draft migration 026
+# ---- migration 026 (applied and folded in)
 c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
 c.executescript(open(os.path.join(ROOT, "sql", "DatabaseSchemaLibrary.sql"), encoding="utf-8").read())
-check("a database from the library reports migration 026 as pending", 26 in [i["migration"] for i in dm.pending(c)] and "Core field crosswalk" in dm.describe(dm.pending(c)))
+check("a database from the library already has the crosswalk table and migration 026 is not pending", 26 not in [i["migration"] for i in dm.pending(c)] and c.execute("select 1 from sqlite_master where name='core_field_crosswalk'").fetchone())
+c.execute("drop table core_field_crosswalk")
+check("a database made before it reports 026 as pending", 26 in [i["migration"] for i in dm.pending(c)] and "Core field crosswalk" in dm.describe(dm.pending(c)))
 sql026 = open(os.path.join(ROOT, "sql", "migration_026_add_core_field_crosswalk.sql"), encoding="utf-8").read()
 c.executescript(sql026); c.executescript(sql026)
-check("migration 026 can be run twice and then is no longer pending", 26 not in [i["migration"] for i in dm.pending(c)] and cf.table_exists(c))
-dbcw = cf.Crosswalk(c, {})
+check("migration 026 can be run twice and then is no longer pending", 26 not in [i["migration"] for i in dm.pending(c)])
+dbcw = cf.Crosswalk(c)
 rows, _ = upload(GOOD[:2])
 dbcw.add("sandbox1", rows[0], "P1", "d1"); dbcw.add("production", rows[0], "P7", "d2")
-check("the database crosswalk keeps a row per environment; find and remove work", dbcw.persistent and dbcw.find("sandbox1", "fldA1", "Color Code")["parameter_id"] == "P1" and dbcw.find("production", "fldA1", "Color Code")["parameter_id"] == "P7"
-      and (dbcw.remove("sandbox1", "P1") or True) and dbcw.entries("sandbox1") == [] and len(dbcw.entries("production")) == 1)
+check("the crosswalk keeps a row per environment; find and forget work", dbcw.find("sandbox1", "fldA1", "Color Code")["parameter_id"] == "P1" and dbcw.find("production", "fldA1", "Color Code")["parameter_id"] == "P7"
+      and (dbcw.forget("sandbox1", "P1", "fldA1", "Color Code") or True) and dbcw.entries("sandbox1") == [] and len(dbcw.entries("production")) == 1)
 err = None
 try: dbcw.add("production", rows[0], "P8", "d3")
 except sqlite3.IntegrityError as e: err = e

@@ -902,6 +902,25 @@ CREATE TABLE emergency_field_results (
 );
 
 CREATE INDEX idx_emergency_results_table ON emergency_field_results(base_id, table_id, run_at);
+
+-- 23. The Core fields created by the Core fields in bulk page (migration 026)
+CREATE TABLE core_field_crosswalk (
+    crosswalk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production')),
+    airtable_field_id TEXT NOT NULL,       -- the field_id column of the upload (an Airtable field ID); several rows may share it
+    workfront_name TEXT NOT NULL,
+    workfront_label TEXT,
+    workfront_data_type TEXT NOT NULL,     -- CURC, DATE, NMBR or TEXT
+    workfront_display_type TEXT NOT NULL,  -- CHCK or TEXT
+    workfront_description TEXT,
+    workfront_is_required INTEGER NOT NULL DEFAULT 0 CHECK(workfront_is_required IN (0, 1)),
+    parameter_id TEXT NOT NULL,            -- the Core PARAM ID Workfront returned
+    last_update_date TEXT,                 -- the parameter's lastUpdateDate as Workfront reported it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (environment, parameter_id),
+    UNIQUE (environment, airtable_field_id, workfront_name)
+);
+CREATE INDEX idx_core_field_crosswalk_env ON core_field_crosswalk(environment, airtable_field_id);
 '''
 
 
@@ -5980,10 +5999,10 @@ def api_extract_csv(body):
 # --------------------------------------------------------------------------
 # Core bulk field creator (/corefields): a CSV of custom fields -> a grid -> a scan of Workfront Core -> POST /param per row, with a crosswalk and a reset. The logic is in
 # src/corefields.py; this is the session and the job layer. The grid lives in memory (one list for the whole app); the crosswalk is the table core_field_crosswalk (draft
-# migration 026) or, until it is applied, memory. Reports and the crosswalk CSV hold field metadata and IDs only: never a record value and never a credential.
+# migration 026). Reports and the crosswalk CSV hold field metadata and IDs only: never a record value and never a credential.
 # --------------------------------------------------------------------------
 COREFIELDS_FILE_RE = re.compile(r"^CoreFields_[A-Za-z0-9_-]+\.mhtml$")
-CF = {"rows": [], "filename": "", "env": "", "scan": None, "reports": {}, "job": None, "mem": {}, "uploaded_at": None}
+CF = {"rows": [], "filename": "", "env": "", "scan": None, "reports": {}, "job": None, "uploaded_at": None}
 _cf_lock = threading.RLock()
 
 
@@ -6051,37 +6070,51 @@ def _cf_set_env(env):
 def _cf_crosswalk_entries(env):
     try:
         with db() as conn:
-            cw = corefields.Crosswalk(conn, CF["mem"])
-            return cw.entries(env), cw.persistent
+            return corefields.Crosswalk(conn).entries(env)
     except AppError:
-        return [], False
+        return []
 
 
 def _cf_state():
     job = CF["job"]
+    # The job is read BEFORE the rows: a job sets its status last, so a status of "done" read first means the rows read next are final (the other order could show "done" with stale rows).
+    jobs = None if not job else {"id": job.id, "op": job.op, "environment": job.env, "status": job.status, "error": job.error, "progress": dict(job.progress), "summary": job.summary,
+                                 "started_at": job.started_at, "finished_at": job.finished_at, "report": job.report}
+    running = bool(jobs and jobs["status"] == "running")
+    scan, reports = CF["scan"], dict(CF["reports"])
     rows = [dict(r) for r in CF["rows"]]
-    entries, persistent = _cf_crosswalk_entries(CF["env"]) if CF["env"] else ([], False)
+    entries = _cf_crosswalk_entries(CF["env"]) if CF["env"] else []
     have = {(e["airtable_field_id"], e["workfront_name"]) for e in entries}
     for r in rows:
         r["in_crosswalk"] = (r["field_id"], r["name"]) in have
-    scan = CF["scan"]
     complete = bool(scan and scan["env"] == CF["env"] and scan["complete"])
-    return {"filename": CF["filename"], "environment": CF["env"], "rows": rows, "scan": scan, "scan_complete": complete, "reports": dict(CF["reports"]),
-            "crosswalk_saved": persistent, "can_create": complete and not _cf_busy() and any(r["checked"] and not r["parameterId"] for r in rows),
-            "can_reset": not _cf_busy() and any(r["in_crosswalk"] for r in rows), "production_phrase": loadrun.PRODUCTION_PHRASE, "reset_phrase": corefields.RESET_PHRASE,
-            "job": None if not job else {"id": job.id, "op": job.op, "environment": job.env, "status": job.status, "error": job.error, "progress": job.progress, "summary": job.summary,
-                                        "started_at": job.started_at, "finished_at": job.finished_at, "report": job.report}}
+    return {"filename": CF["filename"], "environment": CF["env"], "rows": rows, "scan": scan, "scan_complete": complete, "reports": reports,
+            "can_create": complete and not running and any(r["checked"] and not r["parameterId"] for r in rows),
+            "create_blocker": _cf_create_blocker(complete, rows), "can_reset": complete and not running and any(r["parameterId"] for r in rows), "production_phrase": loadrun.PRODUCTION_PHRASE, "reset_phrase": corefields.RESET_PHRASE,
+            "job": jobs}
+
+
+def _cf_create_blocker(complete, rows):
+    """Why CREATE NEW FIELDS is locked, in plain words, or '' when it is not locked for a reason the grid can explain (the page adds its own name and phrase reasons)."""
+    if _cf_busy():
+        return "An operation is running."
+    if not complete:
+        return ("Locked until CHECK FIELDS has completed for the chosen environment: the scan finds which names already exist in Workfront so they are not created twice. "
+                "Press CHECK FIELDS and allow the scan. Uploading a new CSV with valid fields scans only those fields.")
+    if not any(r["checked"] and not r["parameterId"] for r in rows):
+        return "Nothing is waiting to be created: every ticked row already exists in Workfront, or no row is ticked."
+    return ""
 
 
 def api_corefields_setup(_q=None):
     with _cf_lock:
         try:
-            with db() as conn:
-                saved = corefields.table_exists(conn)
+            with db():
+                pass
             connected = True
         except AppError:
-            saved, connected = False, False
-        return _lt_out({"environments": _cf_environments(), "db_connected": connected, "crosswalk_saved": saved, "header": corefields.HEADER, "data_types": list(corefields.DATA_TYPES),
+            connected = False
+        return _lt_out({"environments": _cf_environments(), "db_connected": connected, "header": corefields.HEADER, "data_types": list(corefields.DATA_TYPES),
                         "display_types": list(corefields.DISPLAY_TYPES), "production_phrase": loadrun.PRODUCTION_PHRASE, "reset_phrase": corefields.RESET_PHRASE})
 
 
@@ -6150,9 +6183,7 @@ def _run_corefields_job(job):
         http = _cf_http(job.env, secrets)
         http.recorder, http.record_full = log, True
         with db(job.db_path) as conn:
-            cw = corefields.Crosswalk(conn, CF["mem"])
-            if not cw.persistent:
-                notes.append("The crosswalk table core_field_crosswalk is not in this database yet (draft migration 026), so crosswalk rows are kept in memory until the app stops. Download the crosswalk CSV before then.")
+            cw = corefields.Crosswalk(conn)
             if job.op == "scan":
                 job.summary = corefields.scan(rows, http, log, job.cancel.is_set, job.set_progress)
                 CF["scan"] = {"env": job.env, "complete": True, "at": utc_now(), "found": job.summary["found"]} if job.summary["complete"] else None
@@ -6205,6 +6236,9 @@ def _cf_start(op, body):
             if env == "production" and body.get("confirm_phrase") != loadrun.PRODUCTION_PHRASE:
                 raise AppError("Production needs a deliberate extra step: type %s exactly." % loadrun.PRODUCTION_PHRASE)
         else:
+            scan = CF["scan"]
+            if not (scan and scan["env"] == env and scan["complete"]):
+                raise AppError("Scan Workfront first (CHECK FIELDS): the reset deletes the fields the scan found, so it needs a completed scan of %s." % env)
             if body.get("confirm") is not True:
                 raise AppError("Tick Confirm to unlock the reset before it runs.")
             reason = " ".join(str(body.get("reason") or "").split())[:300]
@@ -6212,10 +6246,8 @@ def _cf_start(op, body):
                 raise AppError("Say why you are resetting these fields: the reason is written in the report.")
             if env == "production" and body.get("confirm_phrase") != corefields.RESET_PHRASE:
                 raise AppError("Resetting in production needs a deliberate extra step: type %s exactly." % corefields.RESET_PHRASE)
-            entries, _persistent = _cf_crosswalk_entries(env)
-            have = {(e["airtable_field_id"], e["workfront_name"]) for e in entries}
-            if not any((r["field_id"], r["name"]) in have for r in CF["rows"]):
-                raise AppError("None of the listed fields was created by this tool in %s, so there is nothing to reset. (A field that already existed in Workfront is never deleted here.)" % env)
+            if not any(r["parameterId"] for r in CF["rows"]):
+                raise AppError("None of the listed fields has a parameterId in %s, so there is nothing to delete. Scan first: a field that does not exist in Workfront has no parameterId." % env)
         _cf_set_env(env)
         job = CoreFieldsJob(op, env, actor, reason, STATE["db_path"])
         CF["job"] = job
@@ -6252,8 +6284,7 @@ def api_corefields_crosswalk(q):
         secrets = _lt_secrets()
         names = {b.get("baseId"): b.get("name") or "" for b in (load_config()[0].get("bases") or [])}
         with db() as conn:
-            cw = corefields.Crosswalk(conn, CF["mem"])
-            entries = cw.entries(env)
+            entries = corefields.Crosswalk(conn).entries(env)
             info = corefields.airtable_info(conn, {r["field_id"] for r in CF["rows"]} | {e["airtable_field_id"] for e in entries}, names)
         data = corefields.crosswalk_csv(CF["rows"], env, entries, info, lambda t: loadconfig.redact(t, secrets))
         return (data, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="core-fields-crosswalk_%s_%s.csv"' % (env, _stamp())})

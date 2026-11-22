@@ -213,3 +213,10 @@ dialog::backdrop { background: rgba(20, 28, 45, .55); }
 dialog h2 { margin-top: 0; }
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0; }
 dl.facts dt { color: var(--muted); } dl.facts dd { margin: 0; font-weight: 600; font-family: ui-monospace, Consolas, monospace; }
+
+/* A button that destroys data in another system (Core fields in bulk RESET): red, and it says so. */
+button.destroy { background: var(--err); color: #fff; border-color: #7f1912; font-weight: 700; }
+button.destroy:hover:not(:disabled) { background: #8f1d16; }
+.warnbox { border: 2px solid var(--err); background: var(--errbg); color: #7f1912; border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
+.tipwrap { display: inline-block; }
+.tipwrap > button:disabled { pointer-events: none; }   /* a disabled button swallows hover, so the wrapper shows the explanation */

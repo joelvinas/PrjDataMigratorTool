@@ -55,22 +55,24 @@
     <thead><tr><th>Create</th><th class="num">Row</th><th>field_id</th><th>name</th><th>label</th><th>dataType</th><th>displayType</th><th>description</th><th>isRequired</th><th>parameterId</th><th>lastUpdateDate</th><th>Status</th></tr></thead><tbody></tbody>
   </table></div>
   <div class="row">
-    <button id="btnCreate" type="button" class="primary" disabled>CREATE NEW FIELDS</button>
+    <span id="createWrap" class="tipwrap"><button id="btnCreate" type="button" class="primary" disabled>CREATE NEW FIELDS</button></span>
     <span id="createPhraseBox" hidden><label for="createPhrase">Type CREATE IN PRODUCTION to allow it</label> <input id="createPhrase" type="text" autocomplete="off"></span>
     <button id="btnCancel" type="button" hidden>Cancel</button>
     <span id="progress" class="hint" aria-live="polite"></span>
   </div>
+  <div class="warnbox" id="resetWarn" role="alert"><strong>&#9888; RESET PERMANENTLY DELETES FIELDS FROM WORKFRONT.</strong> It deletes every listed field that has a parameterId, including fields that were already in Workfront before this tool touched them, together with any values stored in them. It cannot be undone. Use it to remove fields that were added incorrectly so they can be corrected and created again.</div>
   <div class="row">
-    <label for="resetConfirm"><input id="resetConfirm" type="checkbox"> Confirm: unlock RESET</label>
-    <button id="btnReset" type="button" disabled>RESET listed fields</button>
+    <label for="resetConfirm"><input id="resetConfirm" type="checkbox"> I understand this deletes fields from Workfront for good: unlock RESET</label>
+  </div>
+  <div class="row">
     <label for="resetReason">Reason</label>
     <input id="resetReason" type="text" maxlength="300" autocomplete="off" placeholder="Written in the reset report">
     <span id="resetPhraseBox" hidden><label for="resetPhrase">Type DELETE FIELDS IN PRODUCTION to allow it</label> <input id="resetPhrase" type="text" autocomplete="off"></span>
+    <span id="resetWrap" class="tipwrap"><button id="btnReset" type="button" class="destroy" disabled>&#9888; RESET: DELETE LISTED FIELDS FROM WORKFRONT</button></span>
   </div>
-  <p class="hint">RESET deletes, one at a time from the top, each listed field that <strong>this tool created</strong> in the chosen environment (the crosswalk says which), then removes its crosswalk row. A field that was already in Workfront when it was scanned is never deleted. It stops at the first error. A new CHECK FIELDS is needed afterwards.</p>
+  <p class="hint">Workflow: upload the fields you added incorrectly, CHECK FIELDS to get their parameterIds, tick the confirmation and RESET. Each field is deleted from the chosen environment and from the crosswalk, top to bottom, stopping at the first error. Fix the CSV (description, dataType and so on), upload it, check, and create the fields again. A new CHECK FIELDS is needed after a reset.</p>
   <div id="resultMsg" class="msg" aria-live="polite"></div>
   <p id="downloads" class="hint"></p>
-  <p id="crosswalkNote" class="hint"></p>
 </section>
 </main>
 </div>

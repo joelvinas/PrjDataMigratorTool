@@ -1,6 +1,6 @@
 """HTTP test of the Core bulk field endpoints (/api/corefields/...) against the running app and a FAKE Workfront Core served from this script. Fabricated fields; a fake key.
 Covers the upload refusals, the scan and its pop-up confirmation, the locks (no create before a scan, none after an environment change, none in production without the phrase), a create
-that stops at the first error, the crosswalk CSV, a reset that never deletes a field this tool did not create, the three reports (always written), the file-name guard, and that
+that stops at the first error, the crosswalk CSV, a reset that deletes every listed field with a parameterId and clears the crosswalk, the three reports (always written), the file-name guard, and that
 the key never appears in a response, a report, the database or the server's log."""
 import base64, json, os, sqlite3, sys, time, urllib.error, urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,7 +42,7 @@ GOOD = [["fldA1", "Color Code", "Color Code", "TEXT", "TEXT", "A colour", "true"
 try:
     s, r = call("GET", "/api/corefields/setup")
     check("setup lists the four Core environments with only the configured ones usable, and shows no key", s == 200 and [(e["name"], e["configured"]) for e in r["environments"]] == [("sandbox1", True), ("sandbox2", False), ("preview", False), ("production", True)]
-          and KEY not in json.dumps(r) and r["db_connected"] and r["crosswalk_saved"] is False, (s, r))
+          and KEY not in json.dumps(r) and r["db_connected"], (s, r))
     s, r = call("GET", "/api/corefields/template.csv", raw=True)[0:2]
     check("the template downloads (header only)", s == 200 and r.decode().strip() == "field_id,name,label,dataType,displayType,description,isRequired")
 
@@ -99,8 +99,10 @@ try:
     fake.refuse.clear()
     s, r = post("/api/corefields/create", {"environment": "sandbox1", "actor": "J Tester"})
     st = poll(); rb = rowsby(st)
-    check("pressing it again continues with the rest only, and every created row has its crosswalk entry (memory until migration 026 is applied)", st["job"]["status"] == "done" and st["job"]["summary"]["created"] == 2 and rb["Unit Count"]["parameterId"] == "P0003"
-          and [r["in_crosswalk"] for r in st["rows"]] == [True, False, True, True] and st["crosswalk_saved"] is False, (st["job"], rb))
+    check("pressing it again continues with the rest only, and every created row has its crosswalk entry (saved in core_field_crosswalk)", st["job"]["status"] == "done" and st["job"]["summary"]["created"] == 2 and rb["Unit Count"]["parameterId"] == "P0003"
+          and [r["in_crosswalk"] for r in st["rows"]] == [True, False, True, True], (st["job"], rb))
+    c = sqlite3.connect(DBF); n = c.execute("select count(*) from core_field_crosswalk where environment='sandbox1'").fetchone()[0]; c.close()
+    check("the database holds one crosswalk row per created field (three), and none for the field that already existed", n == 3, n)
     s, body, heads = call("GET", "/api/corefields/crosswalk.csv", raw=True)
     import csv, io
     lines = list(csv.reader(io.StringIO(body.decode("utf-8"))))
@@ -108,37 +110,36 @@ try:
           "workfront_name", "workfront_label", "workfront_dataType", "workfront_displayType", "workfront_description", "workfront_isRequired", "parameterId", "lastUpdateDate"]
           and lines[1][:9] == ["appSampleBase001", "Sample Shop", "tblOrd", "Orders", "fldA1", "Colour", "singleLineText", "sandbox1", "Color Code"] and lines[1][14] == "P0001" and lines[2][14] == "X1" and lines[4][14] == "P0003", lines)
 
-    # ---- migration 026 applied: the crosswalk now persists
-    c = sqlite3.connect(DBF); c.executescript(open(os.path.join(ROOT, "sql", "migration_026_add_core_field_crosswalk.sql"), encoding="utf-8").read()); c.close()
-    s, r = call("GET", "/api/corefields/state")
-    check("with the table applied the page says the crosswalk is saved (existing memory rows are not copied: they stay in the CSV)", r["crosswalk_saved"] is True and not any(x["in_crosswalk"] for x in r["rows"]), r)
-    s, r = post("/api/corefields/reset", {"environment": "sandbox1", "actor": "J Tester", "reason": "rehearsal over", "confirm": True})
-    check("a reset with nothing this tool recorded in the database is refused", s == 400 and "nothing to reset" in r["error"], (s, r))
-    s, r = post("/api/corefields/upload", {"csv_base64": csv_b64(GOOD[:3]), "filename": "again.csv"})
-    s, r = post("/api/corefields/environment", {"environment": "sandbox1"})
-    fake.params.pop("P0001"); fake.params.pop("P0002", None); fake.params.pop("P0003", None); fake.params.pop("P0004", None)   # the earlier test fields are removed by hand
-    s, r = post("/api/corefields/scan", {"environment": "sandbox1", "scan_ok": True}); st = poll()
-    s, r = post("/api/corefields/create", {"environment": "sandbox1", "actor": "J Tester"}); st = poll(); rb = rowsby(st)
-    c = sqlite3.connect(DBF); n = c.execute("select count(*) from core_field_crosswalk where environment='sandbox1'").fetchone()[0]; c.close()
-    check("created fields are now saved to core_field_crosswalk, one row per field", st["job"]["status"] == "done" and n == 2 and st["rows"][1]["status"] == "exists" and rb["Budget Amount"]["parameterId"], (st["job"], n))
-
+    # ---- reset: deletes the listed fields that exist in Workfront (the scan found X1; this tool created the others) and clears their crosswalk rows
     n0 = len(fake.reqs)
     for label, body in (("no confirmation", {"reason": "done testing"}), ("no reason", {"confirm": True, "reason": " "})):
         s, r = post("/api/corefields/reset", dict({"environment": "sandbox1", "actor": "J Tester"}, **body))
         check("a reset with %s is refused and sends nothing" % label, s == 400 and len(fake.reqs) == n0, (s, r))
-    s, r = post("/api/corefields/reset", {"environment": "sandbox1", "actor": "J Tester", "reason": "done testing", "confirm": True})
+    st = call("GET", "/api/corefields/state")[1]
+    check("the state offers the reset (red button) once a scan is complete and rows have a parameterId", st["can_reset"] is True, st)
+    s, r = post("/api/corefields/reset", {"environment": "sandbox1", "actor": "J Tester", "reason": "wrong dataType on two fields", "confirm": True})
     st = poll(); rb = rowsby(st)
-    check("reset deletes only what this tool made (the field that already existed stays in Workfront), clears the crosswalk and the grid, and needs a new scan", s == 200 and st["job"]["status"] == "done" and st["job"]["summary"]["deleted"] == 2
-          and "X1" in fake.params and not any(p["name"] in ("Color Code", "Budget Amount") for p in fake.params.values()) and rb["Color Code"]["status"] == "deleted" and rb["Color Code"]["parameterId"] == "" and rb["Color Flag"]["parameterId"] == "X1"
-          and not st["scan_complete"] and st["can_reset"] is False, (st["job"], list(fake.params)))
+    check("reset deletes EVERY listed field that has a parameterId, including the one that already existed, clears the grid and needs a new scan", s == 200 and st["job"]["status"] == "done" and st["job"]["summary"]["deleted"] == 4
+          and fake.params == {} and all(x["status"] == "deleted" and x["parameterId"] == "" and x["checked"] for x in st["rows"]) and not st["scan_complete"] and st["can_reset"] is False, (st["job"]["status"], list(fake.params), [(x["status"], x["parameterId"], x["checked"]) for x in st["rows"]], st["scan_complete"], st["can_reset"]))
     c = sqlite3.connect(DBF); n = c.execute("select count(*) from core_field_crosswalk").fetchone()[0]; c.close()
     check("the crosswalk table is empty after the reset", n == 0, n)
     s, body, heads = call("GET", "/api/corefields/report?file=" + st["reports"]["reset"], raw=True)
     html = quopri.decodestring(body).decode("utf-8", "replace")
-    check("a separate reset report holds who, why and the DELETE calls", s == 200 and "DELETE /param/" in html and "rehearsal" not in html and "done testing" in html and "J Tester" in html and st["reports"]["reset"] != st["reports"]["create"], html[:300])
+    check("a separate reset report holds who, why and the DELETE calls", s == 200 and html.count("DELETE /param/") >= 4 and "wrong dataType on two fields" in html and "J Tester" in html and st["reports"]["reset"] != st["reports"]["create"], html[:300])
+    s, r = post("/api/corefields/reset", {"environment": "sandbox1", "actor": "J Tester", "reason": "again", "confirm": True})
+    check("a second reset without a fresh scan is refused", s == 400 and "Scan Workfront first" in r["error"], (s, r))
+    s, r = post("/api/corefields/scan", {"environment": "sandbox1", "scan_ok": True}); st = poll()
+    s, r = post("/api/corefields/reset", {"environment": "sandbox1", "actor": "J Tester", "reason": "again", "confirm": True})
+    check("after a scan that finds nothing there is nothing to delete, and it is said", s == 400 and "nothing to delete" in r["error"], (s, r))
+    s, r = post("/api/corefields/upload", {"csv_base64": csv_b64([["fldA1", "Color Code", "Color Code", "NMBR", "TEXT", "corrected", "true"]]), "filename": "fixed.csv"})
+    s, r = post("/api/corefields/environment", {"environment": "sandbox1"})
+    s, r = post("/api/corefields/scan", {"environment": "sandbox1", "scan_ok": True}); st = poll()
+    s, r = post("/api/corefields/create", {"environment": "sandbox1", "actor": "J Tester"}); st = poll()
+    check("the corrected CSV (a new upload scans only its own fields) recreates the field with the new type", st["job"]["status"] == "done" and len(fake.params) == 1 and list(fake.params.values())[0]["dataType"] == "NMBR", list(fake.params.values()))
     s, r = post("/api/corefields/environment", {"environment": "production"}); s, r = post("/api/corefields/scan", {"environment": "production", "scan_ok": True}); poll()
+    n0 = len([q for q in fake.reqs if q[0] == "DELETE"])
     s, r = post("/api/corefields/reset", {"environment": "production", "actor": "J Tester", "reason": "x test", "confirm": True})
-    check("a reset in production needs its own exact phrase (and here has nothing recorded to delete)", s == 400 and ("DELETE FIELDS IN PRODUCTION" in r["error"] or "nothing to reset" in r["error"]), (s, r))
+    check("a reset in production needs its own exact phrase and sends nothing without it", s == 400 and "DELETE FIELDS IN PRODUCTION" in r["error"] and len([q for q in fake.reqs if q[0] == "DELETE"]) == n0, (s, r))
 
     # ---- a failure before the first call still leaves a report
     cfg2 = json.loads(open("config.json", encoding="utf-8").read()); cfg2["workfront"]["core"]["sandbox1"]["base_url"] = "http://127.0.0.1:9"

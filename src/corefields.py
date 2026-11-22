@@ -7,11 +7,11 @@ functions over a list of row dicts, so it is tested without a server:
     parse_upload(bytes)  -> (rows, problems)      read and validate; any problem refuses the whole file, with a row number for each
     scan(...)            GET /param/search per row  fills parameterId and lastUpdateDate of a field that already exists and unchecks it
     create(...)          POST /param per checked row, top to bottom, STOPPING at the first error; one crosswalk row per success
-    reset(...)           DELETE /param/{id} per row this tool created, STOPPING at the first error; the crosswalk row goes after each success
+    reset(...)           DELETE /param/{id} per row with a parameterId (scanned or created), STOPPING at the first error; the crosswalk row goes after each success
 
 Rules this module keeps (CLAUDE.md): no credential is stored, logged or reported (workfronthttp.Http cleans every text); only field metadata moves, never a record value;
-the order is the order of the file (deterministic); a person decides, the tool never creates or deletes on its own. Reset deletes ONLY a parameter this tool created and
-recorded in the crosswalk: a field that was already in Workfront when the scan found it is never deleted here.
+the order is the order of the file (deterministic); a person decides, the tool never creates or deletes on its own. Reset DELETES EXISTING FIELDS ON PURPOSE (a field added
+wrongly is deleted, with the values stored in it, so it can be recreated): it deletes every listed row that has a parameterId, whether this tool created it or the scan found it.
 
 Routes (Core, relative to base_url + api_path from config.json): POST /param, GET /param/search, GET /param/{id}, DELETE /param/{id}. The reply of a create is read for
 data.ID and data.lastUpdateDate. None of this has been run against a real Workfront; the owner's examples were partly garbled, so the paths follow coretransport.py.
@@ -31,6 +31,7 @@ ENVIRONMENTS = lc.ENVIRONMENTS
 RESET_PHRASE = "DELETE FIELDS IN PRODUCTION"            # typed to reset in production (CREATE IN PRODUCTION, from loadrun, is typed to create there)
 MAX_ROWS = 5000
 MAX_CELL = 4000
+PARAM_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
 FIELD_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 TRUE_WORDS, FALSE_WORDS = ("true", "yes", "1"), ("false", "no", "0", "")
 # Characters Workfront does not accept in a name (the documented list the field name validator already uses), plus line breaks and other control characters.
@@ -148,26 +149,19 @@ def parse_upload(b64_or_bytes):
     return ([], problems) if problems else (rows, [])
 
 
-# ------------------------------------------------------------------ the crosswalk (database table, or memory until migration 026 is applied)
+# ------------------------------------------------------------------ the crosswalk (table core_field_crosswalk, migration 026)
 TABLE = "core_field_crosswalk"
 COLUMNS = ("environment", "airtable_field_id", "workfront_name", "workfront_label", "workfront_data_type", "workfront_display_type", "workfront_description",
            "workfront_is_required", "parameter_id", "last_update_date")
 
 
-def table_exists(conn):
-    return conn is not None and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone() is not None
-
-
 class Crosswalk(object):
-    """One row per Core field this tool created. In the database when migration 026 is applied, otherwise in the `mem` dict the caller keeps (lost when the app stops)."""
-    def __init__(self, conn, mem):
-        self.conn, self.mem = conn, mem
-        self.persistent = table_exists(conn)
+    """One row per Core field this tool created, per environment, in the database. Every change is committed at once."""
+    def __init__(self, conn):
+        self.conn = conn
 
     def entries(self, env):
-        if self.persistent:
-            return [dict(r) for r in self.conn.execute("SELECT * FROM %s WHERE environment=? ORDER BY crosswalk_id" % TABLE, (env,))]
-        return [dict(e) for e in self.mem.get(env, [])]
+        return [dict(r) for r in self.conn.execute("SELECT * FROM %s WHERE environment=? ORDER BY crosswalk_id" % TABLE, (env,))]
 
     def find(self, env, field_id, name):
         for e in self.entries(env):
@@ -175,23 +169,15 @@ class Crosswalk(object):
                 return e
         return None
 
-    def by_parameter(self, env, pid):
-        return next((e for e in self.entries(env) if e["parameter_id"] == pid), None)
-
     def add(self, env, row, parameter_id, last_update):
         vals = (env, row["field_id"], row["name"], row["label"], row["dataType"], row["displayType"], row["description"], 1 if row["isRequired"] else 0, parameter_id, last_update or "")
-        if self.persistent:
-            self.conn.execute("INSERT INTO %s(%s) VALUES (%s)" % (TABLE, ", ".join(COLUMNS), ", ".join("?" * len(COLUMNS))), vals)
-            self.conn.commit()
-        else:
-            self.mem.setdefault(env, []).append(dict(zip(COLUMNS, vals)))
+        self.conn.execute("INSERT INTO %s(%s) VALUES (%s)" % (TABLE, ", ".join(COLUMNS), ", ".join("?" * len(COLUMNS))), vals)
+        self.conn.commit()
 
-    def remove(self, env, parameter_id):
-        if self.persistent:
-            self.conn.execute("DELETE FROM %s WHERE environment=? AND parameter_id=?" % TABLE, (env, parameter_id))
-            self.conn.commit()
-        else:
-            self.mem[env] = [e for e in self.mem.get(env, []) if e["parameter_id"] != parameter_id]
+    def forget(self, env, parameter_id, field_id, name):
+        """Remove the rows of this environment that record this parameter or this (field_id, name): the field is gone from Workfront, so the record of it goes too."""
+        self.conn.execute("DELETE FROM %s WHERE environment=? AND (parameter_id=? OR (airtable_field_id=? AND workfront_name=?))" % TABLE, (env, parameter_id or "", field_id, name))
+        self.conn.commit()
 
 
 # ------------------------------------------------------------------ the call log (every attempt, in order)
@@ -312,33 +298,38 @@ def create(rows, env, http, crosswalk, log, should_stop=lambda: False, progress=
 
 
 def reset(rows, env, http, crosswalk, log, should_stop=lambda: False, progress=lambda p: None):
-    """DELETE /param/{id} for each row the crosswalk says this tool created in `env`, from the top down, STOPPING at the first error. After each success the crosswalk row is removed
-    and the grid row is cleared and checked again. A row with no crosswalk row (it never existed, or it was already in Workfront) is skipped and counted, never deleted."""
-    todo, skipped = [], 0
-    for r in rows:
-        e = crosswalk.find(env, r["field_id"], r["name"])
-        if e:
-            todo.append((r, e))
-        else:
-            skipped += 1
-    deleted, error, cancelled = 0, None, False
+    """DELETE /param/{id} for every listed row that has a parameterId (from the scan, or from a create), from the top down, STOPPING at the first error. THE POINT OF THIS IS TO DELETE
+    EXISTING FIELDS, so a field this tool did not create is deleted too: the person scanned, saw the parameterIds, and asked for it. It cannot be undone, and the values stored in the
+    field go with it. After each success the field's crosswalk rows are removed and the grid row is cleared and ticked again. A row with no parameterId but a crosswalk row (the
+    scan found nothing, so the field is already gone) loses only the crosswalk row; nothing is sent for it."""
+    todo = [r for r in rows if r["parameterId"]]
+    bad = next((r for r in todo if not PARAM_ID_RE.match(r["parameterId"])), None)
+    if bad is not None:                                   # an ID is put into the URL path: refuse anything that is not a plain ID before sending a single call
+        return {"operation": "reset", "deleted": 0, "planned": len(todo), "crosswalk_only_cleared": 0, "cancelled": False,
+                "error": {"row": bad["n"], "name": bad["name"], "message": "The parameterId is not a plain ID, so nothing was sent.", "status": None}}
+    deleted, cleared, error, cancelled = 0, 0, None, False
     try:
-        for r, e in todo:
+        for r in rows:
             _check(should_stop)
+            if not r["parameterId"]:
+                if crosswalk.find(env, r["field_id"], r["name"]):
+                    crosswalk.forget(env, "", r["field_id"], r["name"])
+                    cleared += 1
+                continue
             progress({"phase": "reset", "done": deleted, "total": len(todo), "item": r["name"]})
             log.set(operation="reset", row=r["n"], field_id=r["field_id"], name=r["name"])
             try:
-                http.request("DELETE", "/param/" + e["parameter_id"])
+                http.request("DELETE", "/param/" + r["parameterId"])
             except HttpError as x:
                 r["status"], r["message"] = "delete failed", str(x)
                 error = {"row": r["n"], "name": r["name"], "message": str(x), "status": x.status}
                 break
-            crosswalk.remove(env, e["parameter_id"])
+            crosswalk.forget(env, r["parameterId"], r["field_id"], r["name"])
             r["parameterId"], r["lastUpdateDate"], r["status"], r["message"], r["checked"] = "", "", "deleted", "", True
             deleted += 1
     except Stop:
         cancelled = True
-    return {"operation": "reset", "deleted": deleted, "planned": len(todo), "skipped_not_created_here": skipped, "error": error, "cancelled": cancelled}
+    return {"operation": "reset", "deleted": deleted, "planned": len(todo), "crosswalk_only_cleared": cleared, "error": error, "cancelled": cancelled}
 
 
 # ------------------------------------------------------------------ the crosswalk CSV
