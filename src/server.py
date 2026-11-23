@@ -51,6 +51,9 @@ import tableload
 import coretargets
 import corefields
 import corefields_report
+import calcforms
+import calcpreflight
+import calcpush
 import workfronthttp
 import emergency
 import emergency_report
@@ -921,6 +924,97 @@ CREATE TABLE core_field_crosswalk (
     UNIQUE (environment, airtable_field_id, workfront_name)
 );
 CREATE INDEX idx_core_field_crosswalk_env ON core_field_crosswalk(environment, airtable_field_id);
+
+-- 24. The calculated fields page (migration 027): Airtable formulas translated into Workfront Core calculated fields. Metadata only (formula and expression text,
+-- statuses, IDs, call outcomes). One Core field (PARAM) may be shared by several Airtable formula fields and placed on several custom forms (CTGY), each placement
+-- (CTGYPA) with its own expression, so calc_formula_crosswalk is keyed by (environment, category_id, parameter_id).
+-- One row per preflight run: what was chosen, who approved it, and the fingerprints used to detect drift before a push.
+CREATE TABLE calc_preflight_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production')),
+    base_id TEXT NOT NULL,
+    table_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,             -- the Core CTGY (custom form) ID chosen for this run
+    category_name TEXT,                    -- its name as Workfront reported it, for display
+    run_at TEXT NOT NULL,                  -- UTC
+    run_by TEXT NOT NULL,
+    schema_hash TEXT NOT NULL,             -- fingerprint of the table's formula fields (ID, formula text, result type) at preflight time
+    crosswalk_hash TEXT NOT NULL,          -- fingerprint of the crosswalk rows the run used (core_field_crosswalk, calc_formula_crosswalk)
+    state TEXT NOT NULL DEFAULT 'preflight' CHECK(state IN ('preflight', 'approved', 'pushing', 'pushed', 'superseded')),
+    approved_by TEXT,
+    approved_at TEXT,
+    approval_reason TEXT
+);
+CREATE INDEX idx_calc_preflight_runs_table ON calc_preflight_runs(environment, table_id, run_id);
+
+-- One row per formula per run: the outcome of the preflight (the approved snapshot the push reads, and the audit trail).
+CREATE TABLE calc_preflight_items (
+    item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    formula_field_id TEXT NOT NULL,        -- the Airtable field ID of the formula field
+    status TEXT NOT NULL CHECK(status IN ('TRANSLATABLE', 'BLOCKED_MISSING_REFERENCE', 'BLOCKED_UNSUPPORTED_FUNCTION', 'BLOCKED_DEPENDENCY')),
+    reason TEXT,
+    source_formula TEXT,                   -- the Airtable formula as stored (the snapshot)
+    referenced_field_ids TEXT,             -- JSON array
+    functions_found TEXT,                  -- JSON array of distinct function names, sorted
+    depends_on TEXT,                       -- JSON array: formula field IDs this one reads
+    push_order INTEGER,                    -- dependency order, 1 first
+    translated_expression TEXT,            -- the Workfront expression for THIS form (NULL when blocked)
+    target_name TEXT,                      -- the Core field name (the API name; the shared field's name when several Airtable fields consolidate)
+    target_label TEXT,
+    workfront_data_type TEXT,              -- result type of the PARAM (set when the PARAM is created; a reused PARAM keeps its own)
+    workfront_display_type TEXT,
+    reuse_parameter_id TEXT,               -- the PARAM already in Core under target_name (shared field): the push does not create it, it only places it on this form
+    FOREIGN KEY (run_id) REFERENCES calc_preflight_runs(run_id),
+    UNIQUE (run_id, formula_field_id)
+);
+
+-- Durable record of every placement of a calculated field on a form: one row per (environment, form, field). This is what the crosswalk of migration 026 cannot say:
+-- the same parameter_id appears on several forms, each with its own expression and its own CTGYPA.
+CREATE TABLE calc_formula_crosswalk (
+    placement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL CHECK(environment IN ('sandbox1', 'sandbox2', 'preview', 'production')),
+    category_id TEXT NOT NULL,             -- CTGY: the custom form this placement is on
+    parameter_id TEXT NOT NULL,            -- PARAM: the (possibly shared) calculated field
+    ctgypa_id TEXT,                        -- CTGYPA: the field-on-form association (NULL until the field is attached)
+    airtable_field_id TEXT NOT NULL,       -- the Airtable formula field this placement came from
+    airtable_table_id TEXT NOT NULL,
+    workfront_name TEXT NOT NULL,
+    expression TEXT,                       -- the expression last written to this CTGYPA (NULL until step 3)
+    source_run_id INTEGER,                 -- the approved preflight run that produced it
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE (environment, category_id, parameter_id),
+    UNIQUE (environment, category_id, airtable_field_id),
+    FOREIGN KEY (source_run_id) REFERENCES calc_preflight_runs(run_id)
+);
+CREATE INDEX idx_calc_formula_crosswalk_param ON calc_formula_crosswalk(environment, parameter_id);
+
+-- Push progress per item, so a retry touches only the failed ones. The IDs live in calc_formula_crosswalk once known.
+CREATE TABLE calc_push_items (
+    item_id INTEGER PRIMARY KEY,           -- the calc_preflight_items row
+    step_done TEXT NOT NULL DEFAULT 'none' CHECK(step_done IN ('none', 'created', 'attached', 'expression_written', 'verified')),
+    last_error TEXT,                       -- cleaned message, never a token
+    updated_at TEXT,
+    FOREIGN KEY (item_id) REFERENCES calc_preflight_items(item_id)
+);
+
+-- Every Workfront call the push makes (separate from api_call_log, which is the Airtable call log).
+CREATE TABLE calc_push_log (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    item_id INTEGER,
+    step TEXT NOT NULL,                    -- create_param, read_form, attach_param, read_association, write_expression, verify
+    http_method TEXT NOT NULL,
+    endpoint TEXT NOT NULL,                -- path only, never headers or token
+    sent_at TEXT NOT NULL,                 -- UTC
+    received_at TEXT,
+    http_status INTEGER,
+    success INTEGER NOT NULL CHECK(success IN (0, 1)),
+    error_message TEXT,                    -- cleaned
+    FOREIGN KEY (run_id) REFERENCES calc_preflight_runs(run_id)
+);
+CREATE INDEX idx_calc_push_log_run ON calc_push_log(run_id, log_id);
 '''
 
 
@@ -6306,12 +6400,288 @@ def api_corefields_report(q):
 # --------------------------------------------------------------------------
 # HTTP layer
 # --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Calculated fields (/calcfields): the preflight of Airtable formula fields into Core calculated fields (src/calcpreflight.py, tables from migration 027). READ-ONLY toward
+# Workfront: nothing here calls Workfront or holds a token; it reads the schema and the crosswalks and saves runs and a person's approval. The push is a separate, later step.
+CALC_RUN_RE = re.compile(r"^[0-9]{1,9}$")
+
+
+def _cp(fn_, *a, **k):
+    try:
+        return fn_(*a, **k)
+    except calcpreflight.PreflightError as e:
+        raise AppError(e.message, e.status)
+
+
+def _calc_run_id(src):
+    raw = src.get("run_id") if isinstance(src, dict) else None
+    raw = raw[0] if isinstance(raw, list) else raw
+    raw = str(raw if raw is not None else "")
+    if not CALC_RUN_RE.match(raw):
+        raise AppError("Choose a preflight run.")
+    return int(raw)
+
+
+def _calc_forms_table(conn):
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calc_valid_forms'").fetchone())
+
+
+def _calc_forms_load(conn):
+    """Migration 028: when the table exists, the saved list is the list (read again each time the page loads, so a different database brings its own). Without the table the
+    list stays in memory only."""
+    if not _calc_forms_table(conn):
+        return
+    rows = conn.execute("SELECT category_id, name, uploaded_at, source_filename FROM calc_valid_forms ORDER BY position").fetchall()
+    with _calc_lock:
+        CALC.update(forms=[{"category_id": r[0], "name": r[1]} for r in rows], forms_filename=(rows[0][3] or "") if rows else "", forms_at=rows[0][2] if rows else None)
+
+
+def api_calcfields_setup(_q=None):
+    """The tables that have formula fields (abandoned ones left out), the environments and the displayType a calculated field gets."""
+    try:
+        with db() as conn:
+            if not all(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone() for t in calcpreflight.TABLES):
+                raise AppError("The calculated fields tables are not in this database yet (migration 027). Run python sql/apply_migrations.py on it, then connect again.", 409)
+            _calc_forms_load(conn)
+            rows = conn.execute("SELECT f.base_id, f.table_id, MAX(f.table_name), COUNT(*) FROM airtable_fields f LEFT JOIN field_names n ON n.airtable_field_id = f.field_id "
+                                "WHERE f.data_type='formula' AND COALESCE(n.abandoned, 0)=0 GROUP BY f.base_id, f.table_id ORDER BY f.base_id, MAX(f.table_name), f.table_id").fetchall()
+        tables, connected = [{"base_id": r[0], "table_id": r[1], "table_name": r[2], "formulas": r[3]} for r in rows], True
+    except AppError as e:
+        if e.status == 409:
+            raise
+        tables, connected = [], False
+    return {"db_connected": connected, "tables": tables, "environments": list(loadconfig.ENVIRONMENTS), "display_type": calcpreflight.CALC_DISPLAY_TYPE, "forms": CALC["forms"],
+            "forms_filename": CALC["forms_filename"], "forms_at": CALC["forms_at"], "production_phrase": loadrun.PRODUCTION_PHRASE}
+
+
+def api_calcfields_preflight(body):
+    """Run a preflight for one table and one custom form. Saves the run; sends nothing."""
+    base = check_base_id(body.get("base_id"))
+    table = str(body.get("table_id") or "")
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table.")
+    cid = str(body.get("category_id") or "").strip()
+    listed = {f["category_id"]: f["name"] for f in CALC["forms"]}
+    if not listed:
+        raise AppError("Upload the list of valid forms first: the form must be chosen from it.", 409)
+    if cid not in listed:
+        raise AppError("That form is not on the list of valid forms. Choose one from the list, or upload a list that holds it.", 409)
+    with db() as conn:
+        run_id = _cp(calcpreflight.run, conn, str(body.get("environment") or ""), base, table, cid, listed[cid], body.get("actor"))
+        return {"run_id": run_id, "report": _cp(calcpreflight.report, conn, run_id), "drift": _cp(calcpreflight.drift, conn, run_id)}
+
+
+def api_calcfields_runs(q):
+    """The saved runs for a table (newest first), with the count per status, so an earlier run can be opened again."""
+    table = (q.get("table_id") or [""])[0]
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table.")
+    with db() as conn:
+        runs = []
+        for r in conn.execute("SELECT run_id, environment, category_id, category_name, run_at, run_by, state, approved_by, approved_at FROM calc_preflight_runs WHERE table_id=? ORDER BY run_id DESC LIMIT 50", (table,)).fetchall():
+            counts = {s: n for s, n in conn.execute("SELECT status, COUNT(*) FROM calc_preflight_items WHERE run_id=? GROUP BY status", (r[0],))}
+            runs.append(dict(zip(("run_id", "environment", "category_id", "category_name", "run_at", "run_by", "state", "approved_by", "approved_at"), r), counts=counts))
+    return {"runs": runs}
+
+
+def api_calcfields_report(q):
+    with db() as conn:
+        run_id = _calc_run_id(q)
+        return {"run_id": run_id, "report": _cp(calcpreflight.report, conn, run_id), "drift": _cp(calcpreflight.drift, conn, run_id)}
+
+
+def api_calcfields_approve(body):
+    """A person approves a run: who, when and why are saved. Refused after drift, with nothing translatable, or when the run is not waiting for approval."""
+    with db() as conn:
+        run_id = _calc_run_id(body)
+        res = _cp(calcpreflight.approve, conn, run_id, body.get("actor"), body.get("reason"))
+        return dict(res, report=_cp(calcpreflight.report, conn, run_id), drift=[])
+
+
+def _calc_cell(v):
+    """A CSV cell for Excel: a text that starts with = + - @ or a control character is prefixed with an apostrophe so it is read as text, not run as a formula."""
+    v = "" if v is None else str(v)
+    return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
+
+def api_calcfields_report_csv(q):
+    """The report of one run as a CSV: field metadata, formula and expression text, statuses and reasons. No record value."""
+    with db() as conn:
+        run_id = _calc_run_id(q)
+        rep = _cp(calcpreflight.report, conn, run_id)
+    items = sorted(rep["translatable"] + [d for v in rep["blocked"].values() for d in v], key=lambda d: (d["push_order"] is None, d["push_order"] or 0, d["field_id"]))
+    rows = [[d["field_id"], d["field_name"], d["status"], d["reason"], d["push_order"], d["target_name"], d["data_type"], d["display_type"], d["reuse_parameter_id"], d["source_formula"], d["expression"]] for d in items]
+    body = _csv_bytes(["field_id", "field_name", "status", "reason", "push_order", "core_name", "dataType", "displayType", "shared_parameter_id", "airtable_formula", "workfront_expression"],
+                      [[_calc_cell(c) for c in r] for r in rows])
+    return (body, "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="calculated-fields-run%d_%s.csv"' % (run_id, _stamp())})
+
+
+# ---- the list of valid forms, and the push
+# The list of valid custom forms is held in memory (one list for the whole app, like the Core fields grid): upload it again after the app restarts. The tool reads or writes only a
+# form whose ID is on it. The push runs as a background job with progress and Cancel; every Workfront call it makes is logged in calc_push_log.
+CALC = {"forms": [], "forms_filename": "", "forms_at": None, "job": None}
+_calc_lock = threading.RLock()
+
+
+def _calc_form_ids():
+    return [f["category_id"] for f in CALC["forms"]]
+
+
+class CalcPushJob:
+    def __init__(self, run_id, env, actor, item_ids, db_path):
+        self.id = str(int(time.time() * 1000))
+        self.run_id, self.env, self.actor, self.item_ids, self.db_path = run_id, env, actor, item_ids, db_path
+        self.status, self.error, self.progress, self.summary = "running", None, {}, {}
+        self.started_at, self.finished_at = utc_now(), None
+        self.cancel = threading.Event()
+
+    def set_progress(self, p):
+        self.progress = dict(p)
+
+
+def api_calcfields_forms_template(_q=None):
+    return (calcforms.template_csv().encode("utf-8"), "text/csv; charset=utf-8", {"Content-Disposition": 'attachment; filename="valid-forms-template.csv"'})
+
+
+def api_calcfields_forms_upload(body):
+    """Read and validate the CSV of valid forms (category_id, name). Any problem refuses the whole file and lists every problem with its row; a good file replaces the list."""
+    forms, problems = calcforms.parse_upload(body.get("csv_base64"))
+    if problems:
+        raise AppError("The file was not loaded: %d problem(s) found. Fix them and upload it again." % len(problems), 400, {"problems": problems[:200], "problem_count": len(problems)})
+    name, when = str(body.get("filename") or "")[:120], utc_now()
+    saved = False
+    try:
+        with db() as conn:
+            if _calc_forms_table(conn):   # migration 028: keep the accepted list (all or nothing: the old list stays if this fails)
+                with conn:
+                    conn.execute("DELETE FROM calc_valid_forms")
+                    conn.executemany("INSERT INTO calc_valid_forms (category_id, name, position, uploaded_at, source_filename) VALUES (?,?,?,?,?)",
+                                     [(f["category_id"], f["name"], i, when, name) for i, f in enumerate(forms)])
+                saved = True
+    except AppError:
+        pass   # no database connected: the list is still usable from memory
+    with _calc_lock:
+        CALC.update(forms=forms, forms_filename=name, forms_at=when)
+        return {"forms": forms, "filename": name, "uploaded_at": when, "saved": saved}
+
+
+def _calc_push_busy():
+    j = CALC["job"]
+    return bool(j and j.status == "running")
+
+
+def api_calcfields_form_check(body):
+    """One read-only GET of the form of a saved run, to see that it exists in Workfront and what it is called. Only a form on the list of valid forms can be read, and the call is
+    written to the push log of that run. Needs the person's confirmation: it does contact Workfront."""
+    if body.get("confirm") is not True:
+        raise AppError("Confirm that Workfront may be read before anything is sent.")
+    with db() as conn:
+        run_id = _calc_run_id(body)
+        run = _cp(calcpreflight._run_row, conn, run_id)
+        listed = {f["category_id"]: f["name"] for f in CALC["forms"]}
+        if run["category_id"] not in listed:
+            raise AppError("The form %s is not on the list of valid forms. Upload the list that holds it first." % run["category_id"], 409)
+        secrets = _lt_secrets()
+        http = _cf_http(run["environment"], secrets)
+        log = calcpush.CallLog(conn, run_id)
+        http.recorder = log
+        log.set("check_form")
+        try:
+            form = calcpush.read_form(http, run["category_id"])
+        except workfronthttp.HttpError as e:
+            raise AppError(loadconfig.redact(str(e), secrets), 502)
+        except calcpush.PushError as e:
+            raise AppError(e.message, e.status)
+    return _lt_out({"run_id": run_id, "category_id": run["category_id"], "environment": run["environment"], "found_name": form["name"], "listed_name": listed[run["category_id"]],
+                    "name_matches": form["name"].strip().casefold() == listed[run["category_id"]].strip().casefold(), "fields_on_form": len(form["associations"])})
+
+
+def calcfields_out_dir():
+    return os.path.join(BASE_DIR, "out", "calcfields")
+
+
+def _calc_backup(run, raw):
+    """Keep the form as it was read before the update (IDs, names and the settings of each field on it: metadata only), in out/calcfields."""
+    os.makedirs(calcfields_out_dir(), exist_ok=True)
+    path = os.path.join(calcfields_out_dir(), "FormBackup_run%d_%s_%s.json" % (run["run_id"], run["category_id"], datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=1, sort_keys=True)
+
+
+def _run_calc_push(job):
+    secrets = _lt_secrets()
+    final = "failed"                                      # job.status stays "running" until everything is written, so a poll never sees "done" early
+    try:
+        http = _cf_http(job.env, secrets)
+        with db(job.db_path) as conn:
+            job.summary = calcpush.push(conn, job.run_id, http, _calc_form_ids(), job.cancel.is_set, job.set_progress, job.item_ids, backup=_calc_backup)
+        s = job.summary
+        final = "cancelled" if s.get("cancelled") else ("stopped on error" if s.get("fatal") else "done")
+        if s.get("fatal"):
+            job.error = "Stopped: " + s["fatal"]
+    except calcpush.PushError as e:
+        job.error = loadconfig.redact(e.message, secrets)
+    except AppError as e:
+        job.error = loadconfig.redact(e.message, secrets)
+    except Exception as e:
+        job.error = "Unexpected error: " + loadconfig.redact(loadrun.scrub(e), secrets)
+        print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+    finally:
+        job.finished_at = utc_now()
+        job.status = final
+
+
+def api_calcfields_push(body):
+    """Start the push of an approved run (or resume one: only what is not done is sent; item_ids limits a retry to those items)."""
+    with _calc_lock:
+        if _calc_push_busy():
+            raise AppError("A push is already running. Wait for it or cancel it.", 409)
+        if body.get("confirm") is not True:
+            raise AppError("Confirm the push before anything is sent.")
+        actor = "".join(ch for ch in str(body.get("actor") or "") if ch >= " ").strip()[:40]
+        if not actor:
+            raise AppError("Enter your initials before pushing: they are recorded.")
+        item_ids = body.get("item_ids")
+        if item_ids is not None and not (isinstance(item_ids, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in item_ids)):
+            raise AppError("The items to retry must be a list of numbers.")
+        with db() as conn:
+            run_id = _calc_run_id(body)
+            try:
+                run = calcpush.check_ready(conn, run_id, _calc_form_ids())
+            except calcpush.PushError as e:
+                raise AppError(e.message, e.status)
+        _cf_http(run["environment"], _lt_secrets())          # refuses an environment that is not configured, before anything is queued
+        if run["environment"] == "production" and body.get("confirm_phrase") != loadrun.PRODUCTION_PHRASE:
+            raise AppError("Production needs a deliberate extra step: type %s exactly." % loadrun.PRODUCTION_PHRASE)
+        job = CalcPushJob(run_id, run["environment"], actor, item_ids, STATE["db_path"])
+        CALC["job"] = job
+    threading.Thread(target=_run_calc_push, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id}
+
+
+def api_calcfields_push_status(_q=None):
+    j = CALC["job"]
+    if j is None:
+        return {"job": None}
+    return _lt_out({"job": {"id": j.id, "run_id": j.run_id, "environment": j.env, "actor": j.actor, "status": j.status, "error": j.error, "progress": j.progress, "summary": j.summary,
+                            "started_at": j.started_at, "finished_at": j.finished_at}})
+
+
+def api_calcfields_push_cancel(_body=None):
+    j = CALC["job"]
+    if not j or j.status != "running":
+        raise AppError("Nothing is running.")
+    j.cancel.set()
+    return {"cancelling": True}
+
+
 HTML ="text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("pages/setup.html", HTML), "/setup": ("pages/setup.html", HTML),
           "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML), "/emergency": ("pages/emergency.html", HTML), "/corefields": ("pages/corefields.html", HTML), "/extractcsv": ("pages/extractcsv.html", HTML),
           "/log": ("pages/log.html", HTML),
+          "/calcfields": ("pages/calcfields.html", HTML), "/calcfields.js": ("js/calcfields.js", JS),
           "/style.css": ("css/style.css", "text/css; charset=utf-8"),
           "/common.js": ("js/common.js", JS), "/setup.js": ("js/setup.js", JS),
           "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/emergency.js": ("js/emergency.js", JS), "/corefields.js": ("js/corefields.js", JS), "/extractcsv.js": ("js/extractcsv.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
@@ -6337,11 +6707,14 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/names/import-template.csv": api_names_import_template, "/api/names/export.csv": api_names_export,"/api/names/report.html": api_names_report_html, "/api/names/report.mhtml": api_names_report_mhtml,
               "/api/corefields/setup": api_corefields_setup, "/api/corefields/state": api_corefields_state, "/api/corefields/template.csv": api_corefields_template,
               "/api/corefields/crosswalk.csv": api_corefields_crosswalk, "/api/corefields/report": api_corefields_report,
+              "/api/calcfields/setup": api_calcfields_setup, "/api/calcfields/forms/template.csv": api_calcfields_forms_template, "/api/calcfields/push/status": api_calcfields_push_status, "/api/calcfields/runs": api_calcfields_runs, "/api/calcfields/report": api_calcfields_report, "/api/calcfields/report.csv": api_calcfields_report_csv,
               "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
                "/api/loadtable/check": api_loadtable_check, "/api/loadtable/mapping": api_loadtable_mapping, "/api/loadtable/workspace": api_loadtable_workspace, "/api/loadtable/verify": api_loadtable_verify, "/api/loadtable/start": api_loadtable_start, "/api/loadtable/cancel": api_loadtable_cancel, "/api/corefields/upload": api_corefields_upload, "/api/corefields/environment": api_corefields_environment, "/api/corefields/select": api_corefields_select,
+               "/api/calcfields/preflight": api_calcfields_preflight, "/api/calcfields/forms/upload": api_calcfields_forms_upload, "/api/calcfields/form/check": api_calcfields_form_check,
+               "/api/calcfields/push": api_calcfields_push, "/api/calcfields/push/cancel": api_calcfields_push_cancel, "/api/calcfields/approve": api_calcfields_approve,
                "/api/corefields/scan": api_corefields_scan, "/api/corefields/create": api_corefields_create, "/api/corefields/reset": api_corefields_reset, "/api/corefields/cancel": api_corefields_cancel,
                "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
