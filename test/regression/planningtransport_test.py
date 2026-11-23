@@ -132,7 +132,13 @@ check("a dry run shows a link's needs as 'would be created'", {r["temp_id"]: r f
 
 import planningtransport as _pt
 check("check_options: names differing by case clash; edge spaces are trimmed and make exact repeats", _pt.check_options(["Hot Pink", "hot pink", "Blue"])["conflicts"] == ["hot pink"]
-      and _pt.check_options([" Purple Spaces ", "Purple Spaces", "Blue", " "]) == {"options": ["Purple Spaces", "Blue"], "exact_repeats": 1, "blank": 1, "conflicts": []})
+      and {k: v for k, v in _pt.check_options([" Purple Spaces ", "Purple Spaces", "Blue", " "]).items() if k in ("options", "exact_repeats", "blank", "conflicts")}
+      == {"options": ["Purple Spaces", "Blue"], "exact_repeats": 1, "blank": 1, "conflicts": []})
+inc = _pt.check_options(["Red", "red", "RED", "Red 2", "Blue", "Red"], increment=True)
+check("check_options with increment: the first keeps its name, a case clash is numbered up to a free number (never onto a real option), exact repeats still go once, no conflicts",
+      inc["options"] == ["Red", "red 3", "RED 4", "Red 2", "Blue"] and inc["conflicts"] == [] and inc["exact_repeats"] == 1 and inc["alias"]["red"] == "red 3" and inc["alias"]["Red 2"] == "Red 2"
+      and inc["incremented"] == [("red", "red 3"), ("RED", "RED 4")] and _pt.check_options(["Red", "red"], increment=True) == _pt.check_options(["Red", "red"], increment=True))
+check("without increment a case clash is still a conflict and nothing is numbered", _pt.check_options(["Red", "red"])["conflicts"] == ["red"] and _pt.check_options(["Red", "red"])["incremented"] == [])
 check("check_options keeps names distinct that Planning keeps distinct (it suffixes the stored name, e.g. hot_pink_1): underscore vs space, inner spacing, punctuation, accents, emoji",
       _pt.check_options(["Hot Pink", "hot_pink", "Space  Space", "Space Space", "Mari-gold", "Mari gold", "Green/Blue", "Green Blue", "Rouge (Dark)", "Rouge Dark", "Café", "Cafe", "Flower Power 🌸", "Flower Power"])["conflicts"] == [])
 import recordload as _rl

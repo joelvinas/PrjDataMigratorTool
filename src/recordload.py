@@ -161,6 +161,7 @@ def convert(f, value):
         return True, bool(value)
     if k in ("single-select", "multi-select"):
         names = value if isinstance(value, list) else [value]
+        names = [x for n in names for x in (n if isinstance(n, list) else [n])]        # a lookup of a multiple select can hold lists inside the list: one level is flattened
         keys = []
         for n in names:
             key = (f["options"].get(n) if n in f["options"] else f["options"].get(n.strip())) if isinstance(n, str) else None        # Planning stores option names trimmed

@@ -3,7 +3,7 @@
 
 A Go run does, for one table of one base, in the DEV Workspace of config.json:
     1  create the Planning record type (or reuse the one the database already maps to the table)
-    2  for each field, in sorted order: skip links and attachments; send arrays as raw JSON text in a PRE- field (a multiple select with distinct options is a real multi-select); otherwise try the real Planning type, and when Planning
+    2  for each field, in sorted order: skip links and attachments; send arrays as raw JSON text in a PRE- field (a multiple select with distinct options is a real multi-select; so is a lookup of a select field, as a snapshot of its values); otherwise try the real Planning type, and when Planning
        refuses it create a text field named PRE-<field name> (long text when the longest value is over 255 characters, up to 20 long-text fields per record type)
     3  load the records (records pass only; links are for later)
     4  report: the result on screen, a CSV and two MHTML reports (see emergency_report.py)
@@ -113,6 +113,9 @@ def load_schema(conn, base_id, table_id):
         r["suggested"] = {"planning": sug.get("planning_name") or n.get("planning_name") or "", "core": sug.get("core_name") or n.get("core_name") or "",
                           "label": sug.get("core_label") or n.get("core_label") or ""}
         r["choices"] = _choices(r.get("choices_json"))
+        r["lookup_snapshot"] = is_select_lookup(r)
+        if r["lookup_snapshot"]:
+            r["choices"] = _choices(_result_choices_json(r))          # a lookup keeps its options in options.result.options, not in the choices column
         r["definition"] = _definition(r, names)
         fields.append(r)
     return {"table_name": t["table_name"], "fields": fields, "defaults": defaults}
@@ -138,6 +141,31 @@ def _choices(raw):
     except (TypeError, ValueError):
         return []
     return [str(x.get("name")) for x in items if isinstance(x, dict) and x.get("name") is not None]
+
+
+SELECT_RESULTS = frozenset({"singleSelect", "multipleSelects"})
+
+
+def is_select_lookup(r):
+    """True for a lookup (multipleLookupValues) whose result is a select: the owner chose (23 November 2026) to load it as a SNAPSHOT, a real multi-select field holding the values
+    Airtable had worked out (its filter and its link are already applied in the extract). It is always a multi-select, because a lookup returns an array even for one link."""
+    return r.get("data_type") == "multipleLookupValues" and r.get("result_type") in SELECT_RESULTS
+
+
+def _result_choices_json(r):
+    """options.result.options.choices of a lookup as the same JSON list the choices column holds; '[]' when absent or unreadable."""
+    try:
+        opts = json.loads(r.get("result_options_json") or "{}")
+        ch = opts.get("choices") if isinstance(opts, dict) else None
+    except (TypeError, ValueError):
+        ch = None
+    return json.dumps(ch if isinstance(ch, list) else [])
+
+
+def snapshot_options(chk, opts):
+    """{source name: option name Planning returned} for a snapshot field. The records carry the source names, and a name that was numbered on creation ('red 2') is found by the
+    source name it came from."""
+    return {src: opts[shown] for src, shown in chk["alias"].items() if shown in opts}
 
 
 def _definition(r, names):
@@ -240,6 +268,8 @@ def attempted_type(field, defaults):
     stored = field.get("stored_planning_type")
     if stored and dt.planning_type(stored) == stored:
         return stored, "the type set on the Data types page"
+    if field.get("lookup_snapshot"):
+        return "multi-select", "a lookup of a select field is loaded as a multi-select snapshot of its values"
     t = field["data_type"]
     if defaults.get(t):
         return defaults[t], "the default mapping for %s" % t
@@ -419,7 +449,7 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         atype, src = attempted_type(f, schema["defaults"])
         # A multiple select is an array, but Planning has a real multi-select type for it (owner-verified 23 November 2026: send the option NAMES Planning returned), so it is
         # attempted as one. Every other array, or a multiple select the owner mapped to another type, is still kept as raw JSON text.
-        is_array = (f["data_type"] in ARRAY_TYPES or bool(s.get("has_container"))) and not (f["data_type"] == "multipleSelects" and atype == "multi-select")
+        is_array = (f["data_type"] in ARRAY_TYPES or bool(s.get("has_container"))) and not ((f["data_type"] == "multipleSelects" or f.get("lookup_snapshot")) and atype == "multi-select")
         planned = state.get(temp, env.name)
         longest = s.get("max_len") if s else None
         sent = f["field_name"]
@@ -470,6 +500,8 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
             row.update(final_name=ename, final_type=etype, planning_field_id=planned, outcome="pre-converted" if is_pre else "clean", reason="already created by an earlier run (reused)",
                        attempted_type=etype)
             pt_opts = {str(o.get("displayName")): str(o.get("name") if o.get("name") not in (None, "") else o.get("displayName")) for o in (e.get("options") or []) if isinstance(o, dict)}
+            if f.get("lookup_snapshot") and not is_pre:
+                pt_opts = snapshot_options(pt.check_options(f["choices"], increment=True), pt_opts)
             loadable.append({"field_id": fid, "planning_id": planned, "kind": tm.kind(etype) or etype, "options": pt_opts, "linked_table_id": None, "single": False, "pass": "records", "raw": is_pre})
             continue
         if planned and not existing:                                                      # recorded as created, listing unavailable: trust the name
@@ -488,8 +520,15 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         chk = None
         if atype in tm.SELECT_KINDS:
             # The duplicate check comes first, from the schema: a select field is only created with options that are all distinct (single and multiple alike).
-            chk = pt.check_options(f["choices"])
+            snap = bool(f.get("lookup_snapshot"))
+            chk = pt.check_options(f["choices"], increment=snap)          # a snapshot keeps names that differ only by case, numbered; any other select is not created with them
             item_spec["options"] = chk["options"]
+            if snap:
+                add_note("loaded as a snapshot: a multi-select holding the values Airtable had worked out for this lookup; it does not follow the linked table afterwards")
+                if not f["choices"]:
+                    add_note("the lookup's option list is empty in the schema, so no value can be matched")
+            if chk["incremented"]:
+                add_note("%d option name(s) differ only by letter case, so each was numbered on creation (%s)" % (len(chk["incremented"]), "; ".join("%r as %r" % x for x in chk["incremented"][:10]) + (" and more" if len(chk["incremented"]) > 10 else "")))
             if chk["exact_repeats"]:
                 add_note("%d repeated option name(s) were sent once" % chk["exact_repeats"])
             if chk["blank"]:
@@ -520,6 +559,8 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
                 lost = [o for o in chk["options"] if o not in opts]
                 if lost:
                     add_note("%d option(s) are not in the field Planning created, so records that use them are left empty for this field" % len(lost))
+            if chk is not None and f.get("lookup_snapshot"):
+                opts = snapshot_options(chk, opts)
             loadable.append({"field_id": fid, "planning_id": wid, "kind": tm.kind(atype) or atype, "options": opts, "linked_table_id": None, "single": False, "pass": "records", "raw": False})
             continue
         ok2, wid, ptype = make_pre("Planning refused the type %s" % atype)
