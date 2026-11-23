@@ -53,13 +53,19 @@ def _fold(text):
     return str(text).strip().lower()
 
 
-def check_options(names):
+def check_options(names, increment=False):
     """The duplicate check for a select field's options, from the SCHEMA only (no record value). Run before a single or multiple select field is created.
-    Returns {options: the names to send (trimmed, blank names and exact repeats removed, Airtable's order kept), exact_repeats: n removed, blank: n removed,
-    conflicts: one entry per group of names that collide once edge spaces and letter case are ignored (the folded name), sorted}.
+    Returns {options: the display names to send (trimmed, blank names and exact repeats removed, Airtable's order kept), exact_repeats: n removed, blank: n removed,
+    conflicts: one entry per group of names that collide once edge spaces and letter case are ignored (the folded name), sorted,
+    alias: {the trimmed source name: the display name sent for it}, incremented: [(source name, display name sent)] for each name that was renamed}.
     An exact repeat carries no information, so it is sent once. Two DIFFERENT names that fold together ('Red' and 'red') are never merged here: records may hold either one,
-    so merging is a person's decision. With any conflict the field must not be sent as a select."""
-    options, seen, folded, repeats, blank = [], set(), {}, 0, 0
+    so merging is a person's decision. With any conflict the field must not be sent as a select.
+    increment=True (a lookup snapshot, where nobody can fix the source) keeps both instead: the first keeps its name and each later one that folds onto a name already
+    taken gets a number, 'red 2' (no brackets: they are not allowed in option names), counted up until it is free. `alias` then tells the record load which option each source
+    value belongs to. Nothing is guessed: the same names in the same order always give the same display names, and there are no conflicts to report."""
+    options, seen, folded, repeats, blank, alias, incremented = [], set(), {}, 0, 0, {}, []
+    taken = set()
+    real = {_fold(n) for n in names or [] if str(n).strip()}          # every real name, folded, so a number is never put on a name that is a real option listed later
     for n in names or []:
         s = str(n).strip()                          # Planning stores the trimmed text, so the name is sent trimmed and read back by that text
         if not s:
@@ -68,9 +74,18 @@ def check_options(names):
             repeats += 1
         else:
             seen.add(s)
-            options.append(s)
-            folded.setdefault(_fold(s), []).append(s)
-    return {"options": options, "exact_repeats": repeats, "blank": blank, "conflicts": sorted(k for k, v in folded.items() if len(v) > 1)}
+            shown = s
+            if increment and _fold(s) in taken:
+                k = 2
+                while _fold("%s %d" % (s, k)) in taken or _fold("%s %d" % (s, k)) in real:
+                    k += 1
+                shown = "%s %d" % (s, k)
+                incremented.append((s, shown))
+            taken.add(_fold(shown))
+            alias[s] = shown
+            options.append(shown)
+            folded.setdefault(_fold(shown), []).append(shown)
+    return {"options": options, "exact_repeats": repeats, "blank": blank, "conflicts": sorted(k for k, v in folded.items() if len(v) > 1), "alias": alias, "incremented": incremented}
 
 
 class UnmatchedReply(HttpError):

@@ -111,6 +111,12 @@ for fid, nm, ty, ch in (("fD1", "Single Pick", "singleSelect", ["A", "A", "B"]),
                         ("fD4", "Clash Single", "singleSelect", ["Open", "OPEN"])):
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, choices_json, updated_at) values (?,?,?,?,?,?,2,0,?,'2026-01-01 10:00:00.000000')",
               (BASE, "tD", "Dup Options", fid, nm, ty, json.dumps([{"id": "o%d" % i, "name": n} for i, n in enumerate(ch)])))
+c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tL', ?, 'Lookup Snapshots')", (BASE,))
+for fid, nm, rtype, ch in (("fL1", "Region Pick", "singleSelect", ["Red", "red", "Blue", "Red", "red 2"]), ("fL2", "Tag Pick", "multipleSelects", ["North", "South"]),
+                           ("fL3", "Owner Name", "singleLineText", None)):
+    c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, source_link_field_id, source_field_id, result_type, result_options_json, updated_at) "
+              "values (?,?,?,?,?,'multipleLookupValues',2,0,'fLink','fSrc',?,?,'2026-01-01 10:00:00.000000')",
+              (BASE, "tL", "Lookup Snapshots", fid, nm, rtype, json.dumps({"choices": [{"id": "sel%d" % i, "name": n} for i, n in enumerate(ch)]}) if ch else None))
 c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tS', ?, 'Sparse Notes')", (BASE,))
 for fid, nm in (("fZNull", "Always Empty"), ("fZNoFile", "Empty Per Profile"), ("fZLong", "Wordy Formula")):   # fZNoFile has no record file entry: only the profile says it is empty
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, updated_at) values (?,?,?,?,?,?,3,?,'2026-01-01 10:00:00.000000')",
@@ -124,6 +130,8 @@ save("tX", [{"id": "recX%d" % i, "fields": {"fName": SECRET + " order %d" % i, "
                                             "fLink": ["recZ1"], "fAtt": [{"id": "att1", "url": "http://x/y"}], "fNum": i * 10, "fOdd": SECRET + " odd"}} for i in range(1, 4)])
 save("tY", [{"id": "recY1", "fields": {"fY%02d" % i: long_text for i in range(1, 23)}}])
 save("tS", [{"id": "recS%d" % i, "fields": {"fZNull": None if i == 1 else "", "fZNoFile": None, "fZLong": long_text}} for i in range(1, 4)])
+save("tL", [{"id": "recL1", "fields": {"fL1": ["Red", "red", "Red", "Blue"], "fL2": [["North", "South"], "North"], "fL3": ["Ann"]}},
+             {"id": "recL2", "fields": {"fL1": ["red 2"], "fL2": ["South"], "fL3": []}}])
 save("tD", [{"id": "recD%d" % i, "fields": {"fD1": "A", "fD2": ["Red", "red"], "fD3": ["North", "North", "South"], "fD4": "Open"}} for i in range(1, 3)])
 cfgp = os.path.join(tmp, "config.json")
 json.dump({"token": "patFAKEairtable.0000000000000000000000", "workfront": {"planning": {"dev": {"base_url": "https://acme.my.workfront.com", "bearer_token": TOKEN, "workspace_id": "wsDev", "record_batch_size": 2,
@@ -198,6 +206,28 @@ check("options that differ only by case are never sent as a select: no select ca
       and all(bd[k]["outcome"] == "pre-converted" and bd[k]["attempt1"] == "not attempted" and "differ only by letter case" in bd[k]["note"] and bd[k]["final_name"].startswith("PRE-") for k in ("fD2", "fD4")), (bd["fD2"], bd["fD4"]))
 sentd = [rec["data"] for x in fkd.posts("/records/bulk") for rec in x[2]]
 check("a name listed twice in one cell is one selection; a clashing field keeps the raw value", all(d.get(bd["fD3"]["planning_field_id"]) == ["keyNorth", "keySouth"] and d.get(bd["fD2"]["planning_field_id"]) == '["Red","red"]' for d in sentd), sentd[:1])
+
+# ---- a lookup of a select field is loaded as a snapshot: a real multi-select, options kept distinct by a number
+fkl = Fake()
+resl, _c = go(fkl, "tL")
+bl = {f["field_id"]: f for f in resl["fields"]}
+selects_l = [x[2] for x in fkl.posts("/fields") if isinstance(x[2], dict) and x[2].get("type") in ("single-select", "multi-select")]
+check("a lookup whose result is a select is created as a real multi-select, even when the result type is a single select",
+      bl["fL1"]["final_type"] == "multi-select" and bl["fL1"]["outcome"] == "clean" and bl["fL2"]["final_type"] == "multi-select" and bl["fL1"]["final_name"] == "Region Pick", bl["fL1"])
+check("exact repeats are sent once and names differing only by case are numbered, never merged and never refused (no brackets in the new name)",
+      {"displayName": "Region Pick", "type": "multi-select", "options": [{"displayName": n} for n in ("Red", "red 3", "Blue", "red 2")]} in selects_l
+      and "numbered on creation" in bl["fL1"]["note"] and "'red' as 'red 3'" in bl["fL1"]["note"] and "snapshot" in bl["fL1"]["note"], (selects_l, bl["fL1"]["note"]))
+check("a lookup of a non-select result is still a PRE- raw field", bl["fL3"]["outcome"] == "pre-converted" and bl["fL3"]["final_name"] == "PRE-Owner Name" and bl["fL3"]["attempt1"] == "not attempted")
+sentl = [rec["data"] for x in fkl.posts("/records/bulk") for rec in x[2]]
+idl = {f["field_id"]: f["planning_field_id"] for f in resl["fields"]}
+check("each source value finds its own option by the name it was numbered from; a repeat in one cell is one selection",
+      sentl[0].get(idl["fL1"]) == ["keyRed", "keyred 3", "keyBlue"] and sentl[1].get(idl["fL1"]) == ["keyred 2"], sentl)
+check("a lookup of a multiple select (lists inside the list) is flattened one level", sentl[0].get(idl["fL2"]) == ["keyNorth", "keySouth"] and sentl[1].get(idl["fL2"]) == ["keySouth"], sentl)
+check("no value was left out", resl["counts"]["values_not_converted"] == 0 and resl["records"]["loaded"] == 2, resl["counts"])
+n_f = len(fkl.posts("/fields"))
+resl2, _c = go(fkl, "tL")
+by_l2 = {f["field_id"]: f for f in resl2["fields"]}
+check("a rerun reuses the snapshot field and creates nothing twice", len(fkl.posts("/fields")) == n_f and by_l2["fL1"]["outcome"] == "clean" and by_l2["fL1"]["final_type"] == "multi-select", resl2["counts"])
 
 # ---- the 20 long-text cap, and a failing field that never stops the run
 fk2 = Fake(); fk2.refuse_names = {"Memo 05", "PRE-Memo 05"}
