@@ -106,6 +106,11 @@ for fid, nm, ty in F:
 for i in range(1, 23):                                       # 22 formulas whose values are long: the cap of 20 long-text fields must hold
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values (?,?,?,?,?,?,'2026-01-01 10:00:00.000000')",
               (BASE, "tY", "Many Notes", "fY%02d" % i, "Memo %02d" % i, "formula"))
+c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tD', ?, 'Dup Options')", (BASE,))
+for fid, nm, ty, ch in (("fD1", "Single Pick", "singleSelect", ["A", "A", "B"]), ("fD2", "Clash Pick", "multipleSelects", ["Red", "red", "Blue"]), ("fD3", "North Pick", "multipleSelects", ["North", "South", "North", " "]),
+                        ("fD4", "Clash Single", "singleSelect", ["Open", "OPEN"])):
+    c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, choices_json, updated_at) values (?,?,?,?,?,?,2,0,?,'2026-01-01 10:00:00.000000')",
+              (BASE, "tD", "Dup Options", fid, nm, ty, json.dumps([{"id": "o%d" % i, "name": n} for i, n in enumerate(ch)])))
 c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('tS', ?, 'Sparse Notes')", (BASE,))
 for fid, nm in (("fZNull", "Always Empty"), ("fZNoFile", "Empty Per Profile"), ("fZLong", "Wordy Formula")):   # fZNoFile has no record file entry: only the profile says it is empty
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, updated_at) values (?,?,?,?,?,?,3,?,'2026-01-01 10:00:00.000000')",
@@ -119,6 +124,7 @@ save("tX", [{"id": "recX%d" % i, "fields": {"fName": SECRET + " order %d" % i, "
                                             "fLink": ["recZ1"], "fAtt": [{"id": "att1", "url": "http://x/y"}], "fNum": i * 10, "fOdd": SECRET + " odd"}} for i in range(1, 4)])
 save("tY", [{"id": "recY1", "fields": {"fY%02d" % i: long_text for i in range(1, 23)}}])
 save("tS", [{"id": "recS%d" % i, "fields": {"fZNull": None if i == 1 else "", "fZNoFile": None, "fZLong": long_text}} for i in range(1, 4)])
+save("tD", [{"id": "recD%d" % i, "fields": {"fD1": "A", "fD2": ["Red", "red"], "fD3": ["North", "North", "South"], "fD4": "Open"}} for i in range(1, 3)])
 cfgp = os.path.join(tmp, "config.json")
 json.dump({"token": "patFAKEairtable.0000000000000000000000", "workfront": {"planning": {"dev": {"base_url": "https://acme.my.workfront.com", "bearer_token": TOKEN, "workspace_id": "wsDev", "record_batch_size": 2,
                                                                                               "default_currency": "USD"}}}}, open(cfgp, "w"))
@@ -149,7 +155,8 @@ check("a refused date type becomes PRE- text with BOTH attempts recorded (short 
 check("a refused formula with a short longest value becomes PRE- text, one with a value over 255 characters becomes PRE- long text", by["fForm"]["final_type"] == "text" and by["fFormBig"]["final_type"] == "long-text"
       and by["fFormBig"]["final_name"] == "PRE-Long Formula" and by["fFormBig"]["max_length"] > 255 and by["fForm"]["max_length"] <= 255)
 check("the real attempt used the type text even for a formula, as given", by["fForm"]["attempted_type"] == "formula" and any(isinstance(x[2], dict) and x[2].get("type") == "formula" for x in fk.reqs))
-check("an array (multiple select) goes straight to a PRE- field and is never attempted as a select", by["fTags"]["final_name"] == "PRE-Tags" and by["fTags"]["attempt1"] == "not attempted" and not any(isinstance(x[2], dict) and x[2].get("type") == "multi-select" for x in fk.reqs))
+check("a multiple select is created as a real multi-select field with its options, not a PRE- field", by["fTags"]["outcome"] == "clean" and by["fTags"]["final_name"] == "Tags" and by["fTags"]["final_type"] == "multi-select"
+      and any(isinstance(x[2], dict) and x[2].get("type") == "multi-select" and x[2].get("options") == [{"displayName": "Red"}, {"displayName": "Blue"}] for x in fk.reqs), by["fTags"])
 check("a type nobody maps is sent as given (here Planning accepts it), the Airtable type text goes out unchanged", by["fOdd"]["attempted_type"] == "aiText" and any(isinstance(x[2], dict) and x[2].get("type") == "aiText" for x in fk.reqs), by["fOdd"])
 check("links and attachments are skipped with their reason, with no field and no call", by["fLink"]["outcome"] == "skipped" and by["fLink"]["reason"] == "skipped (links later)" and by["fAtt"]["reason"] == "skipped (attachments later)"
       and not any(isinstance(x[2], dict) and x[2].get("displayName") in ("Customer", "PRE-Customer", "Files", "PRE-Files") for x in fk.reqs))
@@ -158,7 +165,7 @@ check("the records were loaded: every record, none failed, and only fields Plann
 bodies = [x[2] for x in fk.posts("/records/bulk")]
 sent = [rec["data"] for b in bodies for rec in b]
 ids = {f["field_id"]: f["planning_field_id"] for f in res["fields"]}
-check("a PRE- array field holds the array as raw JSON text, exactly as received", all(d.get(ids["fTags"]) == '["Red","Blue"]' for d in sent), sent[:1])
+check("a multi-select holds the array of option names Planning returned, not the labels", all(d.get(ids["fTags"]) == ["keyRed", "keyBlue"] for d in sent), sent[:1])
 check("a PRE- field keeps the value untouched (a date stays the same text)", sent[0].get(ids["fDate"]) == "2026-03-01" and sent[0].get(ids["fNum"]) == 10)
 check("the skipped link and attachment fields are not in any record", not any(k in ids.values() for d in sent for k in d if k == ids["fLink"]) and ids["fLink"] == "" and ids["fAtt"] == "")
 
@@ -176,7 +183,21 @@ res2, _c = go(fk, "tX")
 by2 = {f["field_id"]: f for f in res2["fields"]}
 check("a rerun reuses the record type and every field and creates nothing twice", len(fk.posts("/record-types")) == n_rt and len(fk.posts("/fields")) == n_fields and res2["record_type"]["reused"], res2["counts"])
 check("a rerun sends no record again", len(fk.posts("/records/bulk")) == n_bulk and res2["records"]["loaded"] == 0 and res2["records"]["already_loaded"] == 3)
-check("a rerun reads what each reused field became (PRE- or clean) from Planning", by2["fDate"]["outcome"] == "pre-converted" and by2["fName"]["outcome"] == "clean" and by2["fDate"]["final_type"] == "text" and by2["fTags"]["outcome"] == "pre-converted")
+check("a rerun reads what each reused field became (PRE- or clean) from Planning", by2["fDate"]["outcome"] == "pre-converted" and by2["fName"]["outcome"] == "clean" and by2["fDate"]["final_type"] == "text" and by2["fTags"]["outcome"] == "clean" and by2["fTags"]["final_type"] == "multi-select")
+
+# ---- the duplicate check before a select field is created (single and multiple alike)
+fkd = Fake()
+resd, _c = go(fkd, "tD")
+bd = {f["field_id"]: f for f in resd["fields"]}
+selects = [x[2] for x in fkd.posts("/fields") if isinstance(x[2], dict) and x[2].get("type") in ("single-select", "multi-select")]
+check("exact repeated options (and a blank one) are sent once; the select field is real, single and multiple", bd["fD1"]["final_type"] == "single-select" and bd["fD3"]["final_type"] == "multi-select"
+      and {"displayName": "Single Pick", "type": "single-select", "options": [{"displayName": "A"}, {"displayName": "B"}]} in selects
+      and {"displayName": "North Pick", "type": "multi-select", "options": [{"displayName": "North"}, {"displayName": "South"}]} in selects, selects)
+check("the repeats and the blank name are noted on the field", "1 repeated option" in bd["fD1"]["note"] and "1 repeated option" in bd["fD3"]["note"] and "1 blank option" in bd["fD3"]["note"], (bd["fD1"]["note"], bd["fD3"]["note"]))
+check("options that differ only by case are never sent as a select: no select call, a PRE- raw field with the reason (single and multiple)", len(selects) == 2
+      and all(bd[k]["outcome"] == "pre-converted" and bd[k]["attempt1"] == "not attempted" and "differ only by letter case" in bd[k]["note"] and bd[k]["final_name"].startswith("PRE-") for k in ("fD2", "fD4")), (bd["fD2"], bd["fD4"]))
+sentd = [rec["data"] for x in fkd.posts("/records/bulk") for rec in x[2]]
+check("a name listed twice in one cell is one selection; a clashing field keeps the raw value", all(d.get(bd["fD3"]["planning_field_id"]) == ["keyNorth", "keySouth"] and d.get(bd["fD2"]["planning_field_id"]) == '["Red","red"]' for d in sentd), sentd[:1])
 
 # ---- the 20 long-text cap, and a failing field that never stops the run
 fk2 = Fake(); fk2.refuse_names = {"Memo 05", "PRE-Memo 05"}
