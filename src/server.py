@@ -1015,6 +1015,15 @@ CREATE TABLE calc_push_log (
     FOREIGN KEY (run_id) REFERENCES calc_preflight_runs(run_id)
 );
 CREATE INDEX idx_calc_push_log_run ON calc_push_log(run_id, log_id);
+
+-- 25. The list of valid custom forms of the calculated fields page (migration 028): the last accepted upload (category_id, name). Metadata only. One list for the whole tool.
+CREATE TABLE calc_valid_forms (
+    category_id TEXT PRIMARY KEY,          -- the Core CTGY ID
+    name TEXT NOT NULL,                    -- the form's name as the uploaded list gives it
+    position INTEGER NOT NULL,             -- the row order of the upload, so the list comes back in the same order
+    uploaded_at TEXT NOT NULL,             -- UTC
+    source_filename TEXT                   -- the name of the uploaded file, for display only
+);
 '''
 
 
@@ -6517,7 +6526,7 @@ def api_calcfields_report_csv(q):
 
 
 # ---- the list of valid forms, and the push
-# The list of valid custom forms is held in memory (one list for the whole app, like the Core fields grid): upload it again after the app restarts. The tool reads or writes only a
+# The list of valid custom forms is kept in calc_valid_forms (migration 028; held in memory only on an older database without it). The tool reads or writes only a
 # form whose ID is on it. The push runs as a background job with progress and Cancel; every Workfront call it makes is logged in calc_push_log.
 CALC = {"forms": [], "forms_filename": "", "forms_at": None, "job": None}
 _calc_lock = threading.RLock()

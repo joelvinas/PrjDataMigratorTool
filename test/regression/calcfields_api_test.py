@@ -51,6 +51,7 @@ s, d, h = raw("GET", "/api/calcfields/forms/template.csv"); check("the template 
 def b64(text): return base64.b64encode(text.encode()).decode()
 s, r = post("/api/calcfields/forms/upload", {"csv_base64": b64("category_id,name\r\nCAT 1,Bad\r\nCAT2,\r\n"), "filename": "bad.csv"})
 check("a bad list is refused with every problem and its row, and nothing loads", s == 400 and r["problem_count"] == 2 and {(x["row"], x["column"]) for x in r["problems"]} == {(2, "category_id"), (3, "name")}, r)
+c.execute("DROP TABLE calc_valid_forms"); c.commit()   # an older database, as before migration 028
 check("setup still has no list", get("/api/calcfields/setup")[1]["forms"] == [])
 s, r = post("/api/calcfields/forms/upload", {"csv_base64": b64("category_id,name\r\nCAT1,Special Order Sales\r\nCAT2,In Store Sales\r\n"), "filename": "forms.csv"})
 check("a good list loads, in order", s == 200 and [f["category_id"] for f in r["forms"]] == ["CAT1", "CAT2"] and r["filename"] == "forms.csv", r)
