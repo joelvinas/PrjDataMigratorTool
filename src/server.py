@@ -6422,12 +6422,27 @@ def _calc_run_id(src):
     return int(raw)
 
 
+def _calc_forms_table(conn):
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calc_valid_forms'").fetchone())
+
+
+def _calc_forms_load(conn):
+    """Migration 028: when the table exists, the saved list is the list (read again each time the page loads, so a different database brings its own). Without the table the
+    list stays in memory only."""
+    if not _calc_forms_table(conn):
+        return
+    rows = conn.execute("SELECT category_id, name, uploaded_at, source_filename FROM calc_valid_forms ORDER BY position").fetchall()
+    with _calc_lock:
+        CALC.update(forms=[{"category_id": r[0], "name": r[1]} for r in rows], forms_filename=(rows[0][3] or "") if rows else "", forms_at=rows[0][2] if rows else None)
+
+
 def api_calcfields_setup(_q=None):
     """The tables that have formula fields (abandoned ones left out), the environments and the displayType a calculated field gets."""
     try:
         with db() as conn:
             if not all(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone() for t in calcpreflight.TABLES):
                 raise AppError("The calculated fields tables are not in this database yet (migration 027). Run python sql/apply_migrations.py on it, then connect again.", 409)
+            _calc_forms_load(conn)
             rows = conn.execute("SELECT f.base_id, f.table_id, MAX(f.table_name), COUNT(*) FROM airtable_fields f LEFT JOIN field_names n ON n.airtable_field_id = f.field_id "
                                 "WHERE f.data_type='formula' AND COALESCE(n.abandoned, 0)=0 GROUP BY f.base_id, f.table_id ORDER BY f.base_id, MAX(f.table_name), f.table_id").fetchall()
         tables, connected = [{"base_id": r[0], "table_id": r[1], "table_name": r[2], "formulas": r[3]} for r in rows], True
@@ -6533,9 +6548,21 @@ def api_calcfields_forms_upload(body):
     forms, problems = calcforms.parse_upload(body.get("csv_base64"))
     if problems:
         raise AppError("The file was not loaded: %d problem(s) found. Fix them and upload it again." % len(problems), 400, {"problems": problems[:200], "problem_count": len(problems)})
+    name, when = str(body.get("filename") or "")[:120], utc_now()
+    saved = False
+    try:
+        with db() as conn:
+            if _calc_forms_table(conn):   # migration 028: keep the accepted list (all or nothing: the old list stays if this fails)
+                with conn:
+                    conn.execute("DELETE FROM calc_valid_forms")
+                    conn.executemany("INSERT INTO calc_valid_forms (category_id, name, position, uploaded_at, source_filename) VALUES (?,?,?,?,?)",
+                                     [(f["category_id"], f["name"], i, when, name) for i, f in enumerate(forms)])
+                saved = True
+    except AppError:
+        pass   # no database connected: the list is still usable from memory
     with _calc_lock:
-        CALC.update(forms=forms, forms_filename=str(body.get("filename") or "")[:120], forms_at=utc_now())
-        return {"forms": forms, "filename": CALC["forms_filename"], "uploaded_at": CALC["forms_at"]}
+        CALC.update(forms=forms, forms_filename=name, forms_at=when)
+        return {"forms": forms, "filename": name, "uploaded_at": when, "saved": saved}
 
 
 def _calc_push_busy():

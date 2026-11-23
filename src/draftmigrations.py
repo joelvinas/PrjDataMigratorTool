@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrations 021, 022 and 023 (the data type mapping), 024 (lookup lists), 025 (Git-R-Done field results), 026 (the Core bulk field crosswalk) and 027 (calculated fields): check for them and apply them. Standard library only.
+"""Migrations 021, 022 and 023 (the data type mapping), 024 (lookup lists), 025 (Git-R-Done field results), 026 (the Core bulk field crosswalk) 027 (calculated fields) and 028 (the list of valid calculated fields forms): check for them and apply them. Standard library only.
 
 Why this is separate: these migrations are drafts until the owner confirms they are applied, so they are not in DatabaseSchemaLibrary.sql, the embedded DDL
 or sql/apply_migrations.py, and the app does not refuse a database that lacks them. This module is how the app (database connect) and the owner's script
@@ -9,11 +9,12 @@ Schema only: no record value is read or written.
 import os
 
 SQL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
-FILES = {21: "migration_021_add_data_type_mapping.sql", 22: "migration_022_add_core_display_type.sql", 23: "migration_023_add_rule_text_and_new_types.sql", 24: "migration_024_add_lookup_lists.sql", 25: "migration_025_add_emergency_field_results.sql", 26: "migration_026_add_core_field_crosswalk.sql", 27: "migration_027_add_calculated_fields.sql"}
+FILES = {21: "migration_021_add_data_type_mapping.sql", 22: "migration_022_add_core_display_type.sql", 23: "migration_023_add_rule_text_and_new_types.sql", 24: "migration_024_add_lookup_lists.sql", 25: "migration_025_add_emergency_field_results.sql", 26: "migration_026_add_core_field_crosswalk.sql", 27: "migration_027_add_calculated_fields.sql", 28: "migration_028_add_calc_valid_forms.sql"}
 TABLES_024 = ("lookup_lists", "field_lookup_decisions", "lookup_list_events")
 TABLES_025 = ("emergency_field_results",)
 TABLES_026 = ("core_field_crosswalk",)
 TABLES_027 = ("calc_preflight_runs", "calc_preflight_items", "calc_formula_crosswalk", "calc_push_items", "calc_push_log")
+TABLES_028 = ("calc_valid_forms",)
 TABLES_021 = ("data_type_defaults", "field_type_decisions", "data_type_events")
 
 
@@ -53,6 +54,9 @@ def pending(conn):
     m27 = [t for t in TABLES_027 if t not in have]
     if m27:
         out.append({"migration": 27, "missing": m27})
+    m28 = [t for t in TABLES_028 if t not in have]
+    if m28:
+        out.append({"migration": 28, "missing": m28})
     return out
 
 
@@ -60,8 +64,8 @@ def describe(items):
     """One plain sentence for the Setup page and the command line, or '' when nothing is pending."""
     if not items:
         return ""
-    return ("The data type mapping, the lookup lists, the Git-R-Done results table, the Core field crosswalk or the calculated fields tables are not set up in this database yet (migration%s %s). Back up the file, then run: "
-            "python sql/apply_migrations.py <this database file>, and connect again. Until then the Data types and Lookup lists pages can show values but not save them, and Git-R-Done does not save its field results to the database, the Core fields page does not keep its crosswalk between runs, and the calculated fields page cannot save a preflight."
+    return ("The data type mapping, the lookup lists, the Git-R-Done results table, the Core field crosswalk, the calculated fields tables or the list of valid forms are not set up in this database yet (migration%s %s). Back up the file, then run: "
+            "python sql/apply_migrations.py <this database file>, and connect again. Until then the Data types and Lookup lists pages can show values but not save them, and Git-R-Done does not save its field results to the database, the Core fields page does not keep its crosswalk between runs, the calculated fields page cannot save a preflight, and its list of valid forms is kept in memory only."
             % ("s" if len(items) > 1 else "", ", ".join("%03d" % i["migration"] for i in items)))
 
 
@@ -125,6 +129,8 @@ def apply(conn):
         run(26)
     if 27 in todo:
         run(27)
+    if 28 in todo:
+        run(28)
     conn.commit()
     seed(conn)   # a database built from the library has the tables but not the default mapping rows or the view
     return ran

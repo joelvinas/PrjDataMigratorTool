@@ -55,6 +55,20 @@ check("setup still has no list", get("/api/calcfields/setup")[1]["forms"] == [])
 s, r = post("/api/calcfields/forms/upload", {"csv_base64": b64("category_id,name\r\nCAT1,Special Order Sales\r\nCAT2,In Store Sales\r\n"), "filename": "forms.csv"})
 check("a good list loads, in order", s == 200 and [f["category_id"] for f in r["forms"]] == ["CAT1", "CAT2"] and r["filename"] == "forms.csv", r)
 check("setup now returns the list", get("/api/calcfields/setup")[1]["forms"][0] == {"category_id": "CAT1", "name": "Special Order Sales"})
+check("without migration 028 the list is kept in memory only and the answer says so", r["saved"] is False and c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='calc_valid_forms'").fetchone()[0] == 0, r)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
+import draftmigrations; draftmigrations.apply(c)
+check("migration 028 creates calc_valid_forms", c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='calc_valid_forms'").fetchone()[0] == 1)
+s, r = post("/api/calcfields/forms/upload", {"csv_base64": b64("category_id,name\r\nCAT2,In Store Sales\r\nCAT1,Special Order Sales\r\n"), "filename": "forms2.csv"})
+rows = c.execute("SELECT category_id, name, position, source_filename FROM calc_valid_forms ORDER BY position").fetchall()
+check("with the table the accepted list is saved, in the order uploaded", r["saved"] is True and rows == [("CAT2", "In Store Sales", 0, "forms2.csv"), ("CAT1", "Special Order Sales", 1, "forms2.csv")], rows)
+s, r = post("/api/calcfields/forms/upload", {"csv_base64": b64("category_id,name\r\nCAT 1,Bad\r\n")})
+check("a refused file leaves the saved list untouched", s == 400 and c.execute("SELECT COUNT(*) FROM calc_valid_forms").fetchone()[0] == 2)
+c.execute("UPDATE calc_valid_forms SET name='Renamed In Db' WHERE category_id='CAT2'"); c.commit()
+r = get("/api/calcfields/setup")[1]
+check("setup reads the saved list (as after a restart) with its file name", [f["name"] for f in r["forms"]] == ["Renamed In Db", "Special Order Sales"] and r["forms_filename"] == "forms2.csv", r["forms"])
+s, r = post("/api/calcfields/forms/upload", {"csv_base64": b64("category_id,name\r\nCAT1,Special Order Sales\r\nCAT2,In Store Sales\r\n"), "filename": "forms.csv"})
+check("a new accepted list replaces the saved one", [x[0] for x in c.execute("SELECT category_id FROM calc_valid_forms ORDER BY position")] == ["CAT1", "CAT2"])
 
 # ---- preflight
 for bad, word in ((dict(A, environment="nowhere"), "environment"), (dict(A, category_id="CAT9"), "list of valid forms"), (dict(A, category_id="bad id!"), "list of valid forms"), (dict(A, actor=""), "initials"),
