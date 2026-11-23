@@ -130,5 +130,14 @@ check("a link whose target record type failed is skipped, not guessed", out["P-F
 dry = lr.run_plan([i for i in p["items"] if i["system"] == "planning"], lr.MemoryState(), {"planning": Rec("planning")}, env, dry_run=True)
 check("a dry run shows a link's needs as 'would be created'", {r["temp_id"]: r for r in dry["results"]}["P-F-a2"]["detail"]["refs"] == {"P-T-tB": "<new P-T-tB>"})
 
+import planningtransport as _pt
+check("check_options: names differing by case clash; edge spaces are trimmed and make exact repeats", _pt.check_options(["Hot Pink", "hot pink", "Blue"])["conflicts"] == ["hot pink"]
+      and _pt.check_options([" Purple Spaces ", "Purple Spaces", "Blue", " "]) == {"options": ["Purple Spaces", "Blue"], "exact_repeats": 1, "blank": 1, "conflicts": []})
+check("check_options keeps names distinct that Planning keeps distinct (it suffixes the stored name, e.g. hot_pink_1): underscore vs space, inner spacing, punctuation, accents, emoji",
+      _pt.check_options(["Hot Pink", "hot_pink", "Space  Space", "Space Space", "Mari-gold", "Mari gold", "Green/Blue", "Green Blue", "Rouge (Dark)", "Rouge Dark", "Café", "Cafe", "Flower Power 🌸", "Flower Power"])["conflicts"] == [])
+import recordload as _rl
+check("a record value with edge spaces still finds its option, a different case does not", _rl.convert({"kind": "multi-select", "options": {"Purple Spaces": "purple_spaces"}}, [" Purple Spaces ", "Purple Spaces"]) == (True, ["purple_spaces"])
+      and _rl.convert({"kind": "single-select", "options": {"Red": "red"}}, "red")[0] is False)
+
 print("ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

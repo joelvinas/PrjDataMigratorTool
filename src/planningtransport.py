@@ -41,6 +41,38 @@ DATE_FORMAT = "locale"      # the example value in the v2 reference; unverified 
 MAX_PAGES = 100
 
 
+def _fold(text):
+    """How option display names are compared. Observed in the Planning UI and read back in Postman (23 November 2026):
+      * the option `name` is the display name lowercased with each run of whitespace turned into ONE underscore, everything else kept ('Hot Pink' -> hot_pink,
+        'Rouge (Dark)' -> rouge_(dark), 'Cafe' with an accent stays accented, an emoji stays);
+      * a second display name that gives the same `name` is NOT refused: Planning suffixes it ('hot_pink' typed after 'Hot Pink' became hot_pink_1). So the `name` is never
+        guessed here; the one Planning returns is used (read back by display name);
+      * edge spaces are trimmed and the stored display name is the trimmed text; inner spaces are left as typed.
+    So two options clash only when their trimmed display names match. Letter case is ignored here (PROVISIONAL: 'Red' then 'red' is not yet tested; a false clash only sends the
+    field to a PRE- text field with the reason shown, and loses no data)."""
+    return str(text).strip().lower()
+
+
+def check_options(names):
+    """The duplicate check for a select field's options, from the SCHEMA only (no record value). Run before a single or multiple select field is created.
+    Returns {options: the names to send (trimmed, blank names and exact repeats removed, Airtable's order kept), exact_repeats: n removed, blank: n removed,
+    conflicts: one entry per group of names that collide once edge spaces and letter case are ignored (the folded name), sorted}.
+    An exact repeat carries no information, so it is sent once. Two DIFFERENT names that fold together ('Red' and 'red') are never merged here: records may hold either one,
+    so merging is a person's decision. With any conflict the field must not be sent as a select."""
+    options, seen, folded, repeats, blank = [], set(), {}, 0, 0
+    for n in names or []:
+        s = str(n).strip()                          # Planning stores the trimmed text, so the name is sent trimmed and read back by that text
+        if not s:
+            blank += 1
+        elif s in seen:
+            repeats += 1
+        else:
+            seen.add(s)
+            options.append(s)
+            folded.setdefault(_fold(s), []).append(s)
+    return {"options": options, "exact_repeats": repeats, "blank": blank, "conflicts": sorted(k for k, v in folded.items() if len(v) > 1)}
+
+
 class UnmatchedReply(HttpError):
     """Planning answered, but the answer cannot be matched to the records sent, so they MAY exist. The caller must not send them again."""
 
@@ -103,17 +135,14 @@ class PlanningTransport(object):
             names = list(spec.get("options") or [])
             if not names:
                 raise ValueError("A select field needs at least one option, and none of this field's options is ready.")
-            seen, dup = {}, []
-            for n in names:
-                k = " ".join(str(n).split()).lower()        # Planning compares display names ignoring letter case; spacing is folded here too, to be safe
-                if k in seen:
-                    dup.append(k if k not in dup else None)
-                seen[k] = n
-            dup = [d for d in dup if d]
-            if dup:
+            chk = check_options(names)
+            if chk["conflicts"]:
+                dup = chk["conflicts"]
                 raise ValueError("%d option name(s) repeat another option of this field once letter case is ignored, and Planning refuses that (option display names must be unique): %s%s. Nothing was sent; the options must be made distinct first."
-                                 % (len(dup), "; ".join(repr(d) for d in sorted(dup)[:10]), " and more" if len(dup) > 10 else ""))
-            body["options"] = [{"displayName": n} for n in names]
+                                 % (len(dup), "; ".join(repr(d) for d in dup[:10]), " and more" if len(dup) > 10 else ""))
+            if not chk["options"]:
+                raise ValueError("A select field needs at least one option, and none of this field's options is usable (they are all blank).")
+            body["options"] = [{"displayName": n} for n in chk["options"]]
         elif vtype == "reference":
             target = [v for v in (refs or {}).values()]
             if not target:
@@ -271,6 +300,15 @@ class PlanningTransport(object):
     def _remember(self, field_id, options):
         self._options[field_id] = {str(o.get("displayName")): str(o.get("name") if o.get("name") not in (None, "") else o.get("displayName"))
                                    for o in (options or []) if isinstance(o, dict) and o.get("displayName") is not None}
+
+    def options_for(self, field_id, record_type_id):
+        """{displayName: option name} for a select field, the names Planning returned (authoritative: never guessed from the label). Read from the create reply when it is
+        remembered, otherwise from the record type's field list (GET /v2/record-types/{id}/fields), the way the owner's verified multi-select sample does."""
+        if field_id not in self._options:
+            for r in self._pages("/v2/record-types/%s/fields" % record_type_id):
+                if isinstance(r, dict) and r.get("id") and r.get("options"):
+                    self._remember(str(r["id"]), r.get("options"))
+        return dict(self._options.get(field_id) or {})
 
     def _option_key(self, item, field_id):
         """A select option is created with its field, so its 'creation' reads its key back from the field (fetched again after a stop and restart)."""

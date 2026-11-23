@@ -163,13 +163,13 @@ def convert(f, value):
         names = value if isinstance(value, list) else [value]
         keys = []
         for n in names:
-            key = f["options"].get(n) if isinstance(n, str) else None
+            key = (f["options"].get(n) if n in f["options"] else f["options"].get(n.strip())) if isinstance(n, str) else None        # Planning stores option names trimmed
             if key is None:
                 return False, "a select value has no matching option in Planning"
             keys.append(key)
         if k == "single-select":
             return True, keys[0] if len(keys) == 1 else None
-        return True, keys
+        return True, list(dict.fromkeys(keys))           # a name listed twice in one cell is one selection
     return False, "this field type is not loaded"
 
 

@@ -1,4 +1,4 @@
--- Migration 028 (DRAFT, approved by the owner on 22 November 2026; not yet applied): the list of valid custom forms of the calculated fields page.
+-- Migration 028 (applied by the owner and folded into the schema library, the embedded DDL and apply_migrations.py on 23 November 2026): the list of valid custom forms of the calculated fields page.
 -- Adds ONE table. Additive only, safe to run more than once. Touches no existing table.
 -- Holds metadata only: a Core custom form (CTGY) ID and its name, the order of the upload, when it was uploaded and the file name. No record value, no credential.
 --
@@ -6,8 +6,7 @@
 -- uploaded again after every restart. This table keeps the last accepted upload. A new accepted upload replaces every row (all or nothing); a refused file changes nothing.
 -- The list is one list for the whole tool, as it was in memory (it is not split by environment).
 --
--- Not yet in DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py: that waits until the owner confirms it is applied.
--- Until then src/draftmigrations.py applies it and the page falls back to keeping the list in memory.
+-- A new database has it from the library; apply_migrations.py runs this file through src/draftmigrations.py for an older database.
 
 CREATE TABLE IF NOT EXISTS calc_valid_forms (
     category_id TEXT PRIMARY KEY,          -- the Core CTGY ID

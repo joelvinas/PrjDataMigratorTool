@@ -3,7 +3,7 @@
 
 A Go run does, for one table of one base, in the DEV Workspace of config.json:
     1  create the Planning record type (or reuse the one the database already maps to the table)
-    2  for each field, in sorted order: skip links and attachments; send arrays as raw JSON text in a PRE- field; otherwise try the real Planning type, and when Planning
+    2  for each field, in sorted order: skip links and attachments; send arrays as raw JSON text in a PRE- field (a multiple select with distinct options is a real multi-select); otherwise try the real Planning type, and when Planning
        refuses it create a text field named PRE-<field name> (long text when the longest value is over 255 characters, up to 20 long-text fields per record type)
     3  load the records (records pass only; links are for later)
     4  report: the result on screen, a CSV and two MHTML reports (see emergency_report.py)
@@ -416,7 +416,10 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
             continue
         item_spec = {"airtable_type": f["data_type"], "precision": f.get("number_precision"), "currency_symbol": f.get("currency_symbol"), "options": list(f["choices"]), "single": False}
         temp = "P-F-" + fid
-        is_array = f["data_type"] in ARRAY_TYPES or bool(s.get("has_container"))
+        atype, src = attempted_type(f, schema["defaults"])
+        # A multiple select is an array, but Planning has a real multi-select type for it (owner-verified 23 November 2026: send the option NAMES Planning returned), so it is
+        # attempted as one. Every other array, or a multiple select the owner mapped to another type, is still kept as raw JSON text.
+        is_array = (f["data_type"] in ARRAY_TYPES or bool(s.get("has_container"))) and not (f["data_type"] == "multipleSelects" and atype == "multi-select")
         planned = state.get(temp, env.name)
         longest = s.get("max_len") if s else None
         sent = f["field_name"]
@@ -480,8 +483,25 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
                 loadable.append({"field_id": fid, "planning_id": wid, "kind": ptype, "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True})
             continue
 
-        atype, src = attempted_type(f, schema["defaults"])
         row.update(attempted_type=atype, attempted_from=src)
+        add_note = lambda text: row.update(note=(row["note"] + "; " if row["note"] else "") + text)
+        chk = None
+        if atype in tm.SELECT_KINDS:
+            # The duplicate check comes first, from the schema: a select field is only created with options that are all distinct (single and multiple alike).
+            chk = pt.check_options(f["choices"])
+            item_spec["options"] = chk["options"]
+            if chk["exact_repeats"]:
+                add_note("%d repeated option name(s) were sent once" % chk["exact_repeats"])
+            if chk["blank"]:
+                add_note("%d blank option name(s) were left out" % chk["blank"])
+            if chk["conflicts"]:
+                row.update(attempt1="not attempted")
+                add_note("%d option name(s) differ only by letter case or spacing (%s); Planning refuses that, so the field was not created as a select. Make them distinct and run again"
+                         % (len(chk["conflicts"]), "; ".join(repr(c) for c in chk["conflicts"][:10]) + (" and more" if len(chk["conflicts"]) > 10 else "")))
+                ok2, wid, ptype = make_pre("the option names are not distinct once letter case and spacing are ignored")
+                if ok2:
+                    loadable.append({"field_id": fid, "planning_id": wid, "kind": ptype, "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True})
+                continue
         it = _item(temp, "field", send_name, rt_item["temp_id"], table_id, fid, atype, item_spec)
         ok1, wid, err1, _how = _try(state, env, tr, it)
         row.update(attempt1="created" if ok1 else "refused", attempt1_error=err1 or "", attempt1_error_code=_error_code(err1))
@@ -490,8 +510,16 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
                 long_count += 1
             row.update(final_name=send_name, final_type=atype, planning_field_id=wid, outcome="clean", reason="")
             if f["data_type"] == "dateTime" and atype == "date":
-                row["note"] = (row["note"] + "; " if row["note"] else "") + "the time of day is not kept: Planning's date type has no time"
+                add_note("the time of day is not kept: Planning's date type has no time")
             opts = dict(tr._options.get(wid) or {})
+            if chk is not None:
+                try:
+                    opts = tr.options_for(wid, rt_id)          # the option NAMES Planning returned (never the labels), read back from the field list when the create reply had none
+                except Exception as e:
+                    add_note("the options could not be read back from Planning (%s)" % lr.scrub(e))
+                lost = [o for o in chk["options"] if o not in opts]
+                if lost:
+                    add_note("%d option(s) are not in the field Planning created, so records that use them are left empty for this field" % len(lost))
             loadable.append({"field_id": fid, "planning_id": wid, "kind": tm.kind(atype) or atype, "options": opts, "linked_table_id": None, "single": False, "pass": "records", "raw": False})
             continue
         ok2, wid, ptype = make_pre("Planning refused the type %s" % atype)
