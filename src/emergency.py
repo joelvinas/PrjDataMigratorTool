@@ -3,9 +3,9 @@
 
 A Go run does, for one table of one base, in the DEV Workspace of config.json:
     1  create the Planning record type (or reuse the one the database already maps to the table)
-    2  for each field, in sorted order: skip links and attachments; send arrays as raw JSON text in a PRE- field (a multiple select with distinct options is a real multi-select; so is a lookup of a select field, as a snapshot of its values); otherwise try the real Planning type, and when Planning
+    2  for each field, in sorted order: skip links and attachments, and hold back every field whose value comes through a link (a lookup, a rollup, a count, a formula that reads a link: see linkdeps.py; it is never loaded as text, and a person creates the lookup in Planning once the links are set); send arrays as raw JSON text in a PRE- field (a multiple select with distinct options is a real multi-select; so is a lookup of a select field, as a snapshot of its values); otherwise try the real Planning type, and when Planning
        refuses it create a text field named PRE-<field name> (long text when the longest value is over 255 characters, up to 20 long-text fields per record type)
-    3  load the records (records pass only; links are for later)
+    3  load the records (records pass only; the links are set by the links pass, emergency_links.py, once the tables they point to are loaded)
     4  report: the result on screen, a CSV and two MHTML reports (see emergency_report.py)
 A calculated (formula) field is translated to a Planning formula (planformula.py) and created AFTER every other field, each after the formulas it reads; one that cannot be translated, reads a multi-select or link, or is refused by Planning becomes PRE- text. One that reads fields of ANOTHER table not yet in Planning is held back (not created, not text) so a later run builds it; the pre-check (formula_precheck) tells the person which tables to run first.
 A failing field or record never stops the run. Only a record type that cannot be created ends it, because nothing can follow.
@@ -27,6 +27,7 @@ import datatypes as dt
 import fieldgroups as fgp
 import calcxlate as cx
 import fieldnames_store as fs
+import linkdeps as lk
 import loadrun as lr
 import loadstate as ls
 import planformula as pf
@@ -112,6 +113,7 @@ def load_schema(conn, base_id, table_id):
         r["stored_planning_type"] = n.get("target_type")
         r["abandoned"] = bool(n.get("abandoned"))
         r["merged"] = r["field_id"] in merged
+        r["airtable_primary"] = bool(r.get("is_primary_field"))
         sug = suggestions.get(r["field_id"]) or {}
         r["suggested"] = {"planning": sug.get("planning_name") or n.get("planning_name") or "", "core": sug.get("core_name") or n.get("core_name") or "",
                           "label": sug.get("core_label") or n.get("core_label") or ""}
@@ -300,6 +302,21 @@ def formula_precheck(conn, base_id, table_id, env_name, workspace_id):
     return out
 
 
+def link_holds(cat, table_id):
+    """{field ID: info} for every field of the table whose value comes through a link (linkdeps.hold_reason), judged in dependency order so a formula that reads a held field is held too.
+    Abandoned fields are left to their own rule. Schema only; nothing is sent."""
+    fields = [cat.f[i] for i in cat.order.get(table_id, [])]
+    held = {}
+    for f in formula_order(fields, cat):
+        if f["abandoned"] or f["data_type"] in SKIP_TYPES:
+            continue
+        refs = cat.plan(f["field_id"])["refs"] if f["data_type"] == "formula" else ()
+        info = lk.hold_reason(f, cat.f, held, refs, cat.tables)
+        if info:
+            held[f["field_id"]] = info
+    return held
+
+
 def formula_order(fields, cat):
     """The fields of one table in the order they are created: every ordinary field first (a formula may read any of them), then the formulas, each after the formulas it reads;
     a formula caught in a loop goes last (it is refused there). Sorted, so the same schema always gives the same order."""
@@ -484,6 +501,7 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
     long_count = sum(1 for r in existing.values() if r.get("type") == "long-text")
     formulas_built = sum(1 for r in existing.values() if r.get("type") == "formula")
     cat = formula_catalog(conn, base_id)
+    holds = link_holds(cat, table_id)                   # fields whose value comes through a link: skipped, listed for a person
     deferred = {}                                       # formula field ID -> what it waits for (another table's fields)
 
     # ---- 2. the fields
@@ -502,7 +520,8 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
                "attempt2_type": "", "attempt2": "", "attempt2_error_code": "", "attempt2_error": "", "final_name": "", "final_type": "", "outcome": "", "reason": "", "planning_field_id": "",
                "max_length": s.get("max_len") if s else None, "cardinality": f.get("cardinality"), "cardinality_capped": bool(f.get("cardinality_is_capped")),
                "nulls": f.get("null_count"), "total_records": f.get("row_count"), "options": list(f["choices"]), "definition": f["definition"], "log_span": None,
-               "values_not_converted": 0, "note": "", "api_calls": 0, "api_successes": 0, "api_failures": 0}
+               "values_not_converted": 0, "note": "", "api_calls": 0, "api_successes": 0, "api_failures": 0,
+               "airtable_primary": bool(f.get("airtable_primary")), "held": None}
         result["fields"].append(row)
         if f["data_type"] in SKIP_TYPES:
             row.update(outcome="skipped", reason=SKIP_TYPES[f["data_type"]])
@@ -512,6 +531,9 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
             continue
         if f["merged"]:
             row.update(outcome="skipped", reason="skipped (merged into another field by a consolidation group)")
+            continue
+        if fid in holds:
+            row.update(outcome="skipped", reason=holds[fid]["reason"], held=holds[fid], attempt1="not attempted")
             continue
         item_spec = {"airtable_type": f["data_type"], "precision": f.get("number_precision"), "currency_symbol": f.get("currency_symbol"), "options": list(f["choices"]), "single": False}
         temp = "P-F-" + fid
@@ -669,6 +691,10 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
     held = [r for r in result["fields"] if r["field_id"] in deferred]
     result["formulas"] = {"built": sum(1 for r in result["fields"] if r["final_type"] == "formula"), "held_back": len(held),
                           "as_text": sum(1 for r in result["fields"] if r["outcome"] == "pre-converted" and r["airtable_type"] == "formula")}
+    result["held_back"] = [dict(h, field_id=fid2, field_name=cat.f[fid2]["field_name"]) for fid2, h in sorted(holds.items(), key=lambda kv: (cat.f[kv[0]]["field_name"].lower(), kv[0]))]
+    if holds:
+        notes.append("%d field(s) get their value through a link and were held back (not created, not stored as text). Set the links with the links pass, then create them in Planning by hand: "
+                     "the report lists each one." % len(holds))
     if held:
         by_table = {}
         for r in held:
@@ -733,7 +759,7 @@ def summary_counts(result):
         if f["outcome"] in c:
             c[f["outcome"]] += 1
     r = result["records"]
-    c.update(formulas_built=(result.get("formulas") or {}).get("built", 0), formulas_held_back=(result.get("formulas") or {}).get("held_back", 0), records_loaded=r["loaded"], records_already_loaded=r["already_loaded"], records_failed=r["failed"], values_not_converted=r["values_not_converted"],
+    c.update(formulas_built=(result.get("formulas") or {}).get("built", 0), formulas_held_back=(result.get("formulas") or {}).get("held_back", 0), held_back=len(result.get("held_back") or []), records_loaded=r["loaded"], records_already_loaded=r["already_loaded"], records_failed=r["failed"], values_not_converted=r["values_not_converted"],
              fields_total=len(result["fields"]))
     return c
 

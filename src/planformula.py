@@ -275,14 +275,15 @@ class Catalog(object):
 
     # ---- what one formula needs
     def plan(self, fid):
-        """{refs: [field IDs read], blocked: [plain reasons it can never be built as a formula], formulas: [formula IDs it reads], needs: [nodes of OTHER tables it waits for]}.
+        """{refs: [field IDs read], blocked: [plain reasons it can never be built as a formula], formulas: [formula IDs it reads], needs: [nodes of OTHER tables it waits for],
+        held: [names of the link or derived fields it reads: the formula is held back, linkdeps.py]}.
         Derived from the schema only."""
         if fid in self._plans:
             return self._plans[fid]
         d = self.f[fid]
         ids, names = reference_ids(d.get("formula_text"))
         refs = list(ids)
-        blocked, forms, needs = [], [], set()
+        blocked, forms, needs, held = [], [], set(), []
         for n in names:
             got = self.id_by_name(d["table_id"], n)
             if got is None:
@@ -299,6 +300,9 @@ class Catalog(object):
             if rd is None:
                 blocked.append("it reads a field that is not in the stored schema (%s)" % r)
                 continue
+            if rd["data_type"] in DERIVED or rd["data_type"] == "multipleRecordLinks":      # its value comes through a link: Git-R-Done holds the formula back (linkdeps.py)
+                held.append(rd["field_name"])
+                continue
             ok, why = self.usable(r)
             if not ok:
                 blocked.append("it reads %s, %s" % (rd["field_name"], why))
@@ -312,7 +316,7 @@ class Catalog(object):
                         blocked.append("it reads %s, which comes from %s, %s" % (rd["field_name"], nd["field_name"], self.creatable(node)[1]))
                     elif self.table_of(node) not in (None, d["table_id"]):
                         needs.add(node)
-        self._plans[fid] = {"refs": sorted(refs), "blocked": blocked, "formulas": sorted(forms), "needs": sorted(needs)}
+        self._plans[fid] = {"refs": sorted(refs), "blocked": blocked, "formulas": sorted(forms), "needs": sorted(needs), "held": sorted(held)}
         return self._plans[fid]
 
     def status(self, fid, present, stack=()):
@@ -321,12 +325,16 @@ class Catalog(object):
         if d["field_id"] in present:
             return ("pre" if str(present[fid]).startswith("PRE-") else "created"), [], []
         p = self.plan(fid)
+        if p["held"] and not p["blocked"]:
+            return "held", ["it reads %s, which comes through a link" % ", ".join(p["held"])], []
         reasons = list(p["blocked"])
         waits = {n for n in p["needs"] if n not in present}
         if fid in stack:
             return "blocked", ["it is part of a loop of formulas"], []
         for g in p["formulas"]:
             st, why, w = self.status(g, present, stack + (fid,))
+            if st == "held":
+                return "held", ["it reads the formula %s, which is held back" % self.f[g]["field_name"]], []
             if st == "blocked":
                 reasons.append("it reads the formula %s, which cannot be built" % self.f[g]["field_name"])
             elif st == "pre":
@@ -379,11 +387,11 @@ class Catalog(object):
         waiting_on: [{table_id, table_name, loaded, formulas: n, fields: [names]}], order: [{table_id, table_name, creates, unlocks, formulas: [names]}], advice: [plain sentences]}.
         `order` is the suggested sequence of runs for the base (a table may appear twice) cut after the last run that builds a formula of this table."""
         mine = self.formulas(table_id)
-        counts = {"total": len(mine), "created": 0, "stored_as_text": 0, "ready": 0, "waiting": 0, "blocked": 0}
+        counts = {"total": len(mine), "created": 0, "stored_as_text": 0, "ready": 0, "waiting": 0, "blocked": 0, "held_back": 0}
         blocked, waits_by_table = [], {}
         for fid in mine:
             st, why, waits = self.status(fid, present)
-            key = {"created": "created", "pre": "stored_as_text", "ready": "ready", "waiting": "waiting", "blocked": "blocked"}[st]
+            key = {"created": "created", "pre": "stored_as_text", "ready": "ready", "waiting": "waiting", "blocked": "blocked", "held": "held_back"}[st]
             counts[key] += 1
             if st == "blocked":
                 blocked.append({"field_id": fid, "name": self.f[fid]["field_name"], "reasons": why})
@@ -406,6 +414,8 @@ class Catalog(object):
                     advice.append("%s appears more than once because its calculated fields and another table's depend on each other: the first run builds what it can, a later run builds the rest." % name)
             if not order:
                 advice.append("No order of runs builds them: what they wait for is itself blocked.")
+        if counts["held_back"]:
+            advice.append("%d calculated field(s) read a link or a field that comes through a link, so they are held back: not created, not stored as text. Set the links, then rebuild them in Planning by hand." % counts["held_back"])
         if counts["blocked"]:
             advice.append("%d calculated field(s) cannot be built as formulas (the reasons are listed); each is loaded as a PRE- text field instead." % counts["blocked"])
         if counts["ready"] and not counts["waiting"]:

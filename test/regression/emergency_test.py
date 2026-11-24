@@ -208,27 +208,17 @@ check("options that differ only by case are never sent as a select: no select ca
 sentd = [rec["data"] for x in fkd.posts("/records/bulk") for rec in x[2]]
 check("a name listed twice in one cell is one selection; a clashing field keeps the raw value", all(d.get(bd["fD3"]["planning_field_id"]) == ["keyNorth", "keySouth"] and d.get(bd["fD2"]["planning_field_id"]) == '["Red","red"]' for d in sentd), sentd[:1])
 
-# ---- a lookup of a select field is loaded as a snapshot: a real multi-select, options kept distinct by a number
+# ---- a lookup is held back (owner, 23 November 2026, replacing the snapshot): never created, never sent as text, never a multi-select
 fkl = Fake()
 resl, _c = go(fkl, "tL")
 bl = {f["field_id"]: f for f in resl["fields"]}
-selects_l = [x[2] for x in fkl.posts("/fields") if isinstance(x[2], dict) and x[2].get("type") in ("single-select", "multi-select")]
-check("a lookup whose result is a select is created as a real multi-select, even when the result type is a single select",
-      bl["fL1"]["final_type"] == "multi-select" and bl["fL1"]["outcome"] == "clean" and bl["fL2"]["final_type"] == "multi-select" and bl["fL1"]["final_name"] == "Region Pick", bl["fL1"])
-check("exact repeats are sent once and names differing only by case are numbered, never merged and never refused (no brackets in the new name)",
-      {"displayName": "Region Pick", "type": "multi-select", "options": [{"displayName": n} for n in ("Red", "red 3", "Blue", "red 2")]} in selects_l
-      and "numbered on creation" in bl["fL1"]["note"] and "'red' as 'red 3'" in bl["fL1"]["note"] and "snapshot" in bl["fL1"]["note"], (selects_l, bl["fL1"]["note"]))
-check("a lookup of a non-select result is still a PRE- raw field", bl["fL3"]["outcome"] == "pre-converted" and bl["fL3"]["final_name"] == "PRE-Owner Name" and bl["fL3"]["attempt1"] == "not attempted")
+check("every lookup is held back, whatever its result type: skipped, with the reason and where it reads", all(bl[k]["outcome"] == "skipped" and bl[k]["held"] and bl[k]["reason"].startswith("held back") for k in ("fL1", "fL2", "fL3")), {k: v["outcome"] for k, v in bl.items()})
+check("no select field, no PRE- field and no other field was created for them", not [x for x in fkl.posts("/fields") if isinstance(x[2], dict) and x[2].get("displayName") in ("Region Pick", "Tag Pick", "Owner Name", "PRE-Owner Name", "PRE-Region Pick", "PRE-Tag Pick")], [x[2] for x in fkl.posts("/fields")])
 sentl = [rec["data"] for x in fkl.posts("/records/bulk") for rec in x[2]]
-idl = {f["field_id"]: f["planning_field_id"] for f in resl["fields"]}
-check("each source value finds its own option by the name it was numbered from; a repeat in one cell is one selection",
-      sentl[0].get(idl["fL1"]) == ["keyRed", "keyred 3", "keyBlue"] and sentl[1].get(idl["fL1"]) == ["keyred 2"], sentl)
-check("a lookup of a multiple select (lists inside the list) is flattened one level", sentl[0].get(idl["fL2"]) == ["keyNorth", "keySouth"] and sentl[1].get(idl["fL2"]) == ["keySouth"], sentl)
-check("no value was left out", resl["counts"]["values_not_converted"] == 0 and resl["records"]["loaded"] == 2, resl["counts"])
+check("no value of a held field is sent; the records still load", resl["records"]["loaded"] == 2 and all(len(d) == 1 for d in sentl) and resl["counts"]["held_back"] == 3, (sentl, resl["counts"]))
 n_f = len(fkl.posts("/fields"))
 resl2, _c = go(fkl, "tL")
-by_l2 = {f["field_id"]: f for f in resl2["fields"]}
-check("a rerun reuses the snapshot field and creates nothing twice", len(fkl.posts("/fields")) == n_f and by_l2["fL1"]["outcome"] == "clean" and by_l2["fL1"]["final_type"] == "multi-select", resl2["counts"])
+check("a rerun creates nothing twice and still holds them back", len(fkl.posts("/fields")) == n_f and all(f["outcome"] == "skipped" for f in resl2["fields"]) and resl2["records"]["loaded"] == 0)
 
 # ---- the 20 long-text cap, and a failing field that never stops the run
 fk2 = Fake(); fk2.refuse_names = {"Memo 05", "PRE-Memo 05"}

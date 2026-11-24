@@ -19,7 +19,7 @@ CSV_HEADER = ["base_name", "base_id", "table_name", "table_id", "airtable_field_
               "airtable_options_json", "formula_or_rollup_definition", "longest_value_length", "workspace_name", "workspace_id", "record_type_name", "record_type_id",
               "suggested_planning_name", "suggested_core_name", "suggested_label", "proposed_field_name", "actual_field_name", "planning_field_id", "proposed_data_type", "type_source",
               "implemented_data_type", "outcome", "reason", "attempt_1", "attempt_1_error_code", "attempt_1_error", "attempt_2_type", "attempt_2", "attempt_2_error_code", "attempt_2_error",
-              "api_calls", "api_successes", "api_failures", "log_entries", "values_not_converted", "note"]
+              "api_calls", "api_successes", "api_failures", "log_entries", "values_not_converted", "note", "airtable_primary_field", "held_back_reads_through"]
 
 
 def stem(result):
@@ -35,6 +35,15 @@ def log_ref(span):
     return "log entry %d" % span[0] if span[0] == span[1] else "log entries %d to %d" % span
 
 
+def _through(h):
+    """Where a held-back field gets its value: the link field and the table it points to (names only)."""
+    if not h:
+        return ""
+    if h.get("link_field_name") and h.get("target_table_name"):
+        return "%s -> %s" % (h["link_field_name"], h["target_table_name"])
+    return ", ".join(h.get("reads") or []) or "a link"
+
+
 def csv_rows(result):
     rt = result["record_type"]
     n = lambda v: "" if v is None else v
@@ -44,7 +53,7 @@ def csv_rows(result):
                result.get("workspace_name", ""), result["workspace_id"], rt["name"], n(rt["planning_id"]), f["suggested_planning"], f["suggested_core"], f["suggested_label"], f["sent_name"],
                f["final_name"], f["planning_field_id"], f["attempted_type"], f["attempted_from"], f["final_type"], f["outcome"], f["reason"], f["attempt1"], f["attempt1_error_code"],
                f["attempt1_error"], f["attempt2_type"], f["attempt2"], f["attempt2_error_code"], f["attempt2_error"], f["api_calls"], f["api_successes"], f["api_failures"],
-               log_ref(f["log_span"]), f["values_not_converted"] or "", f["note"]]
+               log_ref(f["log_span"]), f["values_not_converted"] or "", f["note"], "yes" if f.get("airtable_primary") else "", _through(f.get("held"))]
 
 
 def csv_bytes(result, redact=lambda t: t):
@@ -94,6 +103,12 @@ def fields_html(result, css, apilog_name=None, redact=lambda t: t):
     h.append("<li>Records: %d loaded in this run, %d already loaded by an earlier run, <strong class=\"%s\">%d failed</strong>; in the source: %s.</li>"
              % (c["records_loaded"], c["records_already_loaded"], "bad" if c["records_failed"] else "ok", c["records_failed"],
                 "unknown" if result["records"]["in_source"] is None else result["records"]["in_source"]))
+    if c.get("held_back"):
+        h.append("<li><strong>%d field(s) held back</strong> because their value comes through a link (a lookup, rollup, count, or a formula that reads a link). They are not loaded as text. "
+                 "Set the links, then create them in Planning by hand: see the list below the fields.</li>" % c["held_back"])
+    pk = [f for f in result["fields"] if f.get("airtable_primary")]
+    if pk:
+        h.append("<li>The primary field in Airtable is <strong>%s</strong>. Planning's primary field stays AirtableRecordId until the separate re-key step is run after the data is validated.</li>" % _e(pk[0]["field_name"]))
     if c["values_not_converted"]:
         h.append("<li>%d value(s) of clean fields could not be sent as that type and were left empty in Planning (see the column \"values not converted\").</li>" % c["values_not_converted"])
     h.append("<li>Record type: %s (%s).</li>" % (_e(result["record_type"]["outcome"]), _e(result["record_type"]["planning_id"] or "none")))
@@ -132,13 +147,23 @@ def fields_html(result, css, apilog_name=None, redact=lambda t: t):
         att = f["attempted_type"] + (" (%s)" % f["attempted_from"] if f["attempted_from"] else "")
         card = "" if f["cardinality"] is None else "%s%s" % ("at least " if f["cardinality_capped"] else "", f["cardinality"])
         h.append('<tr class="o-%s">' % _e(f["outcome"] or "skipped") + "".join([
-            _td("<strong>%s</strong><br><code>%s</code>" % (_e(f["field_name"]), _e(f["field_id"]))), _td(_e(f["airtable_type"])), _td(_e(f["suggested_planning"])),
+            _td("<strong>%s</strong>%s<br><code>%s</code>" % (_e(f["field_name"]), " <em>(primary in Airtable)</em>" if f.get("airtable_primary") else "", _e(f["field_id"]))), _td(_e(f["airtable_type"])), _td(_e(f["suggested_planning"])),
             _td(_e(f["suggested_core"])), _td(_e(f["suggested_label"])), _td(_e(f["sent_name"])), _td(_e(att), "wrap"), _td("<strong>%s</strong>" % _e(f["outcome"])),
             _td(_e(f["reason"]), "wrap"), _td(_e(f["final_name"])), _td(_e(f["final_type"])), _td(_e(redact(err)), "wrap"),
             _td("" if f["max_length"] is None else f["max_length"], "n"), _td(_e(card), "n"), _td("" if f["nulls"] is None else f["nulls"], "n"),
             _td("" if f["total_records"] is None else f["total_records"], "n"), _td(f["values_not_converted"] or "", "n"), _td(opts), _td(_e(f["definition"]), "wrap"), _td(ref),
             _td(_e(f["note"]), "wrap")]) + "</tr>")
     h.append("</tbody></table></div>")
+    held = result.get("held_back") or []
+    if held:
+        h.append("<h2>Fields to create in Planning by hand (held back)</h2><p class=\"meta\">Planning cannot create a lookup through its API, and a value that comes through a link is never stored as text. "
+                 "Set the links first (the links pass), then create each of these in Planning.</p>")
+        h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Held back fields"><table style="min-width:900px"><thead><tr><th>Airtable field</th><th>Kind</th><th>Reads through</th>'
+                 "<th>Source field</th><th>Why</th></tr></thead><tbody>")
+        for x in held:
+            h.append("<tr>%s</tr>" % "".join([_td("<strong>%s</strong><br><code>%s</code>" % (_e(x["field_name"]), _e(x["field_id"]))), _td(_e(x["kind"])), _td(_e(_through(x))),
+                                               _td(_e(x.get("source_field_name") or "")), _td(_e(redact(x["reason"])), "wrap")]))
+        h.append("</tbody></table></div>")
     if result["records"]["failures"]:
         h.append("<h2>Records that failed</h2><p class=\"meta\">Airtable record IDs and a short reason only (the first %d).</p>" % len(result["records"]["failures"]))
         h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Failed records"><table style="min-width:600px"><thead><tr><th>Airtable record ID</th><th>Reason</th></tr></thead><tbody>')
@@ -206,3 +231,4 @@ def write_reports(result, out_dir, to_mhtml, css, airtable_calls=(), redact=lamb
     with open(os.path.join(out_dir, names["apilog"]), "wb") as f:
         f.write(to_mhtml(apilog_html(result, css, airtable_calls, redact), "Git-R-Done API log"))
     return names
+

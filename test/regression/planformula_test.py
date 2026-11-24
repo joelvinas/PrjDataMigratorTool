@@ -71,16 +71,14 @@ fx.append(("tT2", "fldT2F1", "Two Calc", "formula", {"f": "{fldT2R} + 1", "rt": 
 c1 = make_db(os.path.join(tmp, "ex.db"), t, fx)
 cat = catalog(c1)
 a1 = cat.advise("tT1", {})
-check("pre-check: all 3 calculated fields of Table One wait for Table Two", a1["counts"]["total"] == 3 and a1["counts"]["waiting"] == 3 and a1["counts"]["blocked"] == 0, a1["counts"])
-check("pre-check names the table to load first and how many fields it frees", a1["waiting_on"] and a1["waiting_on"][0]["table_id"] == "tT2" and a1["waiting_on"][0]["formulas"] == 3 and not a1["waiting_on"][0]["loaded"], a1["waiting_on"])
-check("suggested order for Table One: Table Two, then Table One (the one calculated field of Table Two waits for Table One)", [o["table_id"] for o in a1["order"]] == ["tT2", "tT1"]
-      and a1["order"][0]["creates"] == 0 and a1["order"][0]["unlocks"] == 3 and a1["order"][1]["creates"] == 3, a1["order"])
+check("pre-check: all 3 calculated fields of Table One read a rollup (a value through a link), so all 3 are held back, none waits for another table", a1["counts"]["total"] == 3
+      and a1["counts"]["held_back"] == 3 and a1["counts"]["waiting"] == 0 and a1["counts"]["blocked"] == 0 and a1["waiting_on"] == [] and a1["order"] == [], a1["counts"])
 a2 = cat.advise("tT2", {})
-check("suggested order for Table Two: Table Two, Table One, Table Two again", [o["table_id"] for o in a2["order"]] == ["tT2", "tT1", "tT2"] and a2["order"][2]["creates"] == 1, a2["order"])
-check("the advice is plain sentences naming the other table", any("Load Table Two first" in x for x in a1["advice"]) and any("more than once" in x for x in a2["advice"]), a1["advice"] + a2["advice"])
+check("the advice is a plain sentence: held back, not created, not stored as text, rebuilt by hand once the links are set", any("held back" in x and "not stored as text" in x for x in a1["advice"])
+      and a2["counts"]["held_back"] == 1, a1["advice"] + a2["advice"])
 present = {"tbl:tT2": "Table Two", "fldT2Num": "Two Number"}
 a3 = cat.advise("tT1", present)
-check("once Table Two is in Planning the three are ready and no order is needed", a3["counts"]["ready"] == 3 and a3["counts"]["waiting"] == 0 and a3["order"] == [], a3["counts"])
+check("loading the other table does not change it: a formula over a rollup is still held back (the tool never creates the rollup)", a3["counts"]["held_back"] == 3 and a3["counts"]["ready"] == 0, a3["counts"])
 check("a formula already in Planning counts as built, one stored as PRE- text as text", cat.advise("tT1", dict(present, fldT1F1="One Calc 1", fldT1F2="PRE-One Calc 2"))["counts"]["created"] == 1
       and cat.advise("tT1", dict(present, fldT1F2="PRE-One Calc 2"))["counts"]["stored_as_text"] == 1)
 check("the same schema gives the same advice twice", json.dumps(cat.advise("tT2", {}), sort_keys=True) == json.dumps(catalog(c1).advise("tT2", {}), sort_keys=True))
@@ -96,7 +94,7 @@ cb = make_db(os.path.join(tmp, "blk.db"), tb, fb)
 ab = catalog(cb).advise("tB", {})
 why = {b["name"]: " ".join(b["reasons"]) for b in ab["blocked"]}
 check("a formula over a multi-select, a link, a checkbox result, ARRAYCONTAINS or a loop is blocked with its reason (and will be PRE- text)",
-      ab["counts"]["blocked"] == 6 and ab["counts"]["ready"] == 1 and "multi-select" in why["Tag Text"] and "return type" in why["Big"] and "link" in why["Link Text"] and "ARRAYCONTAINS" in why["Contains"] and "cannot be built" in why["Loop A"], (ab["counts"], why))
+      ab["counts"]["blocked"] == 5 and ab["counts"]["held_back"] == 1 and ab["counts"]["ready"] == 1 and "multi-select" in why["Tag Text"] and "return type" in why["Big"] and "Link Text" not in why and "ARRAYCONTAINS" in why["Contains"] and "cannot be built" in why["Loop A"], (ab["counts"], why))
 
 # ------------------------------------------------------------------ a run against a fake Planning that accepts formula fields
 class Resp(object):
@@ -173,8 +171,9 @@ def go(fk, table):
 
 c0 = sqlite3.connect(dbA); c0.row_factory = sqlite3.Row
 pre0 = em.formula_precheck(c0, BASE, "tA", "dev", "wsDev"); c0.close()
-check("the pre-check before any run: 4 ready, 1 waiting for Beta, 1 blocked (a multi-select)", pre0["counts"]["ready"] == 4 and pre0["counts"]["waiting"] == 1 and pre0["counts"]["blocked"] == 1
-      and pre0["waiting_on"][0]["table_id"] == "tB" and [o["table_id"] for o in pre0["order"]] == ["tA", "tB", "tA"], pre0)
+check("the pre-check before any run: 4 ready, 1 held back (it reads a rollup, which comes through a link), 1 blocked (a multi-select), nothing waiting", pre0["counts"]["ready"] == 4
+      and pre0["counts"]["held_back"] == 1 and pre0["counts"]["waiting"] == 0 and pre0["counts"]["blocked"] == 1 and pre0["waiting_on"] == [] and pre0["order"] == []
+      and any("held back" in a for a in pre0["advice"]), pre0)
 fk = Fake()
 r = go(fk, "tA")
 by = {x["field_name"]: x for x in r["fields"]}
@@ -188,24 +187,23 @@ check("a formula is made after every ordinary field, and after the formula it re
       and fpost["A Twice"]["formulaOptions"]["formula"] == "{Days}*2", names)
 check("a formula over a multi-select is stored as PRE- text with the reason, and no formula was attempted for it", by["Tag Text"]["outcome"] == "pre-converted" and by["Tag Text"]["final_name"] == "PRE-Tag Text"
       and "multi-select" in by["Tag Text"]["reason"] and "Tag Text" not in fpost and by["Tag Text"]["attempt1"] == "not attempted", by["Tag Text"])
-check("a formula that reads another table's field is held back: not created, not stored as text", by["Beta Plus"]["outcome"] == "skipped" and by["Beta Plus"]["waiting_for"] == ["Beta"]
-      and "Beta Plus" not in names and "PRE-Beta Plus" not in names and "Run that table first" in by["Beta Plus"]["reason"], by["Beta Plus"])
-check("the result counts the formulas and says which table to run first", r["counts"]["formulas_built"] == 4 and r["counts"]["formulas_held_back"] == 1 and any("Beta (1)" in n for n in r["notes"]), (r["counts"], r["notes"]))
+check("a formula that reads a rollup (a value through a link) is held back: not created, not stored as text", by["Beta Plus"]["outcome"] == "skipped" and by["Beta Plus"]["held"]
+      and "Beta Plus" not in names and "PRE-Beta Plus" not in names and by["Beta Plus"]["reason"].startswith("held back"), by["Beta Plus"])
+check("the result counts the formulas built and the fields held back", r["counts"]["formulas_built"] == 4 and r["counts"]["formulas_held_back"] == 0 and r["counts"]["held_back"] >= 1, (r["counts"], r["notes"]))
 check("the result lists the fields in the schema's order, not the order they were made", [x["field_name"] for x in r["fields"]] == sorted([x["field_name"] for x in r["fields"]], key=str.lower))
 fk2 = Fake()
 rB = go(fk2, "tB")
 check("running Beta creates its fields", all(x["outcome"] == "clean" for x in rB["fields"]), [(x["field_name"], x["outcome"]) for x in rB["fields"]])
 cc = sqlite3.connect(dbA); cc.row_factory = sqlite3.Row
 pre = em.formula_precheck(cc, BASE, "tA", "dev", "wsDev")
-check("after Beta is run the pre-check shows Beta Plus ready", pre["counts"]["ready"] == 1 and pre["counts"]["created"] == 4, pre["counts"])
+check("after Beta is run the pre-check still shows Beta Plus held back (a lookup or rollup is never built by the tool)", pre["counts"]["held_back"] == 1 and pre["counts"]["created"] == 4 and pre["counts"]["ready"] == 0, pre["counts"])
 cc.close()
 fk3 = Fake()
 fk3.types, fk3.fields, fk3.primary = dict(fk.types), {k: [dict(f) for f in v] for k, v in fk.fields.items()}, dict(fk.primary)       # Planning still holds what the first run made
 r3 = go(fk3, "tA")
 by3 = {x["field_name"]: x for x in r3["fields"]}
 made3 = [p[2]["displayName"] for p in fk3.field_posts()]
-check("a second run of Alpha builds the held-back formula and nothing else twice", by3["Beta Plus"]["outcome"] == "clean" and by3["Beta Plus"]["final_type"] == "formula" and made3 == ["Beta Plus"], made3)
-check("the held-back formula reads the rollup's Planning name", [p[2] for p in fk3.field_posts()][0]["formulaOptions"]["formula"] == "{Beta Total}+1", fk3.field_posts())
+check("a second run of Alpha still holds the formula back and creates nothing twice", by3["Beta Plus"]["outcome"] == "skipped" and by3["Beta Plus"]["held"] and made3 == [], made3)
 
 # a refused formula falls back to PRE- text, as before
 fk4 = Fake(); fk4.refuse_types = {"formula"}
