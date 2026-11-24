@@ -1,13 +1,12 @@
--- Migration 029 (DRAFT, not applied): the decisions of the re-key step. Adds ONE table. Additive only, safe to run more than once. Touches no existing table.
+-- Migration 029 (applied by the owner and folded into the schema library, the embedded DDL and apply_migrations.py on 24 November 2026): the decisions of the re-key step. Adds ONE table. Additive only, safe to run more than once. Touches no existing table.
 -- Holds who decided, when and why, and for each record type what happened: IDs, an outcome and a short scrubbed reason. No record value and no token.
 --
 -- Why: the re-key page (/rekey) makes the field that was the primary field in Airtable the primary field of each record type in the dev Workspace, after the data is validated.
 -- That is a person's decision, so it is recorded like every other decision in this tool (who, when, why). The page already writes the same facts to a report; this table keeps them
 -- in the database too, one row per record type per run, and is only ever added to (a row is never changed or deleted by the tool). Until the owner applies it, the page skips this
--- write, says so, and the report is unaffected. Approved by the owner on 24 November 2026.
+-- write, says so, and the report is unaffected (a database without the table). Approved by the owner on 24 November 2026.
 --
--- Not folded into DatabaseSchemaLibrary.sql, the embedded DDL in server.py or sql/apply_migrations.py until the owner confirms it is applied (a test requires the library
--- file to equal the embedded DDL, and the app refuses a database that lacks an expected table).
+-- A new database has it from the library; apply_migrations.py runs this file through src/draftmigrations.py for an older database.
 
 CREATE TABLE IF NOT EXISTS rekey_decisions (
     decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
