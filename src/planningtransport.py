@@ -6,6 +6,9 @@ Routes and property names come from the saved Planning API v2 reference:
     POST /v2/record-types/{recordTypeId}/fields          body {displayName, type, description, ...}      -> {id, options, ...}
     POST /v2/record-types/{recordTypeId}/records/bulk    body [{"recordTypeId": id, "data": {"<fieldId>": value}}]  -> 201 (all created) or 207 (some failed): {status, total, succeeded, failed,
                                                           requestId, results: [{requestIndex, id, ...}]}; a failed result has status "error" and error {code, message}
+Owner-verified (23 November 2026, Postman in DEV): PATCH /v2/records/{id} with {"data": {...}} sets a reference field (a plain list or an add operation); the bulk PATCH of a record type takes
+[{id, recordTypeId, data}] (plain list, remove operation); a reference field is created with createBackReference false; a lookup field is NOT creatable through the API (400, field type invalid);
+a record type's primary field can be switched again with PATCH /v2/record-types/{id}.
 Owner-verified (17 November 2026): a field CAN be changed in place with PATCH; the bulk record route, body and reply above (Postman test 5; the exact keys of a SUCCESSFUL
 result beyond requestIndex and id, including its status text, were not copied, so success is "no error and an id"); record type names are checked per Workspace
 (this loader creates no Global record types); a record needs only its recordTypeId; the description property is `description`; authentication is a Bearer token from config.json.
@@ -38,6 +41,7 @@ from workfronthttp import HttpError
 _GONE_RE = re.compile(r"(?i)NOT_FOUND")
 _CONFLICT = re.compile(r"(?i)NOT_UNIQUE|already exists|must be unique|duplicate")
 DATE_FORMAT = "locale"      # the example value in the v2 reference; unverified for other values
+BULK_MAX = 100              # records per bulk request (Planning API v2 reference)
 MAX_PAGES = 100
 
 
@@ -384,10 +388,48 @@ class PlanningTransport(object):
         return out
 
     def update_record(self, record_id, fields):
-        """Set fields on one record (used for the links second pass)."""
+        """Set fields on one record: PATCH /v2/records/{id} with {"data": {fieldId: value}}. VERIFIED in a DEV Workspace by the owner's Postman run on 23 November 2026 (plain list and
+        an {"op": "add", "value": [ids]} operation on a reference field). This sent {"fields": ...} before; that key is not in Planning's reference and was never proven."""
         if not record_id or not fields:
             raise ValueError("A record update needs the record's Planning ID and at least one field.")
-        self.http.request("PATCH", "/v2/records/%s" % record_id, {"fields": fields})
+        self.http.request("PATCH", "/v2/records/%s" % record_id, {"data": fields})
+
+    def patch_records_bulk(self, record_type_id, items):
+        """Update many records of ONE record type in one call: PATCH /v2/record-types/{id}/records/bulk with [{"id", "recordTypeId", "data": {fieldId: value}}], at most 100 items
+        (merge-patch: a field not named is left alone). VERIFIED by the owner's Postman run on 23 November 2026 for a plain list of record IDs on a reference field and for a
+        {"op": "remove", "value": [...]} operation. NOT verified: the exact keys of a successful result (so success is "no error", matched by requestIndex as in create_records),
+        the 500 connections cap, and whether a plain list replaces or adds to what the field holds.
+        `items` is [(record ID, {field ID: value})]. Returns one result per item, in order: {"ok": True} or {"error": "short reason"}. Only the error CODE is kept, because Planning's
+        message text could echo a value. A call refused as a whole raises (HttpError); an answer that cannot be matched raises UnmatchedReply."""
+        if not record_type_id:
+            raise ValueError("A record type ID is needed.")
+        if not items:
+            return []
+        if len(items) > BULK_MAX:
+            raise ValueError("A bulk update takes at most %d records." % BULK_MAX)
+        body = [{"id": str(rid), "recordTypeId": str(record_type_id), "data": data} for rid, data in items]
+        reply = self.http.request("PATCH", "/v2/record-types/%s/records/bulk" % record_type_id, body)
+        rows = reply.get("results") if isinstance(reply, dict) else None
+        if not isinstance(rows, list):
+            raise UnmatchedReply("The update call worked but its reply has no results list, so the records cannot be matched.")
+        seen = {}
+        for r in rows:
+            i = r.get("requestIndex") if isinstance(r, dict) else None
+            if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(items):
+                seen.setdefault(i, []).append(r)
+        out = []
+        for i in range(len(items)):
+            got = seen.get(i) or []
+            if len(got) != 1:
+                out.append({"error": "the reply has no result for this record; check Planning before running again" if not got else "the reply holds two results for this record; check Planning before running again"})
+                continue
+            r = got[0]
+            if r.get("error") or str(r.get("status") or "").lower() == "error":
+                code = (r.get("error") or {}).get("code") if isinstance(r.get("error"), dict) else None
+                out.append({"error": "Planning refused this update (%s)" % (str(code)[:40] if code else "no error code")})
+            else:
+                out.append({"ok": True})
+        return out
 
     # ---- finding what already exists
     def _pages(self, path):
@@ -458,17 +500,24 @@ class PlanningTransport(object):
 
     def set_primary_field(self, record_type_id, field_id):
         """PATCH /v2/record-types/{id} with primaryFieldId (the displayName is read first and sent with it, because the update schema lists it as required), then read the record type
-        again and check that Planning really holds the new primary field: an accepted call is not proof. Raises HttpError with a plain reason when it is not confirmed."""
+        again and check that Planning really holds the new primary field AND still has the same record type name: an accepted call is not proof. VERIFIED by the owner's Postman run on
+        23 November 2026 for a second switch (a default field to a text field). The body's displayName IS the record type's name (a field name sent there renamed the record type
+        in that run), which is why the name is always the one read just before and is checked again afterwards. Raises HttpError with a plain reason when it is not confirmed."""
         if not record_type_id or not field_id:
             raise ValueError("A record type ID and a field ID are needed.")
         rt = self.get_record_type(record_type_id)
         if str(rt.get("primaryFieldId") or "") == str(field_id):
             return True
-        body = {"displayName": rt.get("displayName") or "", "primaryFieldId": str(field_id)}
+        name = rt.get("displayName") or ""
+        if not name:
+            raise HttpError("The record type's name could not be read, so the primary field was not changed (the name is sent with the change and must not be altered).")
+        body = {"displayName": name, "primaryFieldId": str(field_id)}
         self.http.request("PATCH", "/v2/record-types/%s" % record_type_id, body)
-        got = self.get_record_type(record_type_id).get("primaryFieldId")
-        if str(got or "") != str(field_id):
+        after = self.get_record_type(record_type_id)
+        if str(after.get("primaryFieldId") or "") != str(field_id):
             raise HttpError("The primary field change was accepted but Planning still reports a different primary field when the record type is read back.")
+        if str(after.get("displayName") or "") != str(name):
+            raise HttpError("The primary field was changed, but the record type's name is no longer %r: check it in Planning." % str(name))
         return True
 
     def delete_field(self, field_id):
