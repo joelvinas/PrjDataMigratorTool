@@ -13,7 +13,7 @@ import os
 import re
 from html import escape
 
-SECTIONS = (("record_type", "Record type creation"), ("fields", "Field creation"), ("records", "Records load"))
+SECTIONS = (("record_type", "Record type creation"), ("fields", "Field creation"), ("records", "Records load"), ("reference_fields", "Reference field creation"), ("links", "Links update"))
 
 CSV_HEADER = ["base_name", "base_id", "table_name", "table_id", "airtable_field_name", "airtable_field_id", "airtable_data_type", "records", "nulls", "cardinality", "cardinality_is_capped",
               "airtable_options_json", "formula_or_rollup_definition", "longest_value_length", "workspace_name", "workspace_id", "record_type_name", "record_type_id",
@@ -232,3 +232,76 @@ def write_reports(result, out_dir, to_mhtml, css, airtable_calls=(), redact=lamb
         f.write(to_mhtml(apilog_html(result, css, airtable_calls, redact), "Git-R-Done API log"))
     return names
 
+
+# ------------------------------------------------------------------ the links pass (emergency_links.py): one report and the same API log layout
+def links_stem(result):
+    return stem(result).replace("Git-R-Done_", "Git-R-Done-links_", 1)
+
+
+def links_html(result, css, apilog_name=None, redact=lambda t: t):
+    c = result["counts"]
+    h = ['<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+         "<title>Git-R-Done links report</title><style>%s%s</style></head><body><main>" % (css, EXTRA_CSS)]
+    h.append("<h1>Git-R-Done: links report</h1>")
+    h.append('<p class="meta">Table <strong>%s</strong> (%s) of base %s, Planning Workspace %s (stage %s). Run %s to %s (UTC)%s. Table, field and record IDs, names, counts and error codes only: '
+             "no record value is in this report.</p>" % (_e(result["table_name"]), _e(result["table_id"]), _e(result["base_id"]), _e(result["workspace_id"]), _e(result["stage"]),
+                                                          _e(result["started_at"]), _e(result["finished_at"]), " (a dry run: nothing was sent)" if result.get("dry_run") else ""))
+    h.append("<h2>Summary</h2><ul>")
+    h.append('<li>Reference fields: <strong>%d created</strong>, %d already there, <strong class="%s">%d failed</strong>, %d waiting for another table, <strong class="%s">%d blocked</strong> (direction not decided).</li>'
+             % (c["reference_created"], c["reference_existing"], "bad" if c["reference_failed"] else "ok", c["reference_failed"], c["reference_waiting"], "bad" if c["blocked"] else "ok", c["blocked"]))
+    h.append('<li>Records with links still to do at the start: %d. <strong>%d complete</strong> (every link set), %d partly set (the rest wait), %d waiting (nothing could be set yet), '
+             '<strong class="%s">%d failed</strong>, %d had no links at all.</li>' % (c["records_pending"], c["records_complete"], c["records_partial"], c["records_waiting"], "bad" if c["records_failed"] else "ok", c["records_failed"], c["records_no_links"]))
+    h.append("<li>Links %s: %d. Links waiting for a record that is not in Planning yet: %d. A waiting link is not a failure: it is tried again on a later run.</li>" % ("that would be set" if result.get("dry_run") else "set", c["links_set"], c["links_waiting"]))
+    h.append("</ul>")
+    for n in result["notes"]:
+        h.append('<div class="box warn">%s</div>' % _e(redact(n)))
+    if result["blocked"]:
+        h.append('<h2>Blocked links (direction not decided)</h2><p class="meta">Decide each pair on the Link directions page (who, when and why are recorded). Only these links are left out; the others were handled.</p><ul>')
+        for b in result["blocked"]:
+            h.append("<li><strong>%s</strong> (%s): %s</li>" % (_e(b["field_name"]), _e(b["field_id"]), _e(redact(b["reason"]))))
+        h.append("</ul>")
+    h.append("<h2>Reference fields</h2>")
+    h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Reference fields"><table style="min-width:900px"><thead><tr><th>Link field</th><th>Points to</th><th>Status</th><th>Planning field ID</th><th>Name sent</th><th>Why</th><th>Log</th></tr></thead><tbody>')
+    cls = {"created": "clean", "existing": "clean", "would_create": "clean", "waiting": "pre-converted", "blocked": "failed", "failed": "failed"}
+    for r in result["reference_fields"]:
+        ref = log_ref(r["log_span"])
+        if ref and apilog_name:
+            ref = '<a href="%s#e%d">%s</a>' % (_e(apilog_name), r["log_span"][0], _e(ref))
+        else:
+            ref = _e(ref)
+        h.append('<tr class="o-%s">%s</tr>' % (cls.get(r["status"], "skipped"),
+                 "".join([_td("<strong>%s</strong><br><code>%s</code>" % (_e(r["field_name"]), _e(r["field_id"]))), _td("%s (%s)" % (_e(r["target_table_name"]), _e(r["target_table_id"]))), _td(_e(r["status"])),
+                          _td(_e(r["reference_field_id"])), _td(_e(r["sent_name"])), _td(_e(redact(r["reason"])), "wrap"), _td(ref)])))
+    h.append("</tbody></table></div>")
+    if result["waiting_by_table"]:
+        h.append('<h2>Waiting links, by the table they wait on</h2><p class="meta">Run the table in Git-R-Done (or finish loading it), then run the links pass again for this table.</p>')
+        h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Waiting links"><table style="min-width:700px"><thead><tr><th>Waits on</th><th>In Planning</th><th class="n">Its records loaded</th><th class="n">Records waiting here</th><th class="n">Links waiting</th></tr></thead><tbody>')
+        for w in result["waiting_by_table"]:
+            h.append("<tr>%s</tr>" % "".join([_td("%s (%s)" % (_e(w["table_name"]), _e(w["table_id"]))), _td("yes" if w["in_planning"] else "no"), _td("%d of %d" % (w["loaded"], w["registered"]), "n"), _td(w["records"], "n"), _td(w["links"], "n")]))
+        h.append("</tbody></table></div>")
+    if result["failures"]:
+        h.append('<h2>Records whose links failed</h2><p class="meta">Airtable record IDs and an error code only (the first %d of %d). They stay on the list and are retried on the next run.</p>' % (len(result["failures"]), result["failure_count"]))
+        h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Failed records"><table style="min-width:600px"><thead><tr><th>Airtable record ID</th><th>Reason</th></tr></thead><tbody>')
+        for r in result["failures"]:
+            h.append("<tr>%s%s</tr>" % (_td(_e(r["record_id"])), _td(_e(redact(r["reason"])), "wrap")))
+        h.append("</tbody></table></div>")
+    if result["held_back"]:
+        h.append('<h2>Fields to create in Planning by hand (held back)</h2><p class="meta">Planning cannot create a lookup through its API, and a value that comes through a link is never stored as text. Create each one now that the links are set.</p>')
+        h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Held back fields"><table style="min-width:900px"><thead><tr><th>Airtable field</th><th>Kind</th><th>Reads through</th><th>Source field</th><th>Why</th></tr></thead><tbody>')
+        for x in result["held_back"]:
+            h.append("<tr>%s</tr>" % "".join([_td("<strong>%s</strong><br><code>%s</code>" % (_e(x["field_name"]), _e(x["field_id"]))), _td(_e(x["kind"])), _td(_e(_through(x))), _td(_e(x.get("source_field_name") or "")), _td(_e(redact(x["reason"])), "wrap")]))
+        h.append("</tbody></table></div>")
+    h.append("</main></body></html>")
+    return "".join(h)
+
+
+def write_links_reports(result, out_dir, to_mhtml, css, redact=lambda t: t):
+    """The links report and its API log (MHTML). Returns {links, apilog}: file names only."""
+    os.makedirs(out_dir, exist_ok=True)
+    base = links_stem(result)
+    names = {"links": base + "_links.mhtml", "apilog": base + "_apilog.mhtml"}
+    with open(os.path.join(out_dir, names["links"]), "wb") as f:
+        f.write(to_mhtml(links_html(result, css, names["apilog"], redact), "Git-R-Done links report"))
+    with open(os.path.join(out_dir, names["apilog"]), "wb") as f:
+        f.write(to_mhtml(apilog_html(result, css, (), redact), "Git-R-Done links API log"))
+    return names
