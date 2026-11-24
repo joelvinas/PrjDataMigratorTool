@@ -49,6 +49,8 @@ check("the other base is not mixed in", {t["table_id"] for t in rv["tables"]} ==
 tb = {t["table_id"]: t for t in rv["tables"]}
 check("table verdicts: unchanged PASS, PO#s AUTO_FIXABLE, number prefix NEEDS_HUMAN", tb["tA"]["verdict"] == "PASS" and tb["tB"]["verdict"] == "AUTO_FIXABLE" and tb["tB"]["suggested"] == "POs"
       and tb["tC"]["verdict"] == "NEEDS_HUMAN" and tb["tC"]["suggested"] == "Archive 1-2-3", {k: (v["verdict"], v["suggested"]) for k, v in tb.items()})
+rvx = st.review(c, B, gate=False)
+check("the names export can read the fields while the gate is closed", rvx["gate"]["ready"] is False and len(rvx["fields"]) == 10 and st.review(c, B)["fields"] == [], rvx["gate"])
 check("fields cannot be approved while the gate is closed", (raises(st.approve_fields, c, B, "JV", mode="pass") or st.StoreError("x")).status == 409)
 check("a decision needs the reviewer's initials", raises(st.approve_tables, c, B, "  ", mode="unchanged") is not None and raises(st.approve_tables, c, B, "x" * 41, mode="unchanged") is not None)
 
@@ -132,6 +134,15 @@ check("import never overwrites an approved name", c.execute("select planning_nam
 check("import reports an unmatched ID and fields missing from the file", any(p["kind"] == "UNMATCHED_ID" for p in r["problems"]) and any(p["kind"] == "MISSING_FROM_IMPORT" for p in r["problems"]))
 check("an import is audited per name with the batch", c.execute("select count(*) from name_events where event_type='import' and reason=?", (r["batch"],)).fetchone()[0] >= 2)
 check("a bad file is refused", raises(st.import_names, c, B, "JV", csv_base64="!!notbase64!!") is not None and raises(st.import_names, c, B, "JV") is not None)
+
+# a partial file touches only the fields it lists, and a blank cell clears nothing
+def _snap(skip):
+    return {r[0]: tuple(r) for r in c.execute("select * from field_names where airtable_field_id<>? order by airtable_field_id", (skip,))}
+before, cnt = _snap("f9"), c.execute("select count(*) from field_names").fetchone()[0]
+part = "field_id,old_name,new_name,new_label,new_dataType\r\nf9,Plain,Plain Two,,\r\n"
+r2 = st.import_names(c, B, "JV", csv_base64=base64.b64encode(part.encode("utf-8")).decode())
+check("a partial import leaves every field not in the file untouched", _snap("f9") == before and c.execute("select count(*) from field_names").fetchone()[0] == cnt, r2)
+check("a blank cell in a listed row clears nothing", c.execute("select core_name, core_label, target_type from field_names where airtable_field_id='f9'").fetchone()[:] == ("Plain Two", "Plain Text", "text"), r2)
 
 # ---- settings
 s0, saved = st.read_settings(c, B)

@@ -219,7 +219,7 @@ def _stored(conn, base_id):
 
 # ---------------------------------------------------------------- the review (everything the page shows)
 
-def _compute(conn, base_id, settings, override=None):
+def _compute(conn, base_id, settings, override=None, gate=True):
     data = load_fields(conn, base_id)
     if not data["fields"]:
         raise StoreError("No fields are stored for base %s. Ingest its schema in Stage 1 first." % base_id, 404)
@@ -239,17 +239,18 @@ def _compute(conn, base_id, settings, override=None):
     groups = _live_groups(groups, data)
     merged = fgp.merged_ids(groups)                          # merged members are not fields of their own: they leave the review like abandoned ones
     res = fn.run(data["fields"], data["tables"], settings, manual=manual, approved_tables=approved, abandoned=abandoned + [m for m in merged if m not in abandoned],
-                 out_of_scope_tables=out_tables, gate=True)
+                 out_of_scope_tables=out_tables, gate=gate)
     return {"data": data, "scope": scope, "scope_ok": scope_ok, "out": set(out_tables), "table_rows": table_rows, "names": names,
             "approved": approved, "manual": manual, "abandoned": abandoned, "res": res, "groups": groups, "groups_ok": groups_ok, "merged": merged}
 
 
-def review(conn, base_id, settings=None):
-    """The full payload for the page. Fields appear only when every in-scope table name is approved (the gate)."""
+def review(conn, base_id, settings=None, gate=True):
+    """The full payload for the page. Fields appear only when every in-scope table name is approved (the gate). gate=False is for the names export,
+    which reads what is held and must not be empty just because tables are not approved yet."""
     saved_settings, saved = read_settings(conn, base_id)     # 'saved' says whether anything has been saved, even when previewing other settings
     if settings is None:
         settings = saved_settings
-    c = _compute(conn, base_id, settings)
+    c = _compute(conn, base_id, settings, gate=gate)
     res, data = c["res"], c["data"]
     targets = read_targets(conn, base_id)
     by_table = defaultdict(int)
