@@ -205,6 +205,12 @@ details.card > summary { cursor: pointer; }
 #linkTable .relhelp { margin-top: 8px; font-size: 13px; line-height: 1.5; }
 #linkTable .relhelp div + div { margin-top: 3px; }
 .tablewin:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+/* Git-R-Done: labels in column 1, every control in column 2 */
+.formgrid { display: grid; grid-template-columns: max-content minmax(0, 640px); gap: 10px 12px; align-items: center; margin: 8px 0; }
+.formgrid .combo { min-width: 0; max-width: none; }
+.formgrid .cell { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#tableSel { min-width: 360px; max-width: 100%; }
+#tableSel option.loaded { background: #d9f2dc; color: #14532d; }
 /* Load a table page */
 .wsid { font-family: ui-monospace, Consolas, monospace; background: #eef0f4; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--line); min-width: 8em; }
 .jobpanel { border-color: var(--accent); background: #f4f8ff; position: sticky; top: 0; z-index: 5; }

@@ -5919,7 +5919,19 @@ def api_emergency_setup(q):
     if (q.get("base_id") or [""])[0]:
         try:
             with db() as conn:
-                out["tables"] = _lt_call(tableload.table_choices, conn, _names_base(q))
+                tables = _lt_call(tableload.table_choices, conn, _names_base(q))
+                order = {r["table_id"]: r["load_order_sequence"] for r in conn.execute("SELECT table_id, load_order_sequence FROM dependency_matrix")}
+                loaded = set()
+                if out["workspace_id"]:
+                    loaded = {r["table_id"] for r in conn.execute(
+                        "SELECT table_id FROM load_id_map WHERE system='planning' AND kind='record_type' AND status='created' AND workfront_id IS NOT NULL "
+                        "AND environment=? AND workspace_key=? AND base_id=?", (emergency.STAGE, out["workspace_id"], _names_base(q)))}
+                for t in tables:
+                    t["load_order"] = order.get(t["table_id"])
+                    t["loaded"] = t["table_id"] in loaded
+                # Load order first (tables without one go last, by name); the page prefixes each with [#n].
+                tables.sort(key=lambda t: (t["load_order"] is None, t["load_order"] or 0, t["name"].lower(), t["table_id"]))
+                out["tables"] = tables
         except AppError as e:
             out["tables_problem"] = e.message
     return _lt_out(out)
