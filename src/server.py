@@ -56,6 +56,7 @@ import calcpreflight
 import calcpush
 import workfronthttp
 import emergency
+import emergency_links
 import emergency_report
 import extractcsv
 import recordload
@@ -5938,9 +5939,10 @@ def api_emergency_setup(q):
 
 
 class EmergencyJob:
-    def __init__(self, base, table_id, ws, db_path):
+    """One background job of the Git-R-Done page: kind "run" is the table load, kind "links" is the links pass (send False = a dry run that sends nothing)."""
+    def __init__(self, base, table_id, ws, db_path, kind="run", send=True):
         self.id = str(int(time.time() * 1000))
-        self.base, self.table_id, self.ws, self.db_path = base, table_id, ws, db_path
+        self.base, self.table_id, self.ws, self.db_path, self.kind, self.send = base, table_id, ws, db_path, kind, send
         self.status, self.error, self.result, self.progress, self.files = "running", None, None, {}, None
         self.started_at, self.finished_at = utc_now(), None
         self.cancel = threading.Event()
@@ -5971,11 +5973,33 @@ def _em_fetch_doc(job):
     return fetch
 
 
+def _run_links_job(job, ctx, tr, secrets):
+    """The links pass for one table (emergency_links.py): reports are written for a real send only; a dry run just answers."""
+    ws_name = (tableload.workspace_status(ctx, tr) or {}).get("name") or "" if job.send else ""
+    cfg, _problem = load_config()
+    base_name = next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or ""
+    calls = emergency.CallLog()
+    tr.http.recorder = calls
+    with db(job.db_path) as conn:
+        res = emergency_links.run_links(conn, job.base, job.table_id, ctx, tr, extract_dir(), calls, send=job.send, progress=job.set_progress, should_stop=job.cancel.is_set)
+    res["workspace_name"], res["base_name"] = ws_name, base_name
+    redact = lambda t: scrub(loadconfig.redact(t, secrets))
+    if job.send:
+        job.files = emergency_report.write_links_reports(res, emergency_out_dir(), to_mhtml, REPORT_CSS, redact)
+    slim = {k: v for k, v in res.items() if k not in ("calls",)}
+    slim["files"] = job.files
+    job.result = _lt_out(slim)
+    job.status = "cancelled" if res.get("cancelled") else "done"
+
+
 def _run_emergency_job(job):
     secrets = _lt_secrets()
     try:
-        ctx = _em_context(True)
+        ctx = _em_context(job.send)
         tr = tableload.transport(ctx)
+        if job.kind == "links":
+            _run_links_job(job, ctx, tr, secrets)
+            return
         ws_name = (tableload.workspace_status(ctx, tr) or {}).get("name") or ""            # one read of the Workspace, before the run's calls are recorded
         cfg, _problem = load_config()
         base_name = next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or ""
@@ -6029,6 +6053,49 @@ def api_emergency_start(body):
     return {"started": True, "job_id": job.id}
 
 
+def api_emergency_links(body):
+    """Start the links pass for one table (the second visit): create the reference fields and set the links, or with send false only count what it would do (nothing is sent).
+    A real send needs the same confirmation as a Go run. One job at a time, shared with Go and Reset."""
+    base = _names_base(body)
+    table = str(body.get("table_id") or "").strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    send = body.get("send") is True
+    ctx = _em_context(send)
+    if send:
+        conf = body.get("confirm")
+        if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
+            raise AppError("Confirm the table and the Workspace ID exactly as shown before anything is sent.")
+    with db() as conn:
+        if table not in {t["table_id"] for t in _lt_call(tableload.table_choices, conn, base)}:
+            raise AppError("That table is not in this base or is out of scope.", 404)
+        if not conn.execute("SELECT 1 FROM load_id_map WHERE system='planning' AND kind='record_type' AND status='created' AND workfront_id IS NOT NULL AND environment=? AND workspace_key=? AND table_id=?",
+                            (emergency.STAGE, ctx.ws, table)).fetchone():
+            raise AppError("This table is not in Planning yet (dev Workspace %s). Run it with Go first." % ctx.ws, 409)
+    with _emjob_lock:
+        cur = EMJOB["current"]
+        if cur and cur.status == "running":
+            raise AppError("A Git-R-Done run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
+        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"], kind="links", send=send)
+        EMJOB["current"] = job
+    threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id, "dry_run": not send}
+
+
+def api_emergency_revisit(q):
+    """What a second visit to one table would do (reference fields to create, links pending, what each waits on, undecided directions, fields held back). Nothing is sent."""
+    base = _names_base(q)
+    table = (q.get("table_id") or [""])[0].strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    ctx = _em_context(False)
+    with db() as conn:
+        try:
+            return _lt_out(emergency_links.revisit(conn, base, table, ctx.env.name, ctx.ws))
+        except emergency.EmergencyError as e:
+            raise AppError(e.message, e.status)
+
+
 def api_emergency_formulas(q):
     """The calculated-field pre-check for one table: what a Go run would build, hold back or store as text, which other tables to run first and in what order. Nothing is sent."""
     base = _names_base(q)
@@ -6047,7 +6114,7 @@ def api_emergency_status(_q=None):
     job = EMJOB["current"]
     if not job:
         return {"job": None}
-    return _lt_out({"job": {"id": job.id, "base_id": job.base, "table_id": job.table_id, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
+    return _lt_out({"job": {"id": job.id, "kind": job.kind, "dry_run": not job.send, "base_id": job.base, "table_id": job.table_id, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
                             "finished_at": job.finished_at, "progress": job.progress, "result": job.result}})
 
 
@@ -6743,7 +6810,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/corefields/setup": api_corefields_setup, "/api/corefields/state": api_corefields_state, "/api/corefields/template.csv": api_corefields_template,
               "/api/corefields/crosswalk.csv": api_corefields_crosswalk, "/api/corefields/report": api_corefields_report,
               "/api/calcfields/setup": api_calcfields_setup, "/api/calcfields/forms/template.csv": api_calcfields_forms_template, "/api/calcfields/push/status": api_calcfields_push_status, "/api/calcfields/runs": api_calcfields_runs, "/api/calcfields/report": api_calcfields_report, "/api/calcfields/report.csv": api_calcfields_report_csv,
-              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/formulas": api_emergency_formulas, "/api/emergency/report": api_emergency_report}
+              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/formulas": api_emergency_formulas, "/api/emergency/revisit": api_emergency_revisit, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
@@ -6751,7 +6818,7 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/calcfields/preflight": api_calcfields_preflight, "/api/calcfields/forms/upload": api_calcfields_forms_upload, "/api/calcfields/form/check": api_calcfields_form_check,
                "/api/calcfields/push": api_calcfields_push, "/api/calcfields/push/cancel": api_calcfields_push_cancel, "/api/calcfields/approve": api_calcfields_approve,
                "/api/corefields/scan": api_corefields_scan, "/api/corefields/create": api_corefields_create, "/api/corefields/reset": api_corefields_reset, "/api/corefields/cancel": api_corefields_cancel,
-               "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
+               "/api/emergency/start": api_emergency_start, "/api/emergency/links": api_emergency_links, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/lookups/assign": api_lookups_assign, "/api/lookups/unassign": api_lookups_unassign, "/api/lookups/rename": api_lookups_rename, "/api/lookups/delete": api_lookups_delete, "/api/datatypes/default": api_datatypes_default,

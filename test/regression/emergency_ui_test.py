@@ -62,6 +62,28 @@ try:
         check("links to the field report, the API log report and the CSV are shown", len(links) == 3 and all(l.startswith("/api/emergency/report?file=") for l in links) and any("_fields.mhtml" in l for l in links) and any("_apilog.mhtml" in l for l in links), links)
         check("the field row shows the Airtable name, the name sent and the outcome", "Note Text" in pg.inner_text("#fieldGrid") and "clean" in pg.inner_text("#fieldGrid"))
         check("no token and no record value on the page", TOKEN not in pg.content() and "SECRETVALUE" not in pg.content())
+        # ---- the links card (the second visit): hidden for a table with no link field, closed for a table that is not in Planning, a check that sends nothing, a confirmation for the real run
+        check("a table with no link field shows no Links card", pg.is_hidden("#linksCard"))
+        pg.select_option("#tableSel", "tA")
+        pg.wait_for_function("!document.getElementById('linksCard').hidden")
+        check("a table that is not in Planning yet says so and cannot be sent, but can be checked", "not in Planning yet" in pg.inner_text("#linksMsg") and pg.is_disabled("#btnLinks") and pg.is_enabled("#btnLinksCheck"), pg.inner_text("#linksMsg"))
+        pg.select_option("#tableSel", "tB")
+        pg.click("#btnGo")
+        pg.wait_for_function("!document.getElementById('resultCard').hidden && document.getElementById('countGrid').textContent.includes('Records loaded')", timeout=30000)
+        pg.wait_for_function("!document.getElementById('linksCard').hidden && !document.getElementById('btnLinks').disabled", timeout=15000)
+        check("after Go the table's link field is listed and the links can be set", "Note Link" in pg.inner_text("#linksFieldGrid") and pg.is_enabled("#btnLinks"), pg.inner_text("#linksCard"))
+        n_chk = len(fake.reqs); dialogs.clear()
+        pg.click("#btnLinksCheck")
+        pg.wait_for_function("!document.getElementById('linksResultCard').hidden", timeout=30000)
+        check("the check asks nothing, sends nothing to Workfront and says so", dialogs == [] and len(fake.reqs) == n_chk and "nothing was sent" in pg.inner_text("#linksResultMsg") and pg.is_hidden("#resultCard"), (dialogs, pg.inner_text("#linksResultMsg")))
+        check("the links result lists the counts", "Links set" in pg.inner_text("#linksCountGrid") and "Links waiting" in pg.inner_text("#linksCountGrid"))
+        answer["accept"] = False; dialogs.clear()
+        sends = lambda: [u for m, u in reqs if m == "POST" and "/api/emergency/links" in u]
+        n_posts = len(sends())
+        pg.click("#btnLinks"); pg.wait_for_timeout(400)
+        check("the real links run asks first, names the table and the Workspace, and Cancel sends nothing", len(dialogs) == 1 and "Customers" in dialogs[0] and "wsDev" in dialogs[0] and len(sends()) == n_posts and len(fake.reqs) == n_chk, dialogs)
+        answer["accept"] = True
+        pg.select_option("#tableSel", "tC")
         # ---- reset: Workfront refuses first, then the person forgets the IDs; then Go again
         check("Reset table is open with a base and a table, and the forget choice is hidden", pg.is_enabled("#btnReset") and not pg.is_visible("#forgetRow"))
         n_before = len(fake.reqs)

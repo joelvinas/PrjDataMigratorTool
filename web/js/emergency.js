@@ -1,7 +1,7 @@
 "use strict";
 /* Emergency mode: one table into the dev Workspace in one click. The page only asks the server to run it and shows the answer: field names, IDs, counts, outcomes and short
    scrubbed reasons. No record value and no token is ever in a reply. */
-const em = { setup: null, job: null, timer: null };
+const em = { setup: null, job: null, timer: null, revisit: null };
 const baseNow = () => $("baseId").value.trim();
 const tableNow = () => $("tableSel").value;
 const wsNow = () => (em.setup && em.setup.workspace_id) || "";
@@ -14,6 +14,8 @@ function applyGo() {
   $("btnGo").disabled = !(em.setup && em.setup.configured && baseNow() && tableNow()) || busy;
   $("btnReset").disabled = $("btnGo").disabled;
   $("btnForget").disabled = busy;
+  $("btnLinksCheck").disabled = $("btnGo").disabled;
+  $("btnLinks").disabled = $("btnGo").disabled || !(em.revisit && em.revisit.in_planning);
   $("btnCancel").hidden = !busy;
 }
 
@@ -31,6 +33,7 @@ async function loadSetup() {
   sel.value = d.tables.some((t) => t.table_id === keep) ? keep : "";
   applyGo();
   await loadFormulas().catch(() => { $("formulaCard").hidden = true; });
+  await loadLinks().catch(() => { $("linksCard").hidden = true; });
   await follow();
 }
 
@@ -42,8 +45,8 @@ async function loadFormulas() {
   const c = d.counts;
   card.hidden = c.total === 0;
   if (!c.total) return;
-  setMsg("formulaMsg", fmt(c.total) + " calculated field(s): " + fmt(c.ready) + " can be built now, " + fmt(c.waiting) + " wait for another table, " + fmt(c.blocked) + " cannot be built as formulas, "
-    + fmt(c.created) + " already built, " + fmt(c.stored_as_text) + " already stored as text.", c.waiting || c.blocked ? "warn" : "ok");
+  setMsg("formulaMsg", fmt(c.total) + " calculated field(s): " + fmt(c.ready) + " can be built now, " + fmt(c.held_back || 0) + " held back (they read a link), " + fmt(c.waiting) + " wait for another table, " + fmt(c.blocked) + " cannot be built as formulas, "
+    + fmt(c.created) + " already built, " + fmt(c.stored_as_text) + " already stored as text.", c.waiting || c.blocked || c.held_back ? "warn" : "ok");
   const adv = $("formulaAdvice");
   clear(adv);
   (d.advice || []).forEach((t) => adv.appendChild(el("div", { class: "hint", text: t })));
@@ -51,6 +54,56 @@ async function loadFormulas() {
   fill("formulaWaitGrid", d.waiting_on || [], (w) => [td(w.table_name + " (" + w.table_id + ")"), td(w.formulas, "num"), td(w.loaded ? "yes" : "no"), td((w.fields || []).join(", "))]);
   fill("formulaOrderGrid", d.order || [], (o, i) => [td(i + 1, "num"), td(o.table_name + " (" + o.table_id + ")"), td(o.creates, "num"), td(o.unlocks, "num")]);
   fill("formulaBlockGrid", d.blocked || [], (b) => [td(b.name + " (" + b.field_id + ")"), td((b.reasons || []).join("; "))]);
+}
+
+/* ---------- the links card: what a second visit to this table would do (nothing is sent) ---------- */
+async function loadLinks() {
+  const card = $("linksCard");
+  em.revisit = null;
+  if (!baseNow() || !tableNow()) { card.hidden = true; applyGo(); return; }
+  const d = await api("GET", "/api/emergency/revisit?base_id=" + encodeURIComponent(baseNow()) + "&table_id=" + encodeURIComponent(tableNow()));
+  em.revisit = d;
+  card.hidden = !(d.link_fields.length || d.held_back.length);
+  const rec = d.records || {};
+  setMsg("linksMsg", d.in_planning
+    ? fmt(d.link_fields.length) + " link field(s). Records loaded in Planning: " + fmt(rec.loaded) + " of " + fmt(rec.registered) + "; records with links still to set: " + fmt(d.links_pending === null ? 0 : d.links_pending) + ". " + (d.needs_visit ? "This table needs a visit." : "Nothing to do for now.")
+    : "This table is not in Planning yet (dev Workspace). Run it with Go first.", d.needs_visit ? "warn" : "ok");
+  const adv = $("linksAdvice");
+  clear(adv);
+  (d.advice || []).forEach((t) => adv.appendChild(el("div", { class: "hint", text: t })));
+  const fill = (id, rows, cells) => { const tb = $(id).querySelector("tbody"); clear(tb); rows.forEach((r) => tb.appendChild(el("tr", null, cells(r)))); $(id.replace("Grid", "Win")).hidden = rows.length === 0; };
+  fill("linksFieldGrid", d.link_fields || [], (f) => [td(f.field_name + " (" + f.field_id + ")"), td(f.target_table_name + " (" + f.target_table_id + ")"), td(f.target_in_planning ? "yes" : "no"), td(f.reference_field_exists ? "created" : "not yet"), td(f.direction)]);
+  fill("linksHeldGrid", d.held_back || [], (h) => [td(h.field_name + " (" + h.field_id + ")"), td(h.kind), td(h.link_field_name && h.target_table_name ? h.link_field_name + " -> " + h.target_table_name : (h.reads || []).join(", "))]);
+  applyGo();
+}
+
+const LINK_COUNTS = [["Reference fields created", "reference_created"], ["Reference fields already there", "reference_existing"], ["Reference fields failed", "reference_failed"], ["Link fields waiting for another table", "reference_waiting"],
+  ["Link fields blocked (direction not decided)", "blocked"], ["Records with links still to set", "records_pending"], ["Records complete (every link set)", "records_complete"], ["Records partly set (the rest wait)", "records_partial"],
+  ["Records waiting (nothing could be set yet)", "records_waiting"], ["Records failed", "records_failed"], ["Records with no links", "records_no_links"], ["Links set", "links_set"], ["Links waiting for a record not in Planning yet", "links_waiting"]];
+
+function renderLinksResult(j) {
+  const r = j.result;
+  $("linksResultCard").hidden = false;
+  if (!r) { setMsg("linksResultMsg", j.error || "The links run did not finish.", "err"); return; }
+  const c = r.counts;
+  const head = (j.status === "cancelled" ? "Stopped before it finished. " : "") + (r.dry_run ? "Check only, nothing was sent. " : "");
+  setMsg("linksResultMsg", head + "Table " + r.table_name + ": " + fmt(c.links_set) + " link(s) " + (r.dry_run ? "would be set" : "set") + ", " + fmt(c.links_waiting) + " waiting, " + fmt(c.records_failed) + " record(s) failed.", c.records_failed || c.reference_failed || c.blocked ? "warn" : "ok");
+  const body = $("linksCountGrid").querySelector("tbody");
+  clear(body);
+  LINK_COUNTS.forEach((p) => body.appendChild(el("tr", null, [td(p[0]), td(fmt(c[p[1]]), "num")])));
+  const f = r.files, pf = $("linksFiles");
+  clear(pf);
+  if (f) {
+    pf.appendChild(document.createTextNode("Reports (also saved in the out/emergency folder): "));
+    [[f.links, "links report (.mhtml)"], [f.apilog, "API log report (.mhtml)"]].forEach((x, i) => { if (i) pf.appendChild(document.createTextNode(" | ")); pf.appendChild(fileLink(x[0], x[1])); });
+  }
+  const notes = $("linksNotes");
+  clear(notes);
+  (r.notes || []).forEach((n) => notes.appendChild(el("div", { class: "banner warn", text: n })));
+  (r.reference_fields || []).filter((x) => x.status === "blocked" || x.status === "failed").forEach((x) => notes.appendChild(el("div", { class: "banner warn", text: x.field_name + ": " + x.reason })));
+  const fill = (id, rows, cells) => { const tb = $(id).querySelector("tbody"); clear(tb); rows.forEach((x) => tb.appendChild(el("tr", null, cells(x)))); $(id.replace("Grid", "Win")).hidden = rows.length === 0; };
+  fill("linksWaitGrid", r.waiting_by_table || [], (w) => [td(w.table_name + " (" + w.table_id + ")"), td(w.in_planning ? "yes" : "no"), td(w.records, "num"), td(w.links, "num")]);
+  fill("linksFailGrid", r.failures || [], (x) => [td(x.record_id), td(x.reason)]);
 }
 
 function fileLink(name, label) { return el("a", { href: "/api/emergency/report?file=" + encodeURIComponent(name), text: label }); }
@@ -102,8 +155,12 @@ function renderJob(j) {
   em.job = j;
   const p = j.progress || {};
   $("progress").textContent = j.status === "running"
-    ? ({ fields: "Creating fields", records: "Loading records", reread: "Reading the table from Airtable" }[p.phase] || "Working") + (p.total ? ": " + fmt(p.done || 0) + " of " + fmt(p.total) : "") + (p.item && p.phase === "fields" ? " (" + p.item + ")" : "") : "";
-  if (j.status !== "running") { stopTimer(); renderResult(j); }
+    ? ({ fields: "Creating fields", records: "Loading records", links: "Setting links", reread: "Reading the table from Airtable" }[p.phase] || "Working") + (p.total ? ": " + fmt(p.done || 0) + " of " + fmt(p.total) : "") + (p.item && p.phase === "fields" ? " (" + p.item + ")" : "") : "";
+  if (j.status !== "running") {
+    stopTimer();
+    if (j.kind === "links") { $("resultCard").hidden = true; renderLinksResult(j); } else { $("linksResultCard").hidden = true; renderResult(j); }
+    loadLinks().catch(() => {});
+  }
   applyGo();
 }
 
@@ -125,8 +182,18 @@ async function go() {
   if (!window.confirm("Send the table \"" + name + "\" (" + tableNow() + ") to the dev Workspace " + wsNow() + "?\n\nThis creates a record type and fields and loads records in Workfront Planning.")) return;
   showGlobalError("");
   setMsg("resetMsg", "", ""); $("forgetRow").hidden = true;
-  $("resultCard").hidden = true;
+  $("resultCard").hidden = true; $("linksResultCard").hidden = true;
   await api("POST", "/api/emergency/start", { base_id: baseNow(), table_id: tableNow(), confirm: { table_id: tableNow(), workspace_id: wsNow() } });
+  await follow();
+  if (!em.timer && em.job && em.job.status === "running") em.timer = setInterval(() => poll().catch((e) => { stopTimer(); showGlobalError(e.message); }), 1500);
+}
+
+/* ---------- the links pass: a check that sends nothing, then the real run ---------- */
+async function runLinks(send) {
+  if (send && !window.confirm("Set the links of the table \"" + tableLabel() + "\" in the dev Workspace " + wsNow() + "?\n\nThis creates reference fields and updates records in Workfront Planning. It creates no record. A link whose other record is not in Planning yet waits.")) return;
+  showGlobalError("");
+  $("resultCard").hidden = true; $("linksResultCard").hidden = true;
+  await api("POST", "/api/emergency/links", { base_id: baseNow(), table_id: tableNow(), send, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
   await follow();
   if (!em.timer && em.job && em.job.status === "running") em.timer = setInterval(() => poll().catch((e) => { stopTimer(); showGlobalError(e.message); }), 1500);
 }
@@ -174,8 +241,10 @@ startPage("emergency", { afterConnect }, () => {
   initBaseCombo();
   watchSort("fieldGrid");
   $("baseId").addEventListener("input", guarded(loadSetup));
-  $("tableSel").addEventListener("change", () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; applyGo(); loadFormulas().catch((e) => { $("formulaCard").hidden = true; showGlobalError(e.message); }); });
+  $("tableSel").addEventListener("change", () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; applyGo(); loadFormulas().catch((e) => { $("formulaCard").hidden = true; showGlobalError(e.message); }); loadLinks().catch((e) => { $("linksCard").hidden = true; showGlobalError(e.message); }); });
   $("btnGo").addEventListener("click", guarded(go));
+  $("btnLinksCheck").addEventListener("click", guarded(() => runLinks(false)));
+  $("btnLinks").addEventListener("click", guarded(() => runLinks(true)));
   $("btnReset").addEventListener("click", guarded(resetTable));
   $("btnForget").addEventListener("click", guarded(forgetTable));
   $("btnCancel").addEventListener("click", guarded(async () => { await api("POST", "/api/emergency/cancel", {}); $("progress").textContent = "Stopping after the current item..."; }));
