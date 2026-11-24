@@ -220,9 +220,10 @@ class Catalog(object):
             self.f[d["field_id"]] = d
             self.tables.setdefault(d["table_id"], d["table_name"])
             self.order.setdefault(d["table_id"], []).append(d["field_id"])
-        self._names = {}
+        self._names, self._trimmed = {}, {}
         for fid, d in self.f.items():
             self._names.setdefault((d["table_id"], d["field_name"]), []).append(fid)
+            self._trimmed.setdefault((d["table_id"], str(d["field_name"]).strip()), []).append(fid)
         self._plans = {}
 
     # ---- what a field becomes
@@ -255,6 +256,8 @@ class Catalog(object):
 
     def id_by_name(self, table_id, name):
         got = self._names.get((table_id, name)) or []
+        if not got:                                       # Airtable names may carry edge spaces that a formula reference does or does not repeat; Planning keeps the trimmed name
+            got = self._trimmed.get((table_id, str(name).strip())) or []
         return got[0] if len(got) == 1 else None
 
     def formulas(self, table_id):

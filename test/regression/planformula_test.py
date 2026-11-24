@@ -214,5 +214,24 @@ b4 = {x["field_name"]: x for x in r4["fields"]}
 check("when Planning refuses a formula it becomes PRE- text with both attempts recorded", b4["Days"]["outcome"] == "pre-converted" and b4["Days"]["attempt1"] == "refused" and b4["Days"]["attempt2"] == "created" and b4["Days"]["final_name"] == "PRE-Days", b4["Days"])
 check("no value is sent to a real formula field (it is not in the loadable fields)", not any(isinstance(x[2], list) and any("Days" in json.dumps(e) for e in x[2]) for x in fk.reqs))
 
+# a field whose Airtable name ends in a space: Planning stores the trimmed name, so the field is sent trimmed and a formula refers to it trimmed
+tS = [("tS", "Spacey")]
+fS = [("tS", "fldSName", "Order Name ", "singleLineText", {}), ("tS", "fldSQty", "Qty", "number", {}),
+      ("tS", "fldSF1", "By Id", "formula", {"f": '{fldSName} & "x"', "rt": "singleLineText"}),
+      ("tS", "fldSF2", "By Name", "formula", {"f": 'IF({Order Name} = BLANK(), "yes", "no")', "rt": "singleLineText"}),          # the formula text omits the trailing space
+      ("tS", "fldSF3", "By Spaced Name", "formula", {"f": 'IF({Order Name } = BLANK(), "yes", "no")', "rt": "singleLineText"})]   # the formula text repeats it
+dbA = os.path.join(tmp, "run3.db")
+cS = make_db(dbA, tS, fS); cS.close()
+fk5 = Fake()
+r5 = go(fk5, "tS")
+by5 = {x["field_name"]: x for x in r5["fields"]}
+posts5 = {p[2]["displayName"]: p[2] for p in fk5.field_posts()}
+check("a name with a trailing space is sent trimmed, as Planning stores it", "Order Name" in posts5 and "Order Name " not in posts5 and by5["Order Name "]["final_name"] == "Order Name", sorted(posts5))
+check("a formula that reads it by ID uses the trimmed name", posts5["By Id"]["formulaOptions"]["formula"] == 'CONCAT({Order Name},"x")', posts5.get("By Id"))
+check("a formula that reads it by name resolves with or without the trailing space",
+      posts5["By Name"]["formulaOptions"]["formula"] == 'IF(ISBLANK({Order Name}),"yes","no")' and posts5["By Spaced Name"]["formulaOptions"]["formula"] == 'IF(ISBLANK({Order Name}),"yes","no")',
+      (posts5.get("By Name"), posts5.get("By Spaced Name")))
+check("every field of the table was built (none fell back to PRE- text)", all(x["outcome"] == "clean" for x in r5["fields"]), [(x["field_name"], x["outcome"]) for x in r5["fields"]])
+
 print("ALL PASSED" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)
