@@ -6227,7 +6227,9 @@ def _run_rekey_job(job):
             cfg, _problem = load_config()
             info = {"base_id": job.base, "base_name": next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or "", "workspace_id": ctx.ws, "stage": ctx.stage,
                     "actor": job.actor, "reason": job.reason, "started_at": job.started_at, "finished_at": utc_now(), "rows": rows, "results": results}
-            out["results"] = results
+            with db(job.db_path) as conn:
+                _written, info["db_note"] = rekey.store_decisions(conn, info, ctx.env.name)
+            out["results"], out["db_note"] = results, info["db_note"]
             out["counts"] = rekey.counts(rows)
             out["file"] = job.file = rekey.write_report(info, rekey_out_dir(), to_mhtml, REPORT_CSS, lambda t: scrub(loadconfig.redact(t, secrets)))
         job.result = _lt_out(out)

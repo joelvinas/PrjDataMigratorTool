@@ -158,6 +158,8 @@ def report_html(info, css, redact=lambda t: t):
     h.append('<p class="meta">Base %s (%s), Planning Workspace %s (stage %s). Run %s to %s (UTC). Decided by <strong>%s</strong>. Names, IDs and counts only.</p>'
              % (_e(info.get("base_name") or ""), _e(info["base_id"]), _e(info["workspace_id"]), _e(info["stage"]), _e(info["started_at"]), _e(info["finished_at"]), _e(info["actor"])))
     h.append("<h2>Why</h2><p>%s</p>" % _e(redact(info["reason"])))
+    if info.get("db_note"):
+        h.append('<p class="meta">Database: %s</p>' % _e(info["db_note"]))
     h.append('<h2>Summary</h2><ul><li><strong>%d re-keyed</strong>, %d skipped, <strong class="%s">%d failed</strong>. The Airtable primary field is now the primary field of each re-keyed record type; AirtableRecordId is still a field of it.</li></ul>'
              % (c["rekeyed"], c["skipped"], "bad" if c["failed"] else "ok", c["failed"]))
     h.append('<div class="tablewin" tabindex="0" role="region" aria-label="Record types"><table style="min-width:800px"><thead><tr><th>Table</th><th>Record type ID</th><th>New primary field</th><th>Primary field before</th><th>Outcome</th><th>Detail</th></tr></thead><tbody>')
@@ -176,3 +178,26 @@ def write_report(info, out_dir, to_mhtml, css, redact=lambda t: t):
     with open(os.path.join(out_dir, name), "wb") as f:
         f.write(to_mhtml(report_html(info, css, redact), "Re-key record types"))
     return name
+
+
+# ------------------------------------------------------------------ the optional database table (draft migration 029): who decided, when and why, one row per record type per run
+def run_id_of(info):
+    return "R%s-%s" % (re.sub(r"[^0-9]", "", info["started_at"])[:14], re.sub(r"[^A-Za-z0-9_-]", "", info["base_id"]))
+
+
+def store_decisions(conn, info, env_name):
+    """Append one row per record type of the run to rekey_decisions when that table exists (draft migration 029, approved by the owner on 24 November 2026). Returns (written, note).
+    Rows are only ever added: a run is never changed afterwards. Until the migration is applied the write is skipped and the report is unaffected."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rekey_decisions'").fetchone():
+        return False, "The table rekey_decisions does not exist yet (draft migration 029 is not applied), so the decision was saved in the report only."
+    before = {r["table_id"]: r for r in info["rows"]}
+    rid = run_id_of(info)
+    rows = []
+    for r in info["results"]:
+        b = before.get(r["table_id"]) or {}
+        rows.append((rid, info["started_at"], info["actor"], info["reason"], info["base_id"], env_name, info["workspace_id"], r["table_id"], r["record_type_id"], b.get("airtable_field_id"),
+                     b.get("planning_field_id"), b.get("current_primary_id") or None, r["outcome"], (r["detail"] or "")[:500] or None))
+    with conn:
+        conn.executemany("INSERT OR IGNORE INTO rekey_decisions(run_id, decided_at, decided_by, reason, base_id, environment, workspace_key, table_id, record_type_id, airtable_field_id, "
+                         "planning_field_id, previous_primary_field_id, outcome, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    return True, "%d decision row(s) saved to rekey_decisions (run %s)." % (len(rows), rid)

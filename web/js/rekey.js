@@ -66,6 +66,7 @@ function renderResult(j) {
   setMsg("resultMsg", (j.status === "cancelled" ? "Stopped before it finished. " : "") + fmt(done) + " record type(s) re-keyed, " + fmt(failed) + " failed, " + fmt((r.results || []).length - done - failed) + " skipped.", failed ? "warn" : "ok");
   const p = $("files");
   clear(p);
+  if (r.db_note) p.appendChild(el("div", { class: "hint", text: r.db_note }));
   if (r.file) { p.appendChild(document.createTextNode("Report with who, when and why (also saved in the out/rekey folder): ")); p.appendChild(fileLink(r.file, "re-key report (.mhtml)")); }
   const tb = $("resultGrid").querySelector("tbody");
   clear(tb);

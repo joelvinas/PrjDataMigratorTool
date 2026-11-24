@@ -53,7 +53,7 @@
 
 <section class="card" id="decideCard" hidden>
   <h2>Re-key the chosen record types</h2>
-  <p class="hint">This is your decision, and it is recorded: your initials, the date and time, and your reason go into the report. Each record type is read again first, and only those still eligible are changed. Planning confirms each change by reading the record type back.</p>
+  <p class="hint">This is your decision, and it is recorded: your initials, the date and time, and your reason go into the report, and into the <code>rekey_decisions</code> table once migration 029 has been applied (the result says which). Each record type is read again first, and only those still eligible are changed. Planning confirms each change by reading the record type back.</p>
   <div class="formgrid">
     <label for="actor">Your initials</label>
     <div class="cell"><input id="actor" type="text" maxlength="40" autocomplete="off"></div>

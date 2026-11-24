@@ -76,14 +76,20 @@ try:
     text = "".join((part.get_payload(decode=True) or b"").decode("utf-8", "replace") for part in msg.walk() if part.get_content_type() == "text/html")
     check("the report downloads and says who, when and why", s == 200 and heads.get("Content-Type", "").startswith("application/x-mimearchive") and "JV" in text and "data validated" in text and "rekeyed" in text, (s, heads))
     check("the report is saved in out/rekey", os.path.isfile(os.path.join("out", "rekey", f)))
+    check("before migration 029 is applied the result says the decision is in the report only", "migration 029" in jr["result"]["db_note"] and "report only" in jr["result"]["db_note"] and "migration 029" in text, jr["result"].get("db_note"))
     for bad in ("../config.json", "..%5Cconfig.json", "config.json", "x.txt", "nosuch_report.mhtml", ""):
         s, r = call("GET", "/api/rekey/report?file=" + bad)
         check("a report request for %r is refused" % bad, s == 404, (s, r))
     s, r = post("/api/rekey/cancel", {})
     check("cancel with nothing running says so", s == 400 and "No re-key step" in r["error"], r)
 
+    dbc = sqlite3.connect(DBF); dbc.executescript(open(os.path.join("sql", "migration_029_add_rekey_decisions.sql"), encoding="utf-8").read()); dbc.commit(); dbc.close()
     s, r = post("/api/rekey/run", good)
     jr2 = poll("/api/rekey/status")
+    dbc = sqlite3.connect(DBF); dbc.row_factory = sqlite3.Row
+    drows = [dict(x) for x in dbc.execute("select * from rekey_decisions")]; dbc.close()
+    check("once the table exists the decision is stored with who, when and why", len(drows) == 1 and drows[0]["decided_by"] == "JV" and drows[0]["reason"] == "data validated" and drows[0]["table_id"] == "tC" and drows[0]["outcome"] == "skipped"
+          and "saved to rekey_decisions" in jr2["result"]["db_note"] and drows[0]["environment"] == "dev" and drows[0]["workspace_key"] == "wsDev", (drows, jr2["result"].get("db_note")))
     check("a second re-key changes nothing: the record type is already done and is skipped", jr2["status"] == "done" and jr2["result"]["results"][0]["outcome"] == "skipped" and len([x for x in fake.reqs[n1:] if x[0] == "PATCH" and x[1].endswith("/record-types/" + rtid)]) == 1, [r["outcome"] for r in jr2["result"]["results"]])
 
     s, page = call("GET", "/rekey", raw=True)[0:2]

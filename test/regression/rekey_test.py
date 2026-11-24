@@ -56,6 +56,14 @@ class Fake(object):
     def patches(self): return [x for x in self.reqs if x[0] == "PATCH"]
 
 
+def _rejects(conn):
+    try:
+        conn.execute("insert into rekey_decisions(run_id, decided_at, decided_by, reason, base_id, environment, workspace_key, table_id, outcome) values ('x','t','a','b','c','d','e','f','bogus')")
+        return False
+    except sqlite3.IntegrityError:
+        return True
+
+
 c = sqlite3.connect(dbp); c.row_factory = sqlite3.Row
 c.executescript(open(os.path.join(ROOT, "sql", "DatabaseSchemaLibrary.sql"), encoding="utf-8").read())
 TABLES = (("tOrd", "Orders", "fOName"), ("tCus", "Customers", "fCName"), ("tPre", "Parts", "fPName"), ("tGone", "Gone", "fGName"), ("tAlr", "Already", "fAName"), ("tNop", "No Primary", None), ("tBad", "Bad Ones", "fBName"),
@@ -123,6 +131,22 @@ check("an ineligible or already-done record type is skipped with its reason and 
       and not [x for x in fk.patches() if x[1].endswith("/RT1") or x[1].endswith("/RT4")])
 res2 = rk.run(rows, tr, ["tOrd"])
 check("running again does not switch a done record type a second time", res2[0]["outcome"] == "skipped" and len([x for x in fk.patches() if x[1].endswith("/RT0")]) == 1, res2)
+
+# ---- the decision in the database (draft migration 029): skipped while the table is missing, appended once it exists, never changed afterwards
+info0 = {"base_id": BASE, "workspace_id": "wsDev", "stage": "dev", "actor": "JV", "reason": "data validated 23 November", "started_at": "2026-11-23 20:00:00.123456", "finished_at": "2026-11-23 20:01:00", "rows": rows, "results": res}
+w0, note0 = rk.store_decisions(c, info0, "dev")
+check("with no rekey_decisions table the write is skipped and says so", w0 is False and "migration 029" in note0 and "report only" in note0, note0)
+c.executescript(open(os.path.join(ROOT, "sql", "migration_029_add_rekey_decisions.sql"), encoding="utf-8").read())
+c.executescript(open(os.path.join(ROOT, "sql", "migration_029_add_rekey_decisions.sql"), encoding="utf-8").read())      # repeatable
+w1, note1 = rk.store_decisions(c, info0, "dev")
+dr = {r["table_id"]: dict(r) for r in c.execute("select * from rekey_decisions")}
+check("the migration is repeatable and one row per record type of the run is stored, with who, when and why", w1 and len(dr) == len(res) and rk.run_id_of(info0) == "R20261123200000-appRekey0001"
+      and all(r["decided_by"] == "JV" and r["reason"] == "data validated 23 November" and r["decided_at"] == "2026-11-23 20:00:00.123456" and r["environment"] == "dev" and r["workspace_key"] == "wsDev" for r in dr.values()), (note1, list(dr)[:2]))
+check("each row carries the IDs and the outcome", dr["tOrd"]["outcome"] == "rekeyed" and dr["tOrd"]["planning_field_id"] == "FP0" and dr["tOrd"]["airtable_field_id"] == "fOName" and dr["tOrd"]["previous_primary_field_id"] == "ARID0"
+      and dr["tBad"]["outcome"] == "failed" and "PRIMARY_REFUSED" in dr["tBad"]["detail"] and dr["tCus"]["outcome"] == "skipped", dr["tOrd"])
+w2, _n = rk.store_decisions(c, info0, "dev")
+check("storing the same run again changes nothing (a run is only ever added)", c.execute("select count(*) from rekey_decisions").fetchone()[0] == len(res))
+check("the outcome is limited to rekeyed, skipped or failed", _rejects(c))
 
 # ---- the report
 info = {"base_id": BASE, "base_name": "Fabricated Base", "workspace_id": "wsDev", "stage": "dev", "actor": "JV", "reason": "data validated 23 November", "started_at": "2026-11-23T20:00:00Z", "finished_at": "2026-11-23T20:01:00Z",
