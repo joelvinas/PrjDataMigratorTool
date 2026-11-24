@@ -134,6 +134,8 @@ check("running again does not switch a done record type a second time", res2[0][
 
 # ---- the decision in the database (draft migration 029): skipped while the table is missing, appended once it exists, never changed afterwards
 info0 = {"base_id": BASE, "workspace_id": "wsDev", "stage": "dev", "actor": "JV", "reason": "data validated 23 November", "started_at": "2026-11-23 20:00:00.123456", "finished_at": "2026-11-23 20:01:00", "rows": rows, "results": res}
+check("a database built from the schema library already has the table", c.execute("select count(*) from rekey_decisions").fetchone()[0] == 0)
+c.execute("DROP TABLE rekey_decisions"); c.commit()                  # an older database, as before migration 029
 w0, note0 = rk.store_decisions(c, info0, "dev")
 check("with no rekey_decisions table the write is skipped and says so", w0 is False and "migration 029" in note0 and "report only" in note0, note0)
 c.executescript(open(os.path.join(ROOT, "sql", "migration_029_add_rekey_decisions.sql"), encoding="utf-8").read())

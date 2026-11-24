@@ -22,6 +22,7 @@ from loadtable_fixture import fake, BASE, TOKEN, DBF
 srv = fx.start()
 fx.build()
 post("/api/db/connect", {"path": DBF})
+_c = sqlite3.connect(DBF); _c.execute("DROP TABLE rekey_decisions"); _c.commit(); _c.close()      # an older database, as before migration 029: the page must still work and say so
 
 def poll(path, secs=30):
     end = time.time() + secs

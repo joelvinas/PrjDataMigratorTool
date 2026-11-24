@@ -1026,6 +1026,28 @@ CREATE TABLE calc_valid_forms (
     uploaded_at TEXT NOT NULL,             -- UTC
     source_filename TEXT                   -- the name of the uploaded file, for display only
 );
+
+-- 26. The decisions of the re-key step (migration 029): who decided, when and why, and for each record type the IDs involved and the outcome. Only ever added to. No record value, no credential.
+CREATE TABLE rekey_decisions (
+    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,                  -- one re-key run: R<UTC start as yyyymmddThhmmssZ>-<Airtable base ID>
+    decided_at TIMESTAMP NOT NULL,         -- when the run started (UTC)
+    decided_by TEXT NOT NULL,              -- the person's initials or short name, as typed on the page
+    reason TEXT NOT NULL,                  -- why, in the person's words (plain text, at most 500 characters)
+    base_id TEXT NOT NULL,
+    environment TEXT NOT NULL,             -- the Planning stage (dev)
+    workspace_key TEXT NOT NULL,           -- the Planning Workspace ID
+    table_id TEXT NOT NULL,                -- the Airtable table
+    record_type_id TEXT,                   -- the Planning record type
+    airtable_field_id TEXT,                -- the field that was the primary field in Airtable
+    planning_field_id TEXT,                -- the Planning field it became, which was made the primary field
+    previous_primary_field_id TEXT,        -- the primary field the record type had before (AirtableRecordId after a Git-R-Done run)
+    outcome TEXT NOT NULL CHECK(outcome IN ('rekeyed', 'skipped', 'failed')),
+    detail TEXT,                           -- a short message with any credential removed: why it was skipped or failed
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, table_id)
+);
+CREATE INDEX idx_rekey_decisions_table ON rekey_decisions(base_id, table_id, decided_at);
 '''
 
 
