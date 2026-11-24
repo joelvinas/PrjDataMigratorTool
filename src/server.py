@@ -5639,7 +5639,7 @@ def api_names_export(q):
     """The field names and data types already held, in the template's format, for repair in Excel and re-import."""
     base = _names_base(q)
     with db() as conn:
-        rev = _names(names_store.review, conn, base)
+        rev = _names(names_store.review, conn, base, gate=False)   # the export must not be empty just because tables are not approved yet
     return (names_io.export_csv(rev["fields"]).encode("utf-8"), "text/csv; charset=utf-8",
             {"Content-Disposition": 'attachment; filename="field-names-and-types_%s_%s.csv"' % (base, _stamp())})
 
