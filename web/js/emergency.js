@@ -26,7 +26,8 @@ async function loadSetup() {
   const sel = $("tableSel"), keep = sel.value;
   clear(sel);
   sel.appendChild(el("option", { value: "", text: baseNow() ? (d.tables.length ? "Choose a table..." : "No in-scope table in this base") : "Choose a base first" }));
-  d.tables.forEach((t) => sel.appendChild(el("option", { value: t.table_id, text: t.airtable_name + " (" + t.table_id + ")" })));
+  d.tables.forEach((t) => sel.appendChild(el("option", { value: t.table_id, class: t.loaded ? "loaded" : null,
+    text: (t.load_order === null || t.load_order === undefined ? "" : "[#" + t.load_order + "] ") + t.airtable_name + " (" + t.table_id + ")" + (t.loaded ? " - loaded" : "") })));
   sel.value = d.tables.some((t) => t.table_id === keep) ? keep : "";
   applyGo();
   await loadFormulas().catch(() => { $("formulaCard").hidden = true; });
