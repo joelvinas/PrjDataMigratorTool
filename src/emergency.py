@@ -543,7 +543,7 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         is_array = (f["data_type"] in ARRAY_TYPES or bool(s.get("has_container"))) and not ((f["data_type"] == "multipleSelects" or f.get("lookup_snapshot")) and atype == "multi-select")
         planned = state.get(temp, env.name)
         longest = s.get("max_len") if s else None
-        sent = f["field_name"]
+        sent = f["field_name"].strip()                  # Planning stores the trimmed name; a formula must refer to the name as Planning holds it, not as Airtable spelled it
         taken = {x.lower() for x in (result.get("prepare") or {}).get("taken", [])}
         send_name = CONFLICT + sent if sent.lower() in taken else sent
         row["sent_name"] = send_name
