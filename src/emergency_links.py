@@ -346,3 +346,67 @@ def _fail_all(part, res, reason):
         res["failure_count"] += 1
         res["failures"].append({"record_id": rid, "reason": reason})
     return set()
+
+
+# ------------------------------------------------------------------ the table list: which tables are done, which need another pass, and in what order to take them
+def visit_order(order, again, forward):
+    """The order in which to take the tables. `order` is the load order (table IDs), `again` the set of tables that were run and need another pass, `forward` {table ID: the tables its links
+    point to that come LATER in the load order}. A table that needs another pass moves to just after the last of those tables, because its links can only be set once they are loaded;
+    it never moves earlier, and every table is judged by the load order (not by where earlier moves left the others), so two tables that link to each other do not swap forever.
+    Example: 5, 8, 6 with Table 5 needing a pass after Table 6 becomes 8, 6, 5."""
+    out = list(order)
+    for t in order:
+        targets = [x for x in forward.get(t, []) if x in out]
+        if t in again and targets:
+            last, i = max(out.index(x) for x in targets), out.index(t)
+            if last > i:
+                out.pop(i)
+                out.insert(last, t)
+    return out
+
+
+def table_states(conn, base_id, env_name, ws, order):
+    """{table ID: {state, reasons, waits_on}} for the tables of `order` (the load order, table IDs). state is 'new' (no record type in Planning yet), 'done' (100%: nothing more to do) or
+    'again' (run, but another pass is needed). A run table needs another pass when its records are not all loaded, or it has link fields whose reference field is not made yet or whose
+    links are not all set. A field held back for a person to create by hand does not count: it is a person's step, listed on the Links card. `waits_on` lists the tables its links point
+    to that come later in `order`. Schema and ID map only; nothing is sent."""
+    ws = ws or ""
+    pos = {t: i for i, t in enumerate(order)}
+    rts = {r[0] for r in conn.execute("SELECT table_id FROM load_id_map WHERE system='planning' AND kind='record_type' AND status='created' AND workfront_id IS NOT NULL AND environment=? AND workspace_key=? "
+                                      "AND base_id=? AND table_id IS NOT NULL", (env_name, ws, base_id))}
+    made = {r[0] for r in conn.execute("SELECT airtable_field_id FROM load_id_map WHERE system='planning' AND kind='field' AND status='created' AND workfront_id IS NOT NULL AND environment=? AND workspace_key=? "
+                                       "AND base_id=? AND airtable_field_id IS NOT NULL", (env_name, ws, base_id))}
+    abandoned = set()
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='field_names'").fetchone():
+        abandoned = {r[0] for r in conn.execute("SELECT airtable_field_id FROM field_names WHERE abandoned=1")}
+    links = {}
+    for r in conn.execute("SELECT table_id, field_id, linked_table_id FROM airtable_fields WHERE base_id=? AND data_type='multipleRecordLinks' AND linked_table_id IS NOT NULL ORDER BY table_id, field_id", (base_id,)):
+        if r[1] not in abandoned:
+            links.setdefault(r[0], []).append((r[1], r[2]))
+    expected = {r[0]: r[1] or 0 for r in conn.execute("SELECT table_id, MAX(row_count) FROM airtable_fields WHERE base_id=? GROUP BY table_id", (base_id,))}
+    registered = {r[0]: r[1] for r in conn.execute("SELECT table_id, COUNT(*) FROM source_records WHERE base_id=? GROUP BY table_id", (base_id,))}
+    marked = {r[0]: r[1] for r in conn.execute("SELECT s.table_id, COUNT(*) FROM source_records s JOIN record_pass_markers m ON m.source_record_uid=s.source_record_uid AND m.pass='records' AND m.environment=? "
+                                              "AND m.workspace_key=? WHERE s.base_id=? GROUP BY s.table_id", (env_name, ws, base_id))}
+    pending = {r[0]: r[1] for r in conn.execute("SELECT s.table_id, COUNT(*) FROM source_records s JOIN record_pass_markers m ON m.source_record_uid=s.source_record_uid AND m.pass='records' AND m.environment=? "
+                                                "AND m.workspace_key=? WHERE s.base_id=? AND NOT EXISTS (SELECT 1 FROM record_pass_markers k WHERE k.source_record_uid=s.source_record_uid AND k.pass='links' "
+                                                "AND k.environment=? AND k.workspace_key=?) GROUP BY s.table_id", (env_name, ws, base_id, env_name, ws))}
+    out = {}
+    for t in order:
+        lk = links.get(t, [])
+        forward = sorted({tgt for _f, tgt in lk if tgt != t and tgt in pos and pos[tgt] > pos[t]}, key=lambda x: pos[x])
+        if t not in rts:
+            out[t] = {"state": "new", "reasons": [], "waits_on": forward}
+            continue
+        why = []
+        reg = registered.get(t, 0)
+        if reg and marked.get(t, 0) < reg:
+            why.append("%d record(s) are not loaded yet" % (reg - marked.get(t, 0)))
+        elif not reg and expected.get(t, 0) > 0:
+            why.append("no record has been loaded")
+        missing = [f for f, _tgt in lk if f not in made]
+        if missing:
+            why.append("%d reference field(s) are not made yet" % len(missing))
+        if lk and pending.get(t, 0):
+            why.append("%d record(s) still have links to set" % pending[t])
+        out[t] = {"state": "again" if why else "done", "reasons": why, "waits_on": forward}
+    return out

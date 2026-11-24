@@ -59,7 +59,10 @@ try:
     dbc.commit(); dbc.close()
     s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
     tabs = r["tables"]
-    check("the table list comes in load order, and a table with no stored order goes last", [t["table_id"] for t in tabs] == ["tB", "tC", "tA", "tE"] and [t["load_order"] for t in tabs] == [1, 2, 3, None], tabs)
+    check("the table list comes in load order, except that a table run but needing another pass moves to just after the table its links wait for (tB links to tC, so 1, 2 becomes 2, 1), and a table with no stored order goes last",
+          [t["table_id"] for t in tabs] == ["tC", "tB", "tA", "tE"] and [t["load_order"] for t in tabs] == [2, 1, 3, None] and [t["position"] for t in tabs] == [1, 2, 3, 4], [(t["table_id"], t["load_order"], t["position"]) for t in tabs])
+    check("each table says whether it is not run yet, done, or needs another pass, why, and which table it waits for", {t["table_id"]: t["state"] for t in tabs} == {"tC": "new", "tB": "again", "tA": "new", "tE": "new"}
+          and any("reference field" in x for x in tabs[1]["state_reasons"]) and tabs[1]["waits_on"] == ["Notes"] and tabs[1]["original_position"] == 1, tabs[1])
     check("only a created record type in the dev Workspace for this base counts as loaded", {t["table_id"]: t["loaded"] for t in tabs} == {"tB": True, "tC": False, "tA": False, "tE": False}, tabs)
     dbc = sqlite3.connect(DBF)
     dbc.execute("DELETE FROM load_id_map WHERE temp_id LIKE 'P-T-%'"); dbc.execute("DELETE FROM dependency_matrix"); dbc.commit(); dbc.close()

@@ -19,18 +19,42 @@ function applyGo() {
   $("btnCancel").hidden = !busy;
 }
 
+const STATE_NAME = { new: "not run yet", done: "done", again: "another pass needed" };
+function renderOrder(tables) {
+  $("orderCard").hidden = !tables.length;
+  const tb = $("orderGrid").querySelector("tbody");
+  clear(tb);
+  tables.forEach((t) => tb.appendChild(el("tr", { class: t.state === "done" ? "out-ok" : t.state === "again" ? "out-hold" : null }, [td(t.position, "num"), td(t.airtable_name + " (" + t.table_id + ")"), td(STATE_NAME[t.state] || t.state),
+    td(t.load_order === null || t.load_order === undefined ? "" : t.load_order, "num"), td((t.waits_on || []).join(", ")), td((t.state_reasons || []).join("; "))])));
+}
+
+/* the Table picker: green = done, yellow = another pass needed, in the order to take the tables in (the server works it out; see emergency_links.table_states and visit_order) */
+function fillTables(d) {
+  const sel = $("tableSel"), keep = sel.value;
+  clear(sel);
+  sel.appendChild(el("option", { value: "", text: baseNow() ? (d.tables.length ? "Choose a table..." : "No in-scope table in this base") : "Choose a base first" }));
+  d.tables.forEach((t) => sel.appendChild(el("option", { value: t.table_id, class: t.state === "done" ? "done" : t.state === "again" ? "again" : null,
+    title: (t.state_reasons || []).join("; ") || null,
+    text: "[#" + t.position + "] " + t.airtable_name + " (" + t.table_id + ")" + (t.state === "done" ? " - done" : t.state === "again" ? " - another pass needed" : "") })));
+  renderOrder(d.tables);
+  sel.value = d.tables.some((t) => t.table_id === keep) ? keep : "";
+}
+
+async function refreshPicker() {
+  if (!baseNow()) return;
+  const d = await api("GET", "/api/emergency/setup?base_id=" + encodeURIComponent(baseNow()));
+  em.setup = d;
+  fillTables(d);
+  applyGo();
+}
+
 async function loadSetup() {
   const d = await api("GET", "/api/emergency/setup?base_id=" + encodeURIComponent(baseNow()));
   em.setup = d;
   showGlobalError("");
   $("wsId").textContent = d.workspace_id || "(not configured)";
   setMsg("pageMessage", d.configured ? (d.tables_problem || "") : d.problem, d.configured && !d.tables_problem ? "" : d.configured ? "warn" : "err");
-  const sel = $("tableSel"), keep = sel.value;
-  clear(sel);
-  sel.appendChild(el("option", { value: "", text: baseNow() ? (d.tables.length ? "Choose a table..." : "No in-scope table in this base") : "Choose a base first" }));
-  d.tables.forEach((t) => sel.appendChild(el("option", { value: t.table_id, class: t.loaded ? "loaded" : null,
-    text: (t.load_order === null || t.load_order === undefined ? "" : "[#" + t.load_order + "] ") + t.airtable_name + " (" + t.table_id + ")" + (t.loaded ? " - loaded" : "") })));
-  sel.value = d.tables.some((t) => t.table_id === keep) ? keep : "";
+  fillTables(d);
   applyGo();
   await loadFormulas().catch(() => { $("formulaCard").hidden = true; });
   await loadLinks().catch(() => { $("linksCard").hidden = true; });
@@ -160,6 +184,7 @@ function renderJob(j) {
     stopTimer();
     if (j.kind === "links") { $("resultCard").hidden = true; renderLinksResult(j); } else { $("linksResultCard").hidden = true; renderResult(j); }
     loadLinks().catch(() => {});
+    refreshPicker().catch(() => {});
   }
   applyGo();
 }
@@ -213,6 +238,7 @@ function showReset(r) {
     return;
   }
   $("resultCard").hidden = true;
+  refreshPicker().catch(() => {});
   setMsg("resetMsg", (a ? (a.already_gone ? "The record type was already gone from Workfront. " : "Record type deleted in Workfront. ") : "No record type ID was recorded, so nothing was deleted in Workfront (if an interrupted run created one, delete it by hand). ")
     + "Forgot " + forgotten(r.cleared) + ". Press Go to build the table again.", "ok");
 }
@@ -231,6 +257,7 @@ async function forgetTable() {
   const r = await api("POST", "/api/emergency/forget", resetBody(true));
   $("forgetRow").hidden = true;
   $("resultCard").hidden = true;
+  refreshPicker().catch(() => {});
   setMsg("resetMsg", "Forgot " + forgotten(r.cleared) + ". Nothing was sent to Workfront. If the record type still exists there, delete it before pressing Go.", "ok");
 }
 

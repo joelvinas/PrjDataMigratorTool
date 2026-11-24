@@ -306,5 +306,28 @@ name_field = [f["id"] for f in fk.fields[rt_ord] if f["displayName"] == "Order N
 check("the primary field switch sends the record type's own name and checks it afterwards", tr.set_primary_field(rt_ord, name_field) and fk.primary[rt_ord] == name_field and fk.types[rt_ord] == "Orders"
       and fk.reqs[-2][2] == {"displayName": "Orders", "primaryFieldId": name_field}, fk.reqs[-3:])
 conn.close()
+# ---- the table list: done (green), another pass needed (yellow), and the order to take the tables in
+check("the order moves a table that needs another pass to just after the last later table its links wait for: 5, 8, 6 becomes 8, 6, 5", el.visit_order(["t5", "t8", "t6"], {"t5"}, {"t5": ["t6"]}) == ["t8", "t6", "t5"])
+check("a table never moves earlier, and a table with nothing to wait for stays", el.visit_order(["t6", "t8", "t5"], {"t5"}, {}) == ["t6", "t8", "t5"] and el.visit_order(["a", "b", "c"], {"a"}, {"a": []}) == ["a", "b", "c"])
+check("two tables that link to each other do not swap forever: the load order decides, once", el.visit_order(["A", "B"], {"A", "B"}, {"A": ["B"], "B": []}) == ["B", "A"]
+      and el.visit_order(["A", "B"], {"A", "B"}, {"A": ["B"], "B": []}) == el.visit_order(["B", "A"], set(), {}) )
+check("several tables move independently, each after its own wait", el.visit_order([1, 2, 3, 4], {1, 2}, {1: [3], 2: [4]}) == [3, 1, 4, 2])
+def states():
+    conn = sqlite3.connect(dbp); conn.row_factory = sqlite3.Row
+    try:
+        return el.table_states(conn, BASE, "dev", "wsDev", ["tOrd", "tCus"])
+    finally:
+        conn.close()
+st = states()
+check("Orders was run but its links are not all set: another pass needed, and it waits for Customers, which comes later", st["tOrd"]["state"] == "again" and st["tOrd"]["waits_on"] == ["tCus"]
+      and any("still have links to set" in w for w in st["tOrd"]["reasons"]), st["tOrd"])
+check("Customers was run but its reference field is not made: another pass needed, and it waits for nothing (Orders comes earlier)", st["tCus"]["state"] == "again" and st["tCus"]["waits_on"] == [] and any("reference field" in w for w in st["tCus"]["reasons"]), st["tCus"])
+r5 = links(fk, "tCus")
+st = states()
+check("after Customers' links are all set it is done (green): nothing more to do", st["tCus"]["state"] == "done" and st["tCus"]["reasons"] == [] and r5["counts"]["records_complete"] == 2 and r5["counts"]["records_failed"] == 0, (st["tCus"], r5["counts"]))
+check("Orders stays yellow while one of its links waits for a record that is not in Planning", st["tOrd"]["state"] == "again", st["tOrd"])
+conn = sqlite3.connect(dbp); conn.row_factory = sqlite3.Row
+check("a table that was never run is 'new' and is judged by the load order only", el.table_states(conn, "appNOBASE", "dev", "wsDev", ["tOrd"])["tOrd"]["state"] == "new")
+conn.close()
 print("DONE" if ok else "SOME CHECKS FAILED")
 sys.exit(0 if ok else 1)

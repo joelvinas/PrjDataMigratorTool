@@ -5933,6 +5933,20 @@ def api_emergency_setup(q):
                     t["loaded"] = t["table_id"] in loaded
                 # Load order first (tables without one go last, by name); the page prefixes each with [#n].
                 tables.sort(key=lambda t: (t["load_order"] is None, t["load_order"] or 0, t["name"].lower(), t["table_id"]))
+                # State and order (owner, 24 November 2026): green (done) = nothing more to do, yellow (again) = run but another pass is needed, and a yellow table moves to just after the last
+                # later table its links point to (5, 8, 6 becomes 8, 6, 5). Nothing is sent; this reads the schema and the ID map.
+                ids = [t["table_id"] for t in tables]
+                for n, t in enumerate(tables, 1):
+                    t.update(state="new", state_reasons=[], waits_on=[], original_position=n)
+                if out["workspace_id"]:
+                    states = emergency_links.table_states(conn, _names_base(q), emergency.STAGE, out["workspace_id"], ids)
+                    by = {t["table_id"]: t for t in tables}
+                    for tid, st in states.items():
+                        by[tid].update(state=st["state"], state_reasons=st["reasons"], waits_on=[by[x]["airtable_name"] for x in st["waits_on"]])
+                    new_ids = emergency_links.visit_order(ids, {i for i, st in states.items() if st["state"] == "again"}, {i: st["waits_on"] for i, st in states.items()})
+                    tables = [by[i] for i in new_ids]
+                for n, t in enumerate(tables, 1):
+                    t["position"] = n
                 out["tables"] = tables
         except AppError as e:
             out["tables_problem"] = e.message

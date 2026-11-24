@@ -83,6 +83,16 @@ try:
         pg.click("#btnLinks"); pg.wait_for_timeout(400)
         check("the real links run asks first, names the table and the Workspace, and Cancel sends nothing", len(dialogs) == 1 and "Customers" in dialogs[0] and "wsDev" in dialogs[0] and len(sends()) == n_posts and len(fake.reqs) == n_chk, dialogs)
         answer["accept"] = True
+        # ---- the picker: green when done, yellow when another pass is needed, and the new order (Customers links to Notes, which comes later, so it moves to just after it)
+        pg.wait_for_function("document.querySelector('#tableSel option.again') !== null", timeout=15000)
+        picks = pg.eval_on_selector_all("#tableSel option", "os => os.slice(1).map(o => [o.value, o.className, o.textContent])")
+        check("the picker shows the new order: Notes, then Customers (it needs another pass after Notes), then the tables not run yet", [x[0] for x in picks] == ["tC", "tB", "tA", "tE"], picks)
+        check("Notes is green (done), Customers is yellow (another pass needed), the others have no colour", [x[1] for x in picks] == ["done", "again", "", ""], picks)
+        check("the picker numbers the new order and says why in words", picks[1][2].startswith("[#2] Customers") and picks[1][2].endswith("another pass needed") and picks[0][2].endswith("- done"), picks)
+        check("the order panel is collapsed until it is opened", pg.eval_on_selector("#orderBox", "e => e.open") is False)
+        pg.click("#orderBox summary")
+        check("opened, it lists the tables in that order with their state, the table they wait for and why", "another pass needed" in pg.inner_text("#orderGrid") and "Notes" in pg.inner_text("#orderGrid") and "reference field" in pg.inner_text("#orderGrid"), pg.inner_text("#orderGrid"))
+        pg.click("#orderBox summary")
         pg.select_option("#tableSel", "tC")
         # ---- reset: Workfront refuses first, then the person forgets the IDs; then Go again
         check("Reset table is open with a base and a table, and the forget choice is hidden", pg.is_enabled("#btnReset") and not pg.is_visible("#forgetRow"))
