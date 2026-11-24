@@ -43,6 +43,29 @@ try:
     s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
     check("setup says configured and shows only the dev Workspace ID (no token), with the in-scope tables", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["stage"] == "dev" and TOKEN not in json.dumps(r)
           and "tD" not in [t["table_id"] for t in r["tables"]] and "tC" in [t["table_id"] for t in r["tables"]], r)
+    # ---- the table list: load order and "already loaded" (rows written straight into the fabricated database, removed again below)
+    import sqlite3
+    def lm(tid, ws, status, wfid, base=BASE, kind="record_type", env="dev"):
+        return ("P-T-%s-%s" % (tid, ws), env, ws, ws, "planning", kind, base, tid, "Name " + tid, wfid, status)
+    dbc = sqlite3.connect(DBF)
+    dbc.executemany("INSERT INTO dependency_matrix(table_id, table_name, parent_table_ids, load_order_sequence, dependency_depth) VALUES (?,?,?,?,0)",
+                    [("tB", "Customers", "[]", 1), ("tC", "Notes", "[]", 2), ("tA", "Orders", "[]", 3)])           # tE has no stored order
+    dbc.executemany("INSERT INTO load_id_map(temp_id, environment, workspace_id, workspace_key, system, kind, base_id, table_id, name, workfront_id, status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    [lm("tB", "wsDev", "created", "rtB"),                      # loaded
+                     lm("tA", "wsDev", "pending", None),                       # not created yet
+                     lm("tC", "wsOther", "created", "rtC"),                    # created in another Workspace
+                     lm("tE", "wsDev", "created", "rtE", base="appOTHER"),     # created for another base
+                     lm("tC", "wsDev", "created", "fldC", kind="field")])      # a field is not a record type
+    dbc.commit(); dbc.close()
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
+    tabs = r["tables"]
+    check("the table list comes in load order, and a table with no stored order goes last", [t["table_id"] for t in tabs] == ["tB", "tC", "tA", "tE"] and [t["load_order"] for t in tabs] == [1, 2, 3, None], tabs)
+    check("only a created record type in the dev Workspace for this base counts as loaded", {t["table_id"]: t["loaded"] for t in tabs} == {"tB": True, "tC": False, "tA": False, "tE": False}, tabs)
+    dbc = sqlite3.connect(DBF)
+    dbc.execute("DELETE FROM load_id_map WHERE temp_id LIKE 'P-T-%'"); dbc.execute("DELETE FROM dependency_matrix"); dbc.commit(); dbc.close()
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
+    check("with nothing stored no table is loaded and none has a load order", all(t["loaded"] is False and t["load_order"] is None for t in r["tables"]) and len(r["tables"]) == 4, r["tables"])
+
     s, r = call("GET", "/api/emergency/formulas?base_id=" + BASE + "&table_id=tC")
     check("the calculated-field pre-check answers with counts and advice, sends nothing and holds no token", s == 200 and r["table_id"] == "tC" and set(r["counts"]) >= {"total", "ready", "waiting", "blocked"}
           and isinstance(r["advice"], list) and TOKEN not in json.dumps(r) and r["workspace_id"] == "wsDev", (s, r))
