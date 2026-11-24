@@ -210,7 +210,11 @@ details.card > summary { cursor: pointer; }
 .formgrid .combo { min-width: 0; max-width: none; }
 .formgrid .cell { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 #tableSel { min-width: 360px; max-width: 100%; }
-#tableSel option.loaded { background: #d9f2dc; color: #14532d; }
+#tableSel option.done { background: #d9f2dc; color: #14532d; }
+#tableSel option.again { background: #fff3bf; color: #6b4e00; }
+.legend .sw { display: inline-block; width: 0.9em; height: 0.9em; margin: 0 0.25em 0 0.9em; border: 1px solid #8a93a6; vertical-align: -0.1em; }
+.legend .sw.done { background: #d9f2dc; }
+.legend .sw.again { background: #fff3bf; }
 /* Load a table page */
 .wsid { font-family: ui-monospace, Consolas, monospace; background: #eef0f4; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--line); min-width: 8em; }
 .jobpanel { border-color: var(--accent); background: #f4f8ff; position: sticky; top: 0; z-index: 5; }

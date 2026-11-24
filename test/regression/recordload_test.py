@@ -229,7 +229,7 @@ except Exception as e:
 check("a reply with no results list is refused, because the records could not be matched", lost and "cannot be matched" in lost, lost)
 tp, op = real([Resp(200, {})])
 tp.update_record("PR1", {"FC": ["PR9"]})
-check("a record update is a PATCH of its fields", op.reqs[0].get_method() == "PATCH" and op.reqs[0].full_url.endswith("/v2/records/PR1") and json.loads(op.reqs[0].data) == {"fields": {"FC": ["PR9"]}})
+check("a record update is a PATCH of its data (the key the owner proved on 23 November 2026)", op.reqs[0].get_method() == "PATCH" and op.reqs[0].full_url.endswith("/v2/records/PR1") and json.loads(op.reqs[0].data) == {"data": {"FC": ["PR9"]}})
 
 # ---- reading a saved file
 import tempfile

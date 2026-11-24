@@ -59,7 +59,10 @@ try:
     dbc.commit(); dbc.close()
     s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
     tabs = r["tables"]
-    check("the table list comes in load order, and a table with no stored order goes last", [t["table_id"] for t in tabs] == ["tB", "tC", "tA", "tE"] and [t["load_order"] for t in tabs] == [1, 2, 3, None], tabs)
+    check("the table list comes in load order, except that a table run but needing another pass moves to just after the table its links wait for (tB links to tC, so 1, 2 becomes 2, 1), and a table with no stored order goes last",
+          [t["table_id"] for t in tabs] == ["tC", "tB", "tA", "tE"] and [t["load_order"] for t in tabs] == [2, 1, 3, None] and [t["position"] for t in tabs] == [1, 2, 3, 4], [(t["table_id"], t["load_order"], t["position"]) for t in tabs])
+    check("each table says whether it is not run yet, done, or needs another pass, why, and which table it waits for", {t["table_id"]: t["state"] for t in tabs} == {"tC": "new", "tB": "again", "tA": "new", "tE": "new"}
+          and any("reference field" in x for x in tabs[1]["state_reasons"]) and tabs[1]["waits_on"] == ["Notes"] and tabs[1]["original_position"] == 1, tabs[1])
     check("only a created record type in the dev Workspace for this base counts as loaded", {t["table_id"]: t["loaded"] for t in tabs} == {"tB": True, "tC": False, "tA": False, "tE": False}, tabs)
     dbc = sqlite3.connect(DBF)
     dbc.execute("DELETE FROM load_id_map WHERE temp_id LIKE 'P-T-%'"); dbc.execute("DELETE FROM dependency_matrix"); dbc.commit(); dbc.close()
@@ -103,6 +106,33 @@ try:
     j2 = poll()
     check("a second Go creates no second record type or field and sends no record again", j2["status"] == "done" and len(fake.posts("/record-types")) == rts and len(fake.posts("/fields")) == flds
           and len(fake.posts("/records/bulk")) == bulks and j2["result"]["counts"]["records_already_loaded"] == 2, (j2["status"], j2.get("error"), j2["result"]["counts"] if j2["result"] else None))
+
+    # ---- the links pass (second visit): the list, the confirmation, a dry run that sends nothing, a real run with its two reports
+    s, r = call("GET", "/api/emergency/revisit?base_id=" + BASE + "&table_id=tC")
+    check("the second-visit list answers for a loaded table with its link fields, what it waits on and plain advice, and holds no token", s == 200 and r["table_id"] == "tC" and r["in_planning"] is True
+          and isinstance(r["link_fields"], list) and isinstance(r["held_back"], list) and isinstance(r["advice"], list) and TOKEN not in json.dumps(r), (s, r))
+    check("the list refuses a missing or unknown table", call("GET", "/api/emergency/revisit?base_id=" + BASE + "&table_id=")[0] == 400 and call("GET", "/api/emergency/revisit?base_id=" + BASE + "&table_id=tNOPE")[0] == 404)
+    n0 = len(fake.reqs)
+    for label, body in (("no confirmation", {"send": True}), ("the wrong table", {"send": True, "confirm": conf("tA")}), ("the wrong Workspace", {"send": True, "confirm": conf("tC", "wsProd")})):
+        s, r = post("/api/emergency/links", dict({"base_id": BASE, "table_id": "tC"}, **body))
+        check("a links run with %s is refused and sends nothing" % label, s == 400 and "Confirm" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/links", {"base_id": BASE, "table_id": "tD", "send": False})
+    check("a links run on a table that is out of scope is refused", s == 404 and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/links", {"base_id": BASE, "table_id": "tB", "send": False})
+    check("a links run on a table that is not in Planning yet is refused and says to run Go first", s == 409 and "Run it with Go first" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/links", {"base_id": BASE, "table_id": "tC", "send": False})
+    jl = poll()
+    check("a dry run answers with counts and sends nothing, and writes no report", s == 200 and r["dry_run"] and jl and jl["status"] == "done" and jl["kind"] == "links" and jl["dry_run"] and jl["result"]["dry_run"]
+          and jl["result"]["files"] is None and len(fake.reqs) == n0 and TOKEN not in json.dumps(jl), (s, r, jl))
+    s, r = post("/api/emergency/links", {"base_id": BASE, "table_id": "tC", "send": True, "confirm": conf("tC")})
+    jl2 = poll()
+    check("a confirmed links run finishes as a links job, with the counts the page shows", s == 200 and jl2 and jl2["status"] == "done" and jl2["kind"] == "links" and not jl2["dry_run"]
+          and set(jl2["result"]["counts"]) >= {"links_set", "links_waiting", "records_failed", "reference_created"}, (s, r, jl2))
+    lf = jl2["result"]["files"]
+    check("the two links reports are written and download by plain name", sorted(lf) == ["apilog", "links"] and all(os.path.isfile(os.path.join("out", "emergency", f)) for f in lf.values())
+          and call("GET", "/api/emergency/report?file=" + lf["links"], raw=True)[0] == 200 and call("GET", "/api/emergency/report?file=" + lf["apilog"], raw=True)[0] == 200, lf)
+    s, r = call("GET", "/api/emergency/status")
+    check("the status carries the kind of the last job", r["job"]["kind"] == "links")
 
     # ---- reset the table and try again (not gated by the Load a table steps)
     def rbody(send, **k): return dict({"base_id": BASE, "table_id": "tC", "send": send}, **k)

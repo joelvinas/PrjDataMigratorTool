@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Re-key record types - Migration Control Plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="rekey">
+<header class="topbar">
+  <h1>Airtable &rarr; Workfront Planning: migration control plane</h1>
+  <div class="badges">
+    <span id="tokenBadge" class="badge">Token: checking...</span>
+    <span id="dbBadge" class="badge">Database: not connected</span>
+  </div>
+</header>
+<div class="shell">
+<nav id="sidenav" class="sidenav" aria-label="Pages"></nav>
+<div class="content">
+<div id="setupBanner" class="banner error" hidden></div>
+<div id="globalError" class="banner error" hidden></div>
+<div id="dbNotice" class="banner warn" hidden>No database is connected. <a href="/setup">Connect one on Setup</a> first; this page needs it.</div>
+<main>
+<section class="card context" id="ctxCard">
+  <h2>Re-key record types</h2>
+  <p class="hint"><strong>Do this last, after you have validated the data.</strong> Git-R-Done makes <code>AirtableRecordId</code> the primary field of every record type, so a link shows the other record as an Airtable ID. This step makes the field that was the <strong>primary field in Airtable</strong> the primary field of its record type, so links show names. <code>AirtableRecordId</code> stays as an ordinary field and keeps its values. Only a real <strong>text</strong> field is re-keyed (other types are not proven as a primary field); every other record type is listed with the reason and left alone. Nothing is deleted. The step changes the <strong>dev</strong> Workspace of config.json only, and only what you choose below.</p>
+  <div class="formgrid">
+    <label for="wsId">Workspace ID (dev, from config.json)</label>
+    <div class="cell"><output id="wsId" class="wsid" aria-live="polite">(not read yet)</output></div>
+    <label for="baseId">Base ID</label>
+    <div class="combo" id="baseCombo">
+      <input id="baseId" type="text" role="combobox" aria-expanded="false" aria-controls="baseMenu" placeholder="Choose a base or type an ID (appXXXXXXXXXXXXXX)" autocomplete="off">
+      <button id="baseToggle" type="button" aria-label="Show bases from config.json">&#9662;</button>
+      <ul id="baseMenu" class="combo-menu" role="listbox" hidden></ul>
+    </div>
+    <span></span>
+    <div class="cell">
+      <button id="btnCheck" type="button" class="primary" disabled>Check the record types (reads Planning, changes nothing)</button>
+      <button id="btnCancel" type="button" hidden>Cancel</button>
+    </div>
+  </div>
+  <div id="pageMessage" class="msg"></div>
+  <div id="progress" class="hint" aria-live="polite"></div>
+</section>
+
+<section class="card" id="tableCard" hidden aria-live="polite">
+  <h2>Record types</h2>
+  <div id="tableMsg" class="msg"></div>
+  <div class="tablewin" id="rowWin"><table id="rowGrid" class="grid compact">
+    <thead><tr><th>Re-key</th><th data-sort="text">Table</th><th data-sort="text">Primary field in Airtable</th><th data-sort="text">Primary field in Planning now</th><th data-sort="text">Status</th><th>Why not</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" id="decideCard" hidden>
+  <h2>Re-key the chosen record types</h2>
+  <p class="hint">This is your decision, and it is recorded: your initials, the date and time, and your reason go into the report, and into the <code>rekey_decisions</code> table once migration 029 has been applied (the result says which). Each record type is read again first, and only those still eligible are changed. Planning confirms each change by reading the record type back.</p>
+  <div class="formgrid">
+    <label for="actor">Your initials</label>
+    <div class="cell"><input id="actor" type="text" maxlength="40" autocomplete="off"></div>
+    <label for="reason">Reason</label>
+    <div class="cell"><input id="reason" type="text" maxlength="500" autocomplete="off" placeholder="For example: data validated on ..."></div>
+    <label for="phrase">Type <code id="phraseText"></code></label>
+    <div class="cell"><input id="phrase" type="text" autocomplete="off"></div>
+    <span></span>
+    <div class="cell"><button id="btnRekey" type="button" class="primary" disabled>Re-key the chosen record types</button></div>
+  </div>
+  <div id="rekeyMsg" class="msg"></div>
+</section>
+
+<section class="card" id="resultCard" hidden aria-live="polite">
+  <h2>Result</h2>
+  <div id="resultMsg" class="msg"></div>
+  <p id="files" class="hint"></p>
+  <div class="tablewin" id="resultWin" hidden><table id="resultGrid" class="grid compact">
+    <thead><tr><th>Table</th><th>New primary field</th><th>Outcome</th><th>Detail</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+</main>
+</div>
+</div>
+<script src="/common.js"></script>
+<script src="/rekey.js"></script>
+</body>
+</html>

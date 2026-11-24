@@ -149,6 +149,7 @@ const NAV_PAGES = [
   { key: "load", href: "/load", label: "Stage 4: Map and load", sub: "Record map and attachments" },
   { key: "loadtable", href: "/loadtable", label: "Load a table", sub: "One table into Planning, step by step" },
   { key: "emergency", href: "/emergency", label: "\u{1F6A8} Git-R-Done", sub: "One table, whatever works" },
+  { key: "rekey", href: "/rekey", label: "Re-key record types", sub: "After the data is validated" },
   { key: "corefields", href: "/corefields", label: "Core fields in bulk", sub: "Custom fields from a CSV, with crosswalk" },
   { key: "calcfields", href: "/calcfields", label: "Calculated fields", sub: "Airtable formulas to Core calculated fields" },
   { key: "extractcsv", href: "/extractcsv", label: "Extract to CSV", sub: "Check an extract file in Excel" },

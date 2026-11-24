@@ -56,9 +56,11 @@ import calcpreflight
 import calcpush
 import workfronthttp
 import emergency
+import emergency_links
 import emergency_report
 import extractcsv
 import recordload
+import rekey
 import selectvalues
 import fieldnames_io as names_io
 import fieldnames_report as names_report
@@ -5931,6 +5933,20 @@ def api_emergency_setup(q):
                     t["loaded"] = t["table_id"] in loaded
                 # Load order first (tables without one go last, by name); the page prefixes each with [#n].
                 tables.sort(key=lambda t: (t["load_order"] is None, t["load_order"] or 0, t["name"].lower(), t["table_id"]))
+                # State and order (owner, 24 November 2026): green (done) = nothing more to do, yellow (again) = run but another pass is needed, and a yellow table moves to just after the last
+                # later table its links point to (5, 8, 6 becomes 8, 6, 5). Nothing is sent; this reads the schema and the ID map.
+                ids = [t["table_id"] for t in tables]
+                for n, t in enumerate(tables, 1):
+                    t.update(state="new", state_reasons=[], waits_on=[], original_position=n)
+                if out["workspace_id"]:
+                    states = emergency_links.table_states(conn, _names_base(q), emergency.STAGE, out["workspace_id"], ids)
+                    by = {t["table_id"]: t for t in tables}
+                    for tid, st in states.items():
+                        by[tid].update(state=st["state"], state_reasons=st["reasons"], waits_on=[by[x]["airtable_name"] for x in st["waits_on"]])
+                    new_ids = emergency_links.visit_order(ids, {i for i, st in states.items() if st["state"] == "again"}, {i: st["waits_on"] for i, st in states.items()})
+                    tables = [by[i] for i in new_ids]
+                for n, t in enumerate(tables, 1):
+                    t["position"] = n
                 out["tables"] = tables
         except AppError as e:
             out["tables_problem"] = e.message
@@ -5938,9 +5954,10 @@ def api_emergency_setup(q):
 
 
 class EmergencyJob:
-    def __init__(self, base, table_id, ws, db_path):
+    """One background job of the Git-R-Done page: kind "run" is the table load, kind "links" is the links pass (send False = a dry run that sends nothing)."""
+    def __init__(self, base, table_id, ws, db_path, kind="run", send=True):
         self.id = str(int(time.time() * 1000))
-        self.base, self.table_id, self.ws, self.db_path = base, table_id, ws, db_path
+        self.base, self.table_id, self.ws, self.db_path, self.kind, self.send = base, table_id, ws, db_path, kind, send
         self.status, self.error, self.result, self.progress, self.files = "running", None, None, {}, None
         self.started_at, self.finished_at = utc_now(), None
         self.cancel = threading.Event()
@@ -5971,11 +5988,33 @@ def _em_fetch_doc(job):
     return fetch
 
 
+def _run_links_job(job, ctx, tr, secrets):
+    """The links pass for one table (emergency_links.py): reports are written for a real send only; a dry run just answers."""
+    ws_name = (tableload.workspace_status(ctx, tr) or {}).get("name") or "" if job.send else ""
+    cfg, _problem = load_config()
+    base_name = next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or ""
+    calls = emergency.CallLog()
+    tr.http.recorder = calls
+    with db(job.db_path) as conn:
+        res = emergency_links.run_links(conn, job.base, job.table_id, ctx, tr, extract_dir(), calls, send=job.send, progress=job.set_progress, should_stop=job.cancel.is_set)
+    res["workspace_name"], res["base_name"] = ws_name, base_name
+    redact = lambda t: scrub(loadconfig.redact(t, secrets))
+    if job.send:
+        job.files = emergency_report.write_links_reports(res, emergency_out_dir(), to_mhtml, REPORT_CSS, redact)
+    slim = {k: v for k, v in res.items() if k not in ("calls",)}
+    slim["files"] = job.files
+    job.result = _lt_out(slim)
+    job.status = "cancelled" if res.get("cancelled") else "done"
+
+
 def _run_emergency_job(job):
     secrets = _lt_secrets()
     try:
-        ctx = _em_context(True)
+        ctx = _em_context(job.send)
         tr = tableload.transport(ctx)
+        if job.kind == "links":
+            _run_links_job(job, ctx, tr, secrets)
+            return
         ws_name = (tableload.workspace_status(ctx, tr) or {}).get("name") or ""            # one read of the Workspace, before the run's calls are recorded
         cfg, _problem = load_config()
         base_name = next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or ""
@@ -6023,10 +6062,57 @@ def api_emergency_start(body):
         cur = EMJOB["current"]
         if cur and cur.status == "running":
             raise AppError("A Git-R-Done run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
+        if RKJOB["current"] and RKJOB["current"].status == "running":
+            raise AppError("A re-key step is going. Wait for it or cancel it first.", 409)
         job = EmergencyJob(base, table, ctx.ws, STATE["db_path"])
         EMJOB["current"] = job
     threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
     return {"started": True, "job_id": job.id}
+
+
+def api_emergency_links(body):
+    """Start the links pass for one table (the second visit): create the reference fields and set the links, or with send false only count what it would do (nothing is sent).
+    A real send needs the same confirmation as a Go run. One job at a time, shared with Go and Reset."""
+    base = _names_base(body)
+    table = str(body.get("table_id") or "").strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    send = body.get("send") is True
+    ctx = _em_context(send)
+    if send:
+        conf = body.get("confirm")
+        if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
+            raise AppError("Confirm the table and the Workspace ID exactly as shown before anything is sent.")
+    with db() as conn:
+        if table not in {t["table_id"] for t in _lt_call(tableload.table_choices, conn, base)}:
+            raise AppError("That table is not in this base or is out of scope.", 404)
+        if not conn.execute("SELECT 1 FROM load_id_map WHERE system='planning' AND kind='record_type' AND status='created' AND workfront_id IS NOT NULL AND environment=? AND workspace_key=? AND table_id=?",
+                            (emergency.STAGE, ctx.ws, table)).fetchone():
+            raise AppError("This table is not in Planning yet (dev Workspace %s). Run it with Go first." % ctx.ws, 409)
+    with _emjob_lock:
+        cur = EMJOB["current"]
+        if cur and cur.status == "running":
+            raise AppError("A Git-R-Done run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
+        if send and RKJOB["current"] and RKJOB["current"].status == "running":
+            raise AppError("A re-key step is going. Wait for it or cancel it first.", 409)
+        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"], kind="links", send=send)
+        EMJOB["current"] = job
+    threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id, "dry_run": not send}
+
+
+def api_emergency_revisit(q):
+    """What a second visit to one table would do (reference fields to create, links pending, what each waits on, undecided directions, fields held back). Nothing is sent."""
+    base = _names_base(q)
+    table = (q.get("table_id") or [""])[0].strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    ctx = _em_context(False)
+    with db() as conn:
+        try:
+            return _lt_out(emergency_links.revisit(conn, base, table, ctx.env.name, ctx.ws))
+        except emergency.EmergencyError as e:
+            raise AppError(e.message, e.status)
 
 
 def api_emergency_formulas(q):
@@ -6047,7 +6133,7 @@ def api_emergency_status(_q=None):
     job = EMJOB["current"]
     if not job:
         return {"job": None}
-    return _lt_out({"job": {"id": job.id, "base_id": job.base, "table_id": job.table_id, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
+    return _lt_out({"job": {"id": job.id, "kind": job.kind, "dry_run": not job.send, "base_id": job.base, "table_id": job.table_id, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
                             "finished_at": job.finished_at, "progress": job.progress, "result": job.result}})
 
 
@@ -6111,6 +6197,144 @@ def api_emergency_report(q):
         data = f.read()
     ctype = "text/csv; charset=utf-8" if name.endswith(".csv") else "application/x-mimearchive"
     return (data, ctype, {"Content-Disposition": 'attachment; filename="%s"' % name})
+
+
+# --------------------------------------------------------------------------
+# Re-key record types: a SEPARATE page (/rekey), run only after the data is validated. It makes the Airtable primary field the primary field of each record type in the dev Workspace
+# (src/rekey.py). Checking only reads Planning; re-keying needs the person's initials, a reason, the typed phrase and the Workspace ID. A report with who, when and why is written to
+# out/rekey/ and served back by name only.
+# --------------------------------------------------------------------------
+REKEY_FILE_RE = re.compile(r"^[A-Za-z0-9_-]+\.mhtml$")
+
+
+def rekey_out_dir():
+    return os.path.join(BASE_DIR, "out", "rekey")
+
+
+class RekeyJob:
+    def __init__(self, kind, base, ws, db_path, actor="", reason="", table_ids=()):
+        self.id = str(int(time.time() * 1000))
+        self.kind, self.base, self.ws, self.db_path, self.actor, self.reason, self.table_ids = kind, base, ws, db_path, actor, reason, list(table_ids)
+        self.status, self.error, self.result, self.progress, self.file = "running", None, None, {}, None
+        self.started_at, self.finished_at = utc_now(), None
+        self.cancel = threading.Event()
+
+    def set_progress(self, p):
+        self.progress = dict(p)
+
+
+RKJOB = {"current": None}
+_rkjob_lock = threading.Lock()
+
+
+def _run_rekey_job(job):
+    secrets = _lt_secrets()
+    try:
+        ctx = _em_context(job.kind == "run")
+        tr = tableload.transport(ctx)
+        with db(job.db_path) as conn:
+            rows = rekey.candidates(conn, job.base, ctx.env.name, ctx.ws)
+        rekey.check(rows, tr, progress=job.set_progress, should_stop=job.cancel.is_set)
+        out = {"kind": job.kind, "workspace_id": ctx.ws, "stage": ctx.stage, "rows": rows, "counts": rekey.counts(rows), "results": [], "file": None}
+        if job.kind == "run" and not job.cancel.is_set():
+            results = rekey.run(rows, tr, job.table_ids, progress=job.set_progress, should_stop=job.cancel.is_set)
+            cfg, _problem = load_config()
+            info = {"base_id": job.base, "base_name": next((b.get("name") for b in cfg["bases"] if b.get("baseId") == job.base), "") or "", "workspace_id": ctx.ws, "stage": ctx.stage,
+                    "actor": job.actor, "reason": job.reason, "started_at": job.started_at, "finished_at": utc_now(), "rows": rows, "results": results}
+            with db(job.db_path) as conn:
+                _written, info["db_note"] = rekey.store_decisions(conn, info, ctx.env.name)
+            out["results"], out["db_note"] = results, info["db_note"]
+            out["counts"] = rekey.counts(rows)
+            out["file"] = job.file = rekey.write_report(info, rekey_out_dir(), to_mhtml, REPORT_CSS, lambda t: scrub(loadconfig.redact(t, secrets)))
+        job.result = _lt_out(out)
+        job.status = "cancelled" if job.cancel.is_set() else "done"
+    except (AppError, rekey.RekeyError) as e:
+        job.status, job.error = "failed", loadconfig.redact(getattr(e, "message", str(e)), secrets)
+    except Exception as e:
+        job.status, job.error = "failed", "Unexpected error: " + loadconfig.redact(loadrun.scrub(e), secrets)
+        print(loadconfig.redact(scrub(traceback.format_exc()), secrets), file=sys.stderr)
+    finally:
+        job.finished_at = utc_now()
+
+
+def _rekey_start(kind, body, actor="", reason="", table_ids=()):
+    base = _names_base(body)
+    ctx = _em_context(kind == "run")
+    with _rkjob_lock:
+        for cur, what in ((RKJOB["current"], "A re-key step"), (EMJOB["current"], "A Git-R-Done run"), (LOADJOB["current"], "A Load a table step")):
+            if cur and cur.status == "running":
+                raise AppError("%s is going. Wait for it or cancel it first." % what, 409)
+        job = RekeyJob(kind, base, ctx.ws, STATE["db_path"], actor, reason, table_ids)
+        RKJOB["current"] = job
+    threading.Thread(target=_run_rekey_job, args=(job,), daemon=True).start()
+    return {"started": True, "job_id": job.id}
+
+
+def api_rekey_setup(q):
+    out = {"configured": False, "problem": None, "stage": emergency.STAGE, "workspace_id": "", "phrase": rekey.PHRASE, "rows": [], "counts": None}
+    try:
+        data = loadconfig.read_config(CONFIG_PATH)
+        c = loadconfig.credentials(data, "planning", emergency.STAGE) if emergency.STAGE in loadconfig.planning_blocks(data) else None
+        if c is not None and c.workspace_id:
+            out.update(configured=True, workspace_id=c.workspace_id)
+        else:
+            out["problem"] = "The dev stage is not configured in config.json (section workfront.planning, block dev, with base_url, bearer_token and workspace_id)."
+    except loadconfig.ConfigError as e:
+        out["problem"] = str(e)
+    if out["configured"] and (q.get("base_id") or [""])[0]:
+        with db() as conn:
+            ctx = _em_context(False)
+            out["rows"] = rekey.candidates(conn, _names_base(q), ctx.env.name, ctx.ws)
+            out["counts"] = rekey.counts(out["rows"])
+    return _lt_out(out)
+
+
+def api_rekey_check(body):
+    """Read the record types of the dev Workspace from Planning (reads only) and say which can be re-keyed. Nothing is changed."""
+    return _rekey_start("check", body)
+
+
+def api_rekey_run(body):
+    """Re-key the chosen record types. Needs the person's initials, a reason, the exact phrase and the Workspace ID as shown; the record types are read again first, and only those still eligible are changed."""
+    ctx = _em_context(True)
+    try:
+        actor, reason = rekey.validate_decision(body.get("actor"), body.get("reason"), body.get("phrase"))
+    except rekey.RekeyError as e:
+        raise AppError(e.message, e.status)
+    if str(body.get("workspace_id") or "") != ctx.ws:
+        raise AppError("Confirm the Workspace ID exactly as shown before anything is changed.")
+    ids = body.get("table_ids")
+    if not (isinstance(ids, list) and ids and all(isinstance(t, str) and ID_SAFE_RE.match(t) for t in ids)):
+        raise AppError("Choose at least one record type to re-key.")
+    return _rekey_start("run", body, actor, reason, ids)
+
+
+def api_rekey_status(_q=None):
+    job = RKJOB["current"]
+    if not job:
+        return {"job": None}
+    return _lt_out({"job": {"id": job.id, "kind": job.kind, "base_id": job.base, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at, "finished_at": job.finished_at,
+                            "progress": job.progress, "result": job.result}})
+
+
+def api_rekey_cancel(_body=None):
+    job = RKJOB["current"]
+    if not job or job.status != "running":
+        raise AppError("No re-key step is going.")
+    job.cancel.set()
+    return {"cancelling": True}
+
+
+def api_rekey_report(q):
+    name = (q.get("file") or [""])[0]
+    if not REKEY_FILE_RE.match(name):
+        raise AppError("Not a report file name.", 404)
+    path = os.path.join(rekey_out_dir(), name)
+    if not os.path.isfile(path):
+        raise AppError("That report file does not exist (it may have been deleted).", 404)
+    with open(path, "rb") as f:
+        data = f.read()
+    return (data, "application/x-mimearchive", {"Content-Disposition": 'attachment; filename="%s"' % name})
 
 
 def api_extract_csv(body):
@@ -6714,12 +6938,12 @@ HTML ="text/html; charset=utf-8"
 JS = "application/javascript; charset=utf-8"
 # Fixed list: a request path maps to one named file under web/ (pages/, js/, css/). Nothing from the request is ever joined into a file path.
 STATIC = {"/": ("pages/setup.html", HTML), "/setup": ("pages/setup.html", HTML),
-          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML), "/emergency": ("pages/emergency.html", HTML), "/corefields": ("pages/corefields.html", HTML), "/extractcsv": ("pages/extractcsv.html", HTML),
+          "/stage1": ("pages/stage1.html", HTML), "/stage2": ("pages/stage2.html", HTML), "/stage3": ("pages/stage3.html", HTML), "/names": ("pages/names.html", HTML), "/datatypes": ("pages/datatypes.html", HTML), "/lookups": ("pages/lookups.html", HTML), "/postman": ("pages/postman.html", HTML), "/load": ("pages/load.html", HTML), "/loadtable": ("pages/loadtable.html", HTML), "/emergency": ("pages/emergency.html", HTML), "/rekey": ("pages/rekey.html", HTML), "/corefields": ("pages/corefields.html", HTML), "/extractcsv": ("pages/extractcsv.html", HTML),
           "/log": ("pages/log.html", HTML),
           "/calcfields": ("pages/calcfields.html", HTML), "/calcfields.js": ("js/calcfields.js", JS),
           "/style.css": ("css/style.css", "text/css; charset=utf-8"),
           "/common.js": ("js/common.js", JS), "/setup.js": ("js/setup.js", JS),
-          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/emergency.js": ("js/emergency.js", JS), "/corefields.js": ("js/corefields.js", JS), "/extractcsv.js": ("js/extractcsv.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
+          "/stage1.js": ("js/stage1.js", JS), "/stage2.js": ("js/stage2.js", JS), "/stage3.js": ("js/stage3.js", JS), "/names.js": ("js/names.js", JS), "/datatypes.js": ("js/datatypes.js", JS), "/lookups.js": ("js/lookups.js", JS), "/postman.js": ("js/postman.js", JS), "/load.js": ("js/load.js", JS), "/loadtable.js": ("js/loadtable.js", JS), "/emergency.js": ("js/emergency.js", JS), "/rekey.js": ("js/rekey.js", JS), "/corefields.js": ("js/corefields.js", JS), "/extractcsv.js": ("js/extractcsv.js", JS), "/editor-kit.js": ("js/editor-kit.js", JS), "/log.js": ("js/log.js", JS)}
 REDIRECTS = {"/index.html": "/"}  # the old single page; Setup is the home page now
 
 GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/schema": api_schema_view,
@@ -6743,7 +6967,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/corefields/setup": api_corefields_setup, "/api/corefields/state": api_corefields_state, "/api/corefields/template.csv": api_corefields_template,
               "/api/corefields/crosswalk.csv": api_corefields_crosswalk, "/api/corefields/report": api_corefields_report,
               "/api/calcfields/setup": api_calcfields_setup, "/api/calcfields/forms/template.csv": api_calcfields_forms_template, "/api/calcfields/push/status": api_calcfields_push_status, "/api/calcfields/runs": api_calcfields_runs, "/api/calcfields/report": api_calcfields_report, "/api/calcfields/report.csv": api_calcfields_report_csv,
-              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/formulas": api_emergency_formulas, "/api/emergency/report": api_emergency_report}
+              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/formulas": api_emergency_formulas, "/api/emergency/revisit": api_emergency_revisit, "/api/emergency/report": api_emergency_report, "/api/rekey/setup": api_rekey_setup, "/api/rekey/status": api_rekey_status, "/api/rekey/report": api_rekey_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,
@@ -6751,7 +6975,7 @@ POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_creat
                "/api/calcfields/preflight": api_calcfields_preflight, "/api/calcfields/forms/upload": api_calcfields_forms_upload, "/api/calcfields/form/check": api_calcfields_form_check,
                "/api/calcfields/push": api_calcfields_push, "/api/calcfields/push/cancel": api_calcfields_push_cancel, "/api/calcfields/approve": api_calcfields_approve,
                "/api/corefields/scan": api_corefields_scan, "/api/corefields/create": api_corefields_create, "/api/corefields/reset": api_corefields_reset, "/api/corefields/cancel": api_corefields_cancel,
-               "/api/emergency/start": api_emergency_start, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/extract-csv": api_extract_csv,
+               "/api/emergency/start": api_emergency_start, "/api/emergency/links": api_emergency_links, "/api/emergency/reset": api_emergency_reset, "/api/emergency/forget": api_emergency_forget, "/api/emergency/cancel": api_emergency_cancel, "/api/rekey/check": api_rekey_check, "/api/rekey/run": api_rekey_run, "/api/rekey/cancel": api_rekey_cancel, "/api/extract-csv": api_extract_csv,
                "/api/forms/save": api_forms_save, "/api/forms/preview": api_forms_preview,
                "/api/automations/save": api_automations_save,
                "/api/names/preview": api_names_preview, "/api/datatypes/apply": api_datatypes_apply, "/api/lookups/assign": api_lookups_assign, "/api/lookups/unassign": api_lookups_unassign, "/api/lookups/rename": api_lookups_rename, "/api/lookups/delete": api_lookups_delete, "/api/datatypes/default": api_datatypes_default,
