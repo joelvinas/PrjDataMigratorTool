@@ -188,6 +188,9 @@ th.sortable.sorted-desc::after { content: " BC"; font-size: 0.7em; }
 /* a scrolling window for a long grid: about ten tall rows at a time, with the horizontal scroll bar inside reach and the headings kept in view */
 .tablewin { overflow: auto; max-height: clamp(560px, 80vh, 1000px); border: 1px solid var(--line); border-radius: 4px; margin: 8px 0; }
 .tablewin table.grid { margin: 0; min-width: 1150px; }
+/* a window for a grid with only a few columns: as wide as its content (never wider than the page), so there is no empty space or needless scroll bar. Still a .tablewin, so it stays keyboard-focusable */
+.tablewin.fit { width: fit-content; max-width: 100%; }
+.tablewin.fit table.grid { min-width: 0; }
 .tablewin table.grid th { z-index: 2; }
 .tablewin table.grid td.hold input, .tablewin table.grid td input[type=text] { position: static; }
 #linkTable td { padding: 12px 10px; line-height: 1.55; }
