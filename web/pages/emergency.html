@@ -23,7 +23,7 @@
 <main>
 <section class="card context" id="ctxCard">
   <h2>&#128680; Git-R-Done</h2>
-  <p class="hint">Pushes <strong>one table</strong> into the <strong>dev</strong> Workspace of config.json in one click. Names are sent exactly as Airtable has them. Each field is tried as its real Planning type; when Planning refuses it, it is created as a text field named <code>PRE-</code> + the field name (long text when the longest value is over 255 characters, at most 20 long-text fields per record type). A multiple select is created as a real multi-select field (its options must all be different first); other arrays are stored as raw JSON text in a PRE- field. Links and attachments are skipped for later. A failing field or record never stops the run. Running it again reuses the record type and fields and sends only the records not yet loaded.</p>
+  <p class="hint">Pushes <strong>one table</strong> into the <strong>dev</strong> Workspace of config.json in one click. Names are sent exactly as Airtable has them. Each field is tried as its real Planning type; when Planning refuses it, it is created as a text field named <code>PRE-</code> + the field name (long text when the longest value is over 255 characters, at most 20 long-text fields per record type). A multiple select is created as a real multi-select field (its options must all be different first); other arrays are stored as raw JSON text in a PRE- field. Links and attachments are skipped for later. A calculated (formula) field is rebuilt as a real Planning formula after the other fields; the Calculated fields card shows beforehand which ones can be built, which wait for another table (and which table to run first) and which will be stored as PRE- text. A failing field or record never stops the run. Running it again reuses the record type and fields and sends only the records not yet loaded.</p>
   <p class="hint"><strong>Reset table</strong> starts the chosen table over so you can try again: it tries to <strong>delete the table's record type in Workfront</strong> (Adobe deletes its fields and records with it) and, only when Workfront confirms it is gone, forgets the IDs this tool holds for the table. If Workfront refuses, you are told why and nothing is forgotten unless you choose to. Names, types and every decision are kept. It works for a table loaded here or on Load a table, and is not held back by the Load a table steps.</p>
   <div class="row">
     <label for="baseId">Base ID</label>
@@ -49,6 +49,22 @@
     <button id="btnForget" type="button">Forget this table's IDs anyway</button>
     <span class="hint">Use this after deleting the record type by hand in Workfront, or when you accept that it may still exist there. A record type left behind makes the next Go fail to create it (a name clash).</span>
   </div>
+</section>
+
+<section class="card" id="formulaCard" hidden aria-live="polite">
+  <h2>Calculated fields (check before Go)</h2>
+  <p class="hint">Worked out from the stored schema and what this tool already recorded in the dev Workspace. Nothing is sent. A formula that reads fields from another table waits for that table; it is held back (not stored as text) so a later run can build it.</p>
+  <div id="formulaMsg" class="msg"></div>
+  <div id="formulaAdvice"></div>
+  <div class="tablewin" id="formulaWaitWin" hidden><table id="formulaWaitGrid" class="grid compact">
+    <thead><tr><th>Load this table first</th><th class="num">Calculated fields waiting</th><th>Record type already in Planning</th><th>Which fields</th></tr></thead><tbody></tbody>
+  </table></div>
+  <div class="tablewin" id="formulaOrderWin" hidden><table id="formulaOrderGrid" class="grid compact">
+    <thead><tr><th class="num">Run</th><th>Table</th><th class="num">Calculated fields it builds</th><th class="num">Waiting fields it frees</th></tr></thead><tbody></tbody>
+  </table></div>
+  <div class="tablewin" id="formulaBlockWin" hidden><table id="formulaBlockGrid" class="grid compact">
+    <thead><tr><th>Calculated field that will be stored as PRE- text</th><th>Why</th></tr></thead><tbody></tbody>
+  </table></div>
 </section>
 
 <section class="card" id="resultCard" hidden aria-live="polite">

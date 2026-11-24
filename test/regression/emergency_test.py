@@ -101,8 +101,9 @@ c.execute("insert into airtable_tables(table_id, base_id, table_name) values ('t
 F = [("fName", "Order Name", "singleLineText"), ("fDate", "Due Date", "date"), ("fNote", "Long Note", "multilineText"), ("fTags", "Tags", "multipleSelects"), ("fForm", "Summary Formula", "formula"),
      ("fFormBig", "Long Formula", "formula"), ("fLink", "Customer", "multipleRecordLinks"), ("fAtt", "Files", "multipleAttachments"), ("fNum", "Amount", "number"), ("fOdd", "Strange Thing", "aiText")]
 for fid, nm, ty in F:
-    c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, cardinality, choices_json, formula_text, updated_at) values (?,?,?,?,?,?,3,1,2,?,?,'2026-01-01 10:00:00.000000')",
-              (BASE, "tX", "Gadget Orders", fid, nm, ty, json.dumps([{"id": "s1", "name": "Red"}, {"id": "s2", "name": "Blue"}]) if ty == "multipleSelects" else None, "CONCAT({Order Name}, \"x\")" if ty == "formula" else None))
+    c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, row_count, null_count, cardinality, choices_json, formula_text, result_type, updated_at) values (?,?,?,?,?,?,3,1,2,?,?,?,'2026-01-01 10:00:00.000000')",
+              (BASE, "tX", "Gadget Orders", fid, nm, ty, json.dumps([{"id": "s1", "name": "Red"}, {"id": "s2", "name": "Blue"}]) if ty == "multipleSelects" else None,
+               "CONCATENATE({Order Name}, \"x\")" if ty == "formula" else None, "singleLineText" if ty == "formula" else None))
 for i in range(1, 23):                                       # 22 formulas whose values are long: the cap of 20 long-text fields must hold
     c.execute("insert into airtable_fields(base_id, table_id, table_name, field_id, field_name, data_type, updated_at) values (?,?,?,?,?,?,'2026-01-01 10:00:00.000000')",
               (BASE, "tY", "Many Notes", "fY%02d" % i, "Memo %02d" % i, "formula"))
