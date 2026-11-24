@@ -43,6 +43,10 @@ try:
     s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
     check("setup says configured and shows only the dev Workspace ID (no token), with the in-scope tables", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["stage"] == "dev" and TOKEN not in json.dumps(r)
           and "tD" not in [t["table_id"] for t in r["tables"]] and "tC" in [t["table_id"] for t in r["tables"]], r)
+    s, r = call("GET", "/api/emergency/formulas?base_id=" + BASE + "&table_id=tC")
+    check("the calculated-field pre-check answers with counts and advice, sends nothing and holds no token", s == 200 and r["table_id"] == "tC" and set(r["counts"]) >= {"total", "ready", "waiting", "blocked"}
+          and isinstance(r["advice"], list) and TOKEN not in json.dumps(r) and r["workspace_id"] == "wsDev", (s, r))
+    check("the pre-check refuses a missing or unknown table", call("GET", "/api/emergency/formulas?base_id=" + BASE + "&table_id=")[0] == 400 and call("GET", "/api/emergency/formulas?base_id=" + BASE + "&table_id=tNOPE")[0] == 404)
     n0 = len(fake.reqs)
     for label, body in (("no confirmation", {}), ("the wrong table", {"confirm": conf("tA")}), ("the wrong Workspace", {"confirm": conf("tC", "wsProd")})):
         s, r = post("/api/emergency/start", dict({"base_id": BASE, "table_id": "tC"}, **body))

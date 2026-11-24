@@ -7,6 +7,7 @@ A Go run does, for one table of one base, in the DEV Workspace of config.json:
        refuses it create a text field named PRE-<field name> (long text when the longest value is over 255 characters, up to 20 long-text fields per record type)
     3  load the records (records pass only; links are for later)
     4  report: the result on screen, a CSV and two MHTML reports (see emergency_report.py)
+A calculated (formula) field is translated to a Planning formula (planformula.py) and created AFTER every other field, each after the formulas it reads; one that cannot be translated, reads a multi-select or link, or is refused by Planning becomes PRE- text. One that reads fields of ANOTHER table not yet in Planning is held back (not created, not text) so a later run builds it; the pre-check (formula_precheck) tells the person which tables to run first.
 A failing field or record never stops the run. Only a record type that cannot be created ends it, because nothing can follow.
 
 Choices made by the owner (18 November 2026): names are sent EXACTLY as Airtable has them (no rewriting, nothing needs approval), and the crosswalk (Airtable name, the name
@@ -24,9 +25,11 @@ from datetime import datetime, timezone
 
 import datatypes as dt
 import fieldgroups as fgp
+import calcxlate as cx
 import fieldnames_store as fs
 import loadrun as lr
 import loadstate as ls
+import planformula as pf
 import planningtransport as pt
 import recordload as rl
 import recordmap as rm
@@ -233,6 +236,9 @@ class _Transport(object):
         if not parent_id:
             raise ValueError("A field needs its record type's Planning ID first.")
         body = {"displayName": item["name"], "type": str(item["data_type"])}
+        fx = (item.get("spec") or {}).get("formula")
+        if str(item["data_type"]) == "formula" and fx:          # a Planning formula field: the expression and its return type go in formulaOptions
+            body["formulaOptions"] = pf.formula_options(fx["expression"], fx["return_type"])
         reply = self.tr.http.request("POST", "/v2/record-types/%s/fields" % parent_id, body)
         new = reply.get("id") if isinstance(reply, dict) else None
         if not new:
@@ -276,6 +282,66 @@ def attempted_type(field, defaults):
     if FALLBACK_PLANNING.get(t):
         return FALLBACK_PLANNING[t], "the built-in mapping for %s" % t
     return t, "no mapping exists: the Airtable type %s was sent as given" % t
+
+
+def formula_catalog(conn, base_id):
+    """The schema of the base for the formula pre-check and hold-back (planformula.Catalog), using this module's own idea of what each field becomes."""
+    return pf.Catalog(conn, base_id, attempted_type, ARRAY_TYPES, SKIP_TYPES, is_select_lookup)
+
+
+def formula_precheck(conn, base_id, table_id, env_name, workspace_id):
+    """What running this table would do with its calculated fields, from the schema and the ID map only (nothing is sent). See planformula.Catalog.advise."""
+    cat = formula_catalog(conn, base_id)
+    if table_id not in cat.tables:
+        raise EmergencyError("That table is not in the database for this base. Ingest the schema in Stage 1 first.", 404)
+    present = cat.present_from_map(conn, env_name, workspace_id)
+    out = cat.advise(table_id, present)
+    out["environment"], out["workspace_id"] = env_name, workspace_id
+    return out
+
+
+def formula_order(fields, cat):
+    """The fields of one table in the order they are created: every ordinary field first (a formula may read any of them), then the formulas, each after the formulas it reads;
+    a formula caught in a loop goes last (it is refused there). Sorted, so the same schema always gives the same order."""
+    forms = [f for f in fields if f["data_type"] == "formula"]
+    ids = {f["field_id"] for f in forms}
+    order, cyclic = cx.order_formulas({f["field_id"]: [g for g in cat.plan(f["field_id"])["formulas"] if g in ids] for f in forms})
+    by_id = {f["field_id"]: f for f in forms}
+    return [f for f in fields if f["data_type"] != "formula"] + [by_id[i] for i in order + cyclic]
+
+
+def formula_decision(f, cat, rows, deferred, present, built):
+    """What to do with one Airtable formula field. Returns ("send", {expression, return_type, warnings}), ("defer", reason, [what it waits for]) or ("pre", reason).
+    `rows` are the field rows made so far in this run (a formula reads only fields made before it), `deferred` {formula field ID: waits} the formulas already held back,
+    `present` what the ID map holds for other tables, `built` how many formula fields the record type already has."""
+    fid = f["field_id"]
+    plan = cat.plan(fid)
+    if plan["blocked"]:
+        return "pre", "this formula cannot be built as a Planning formula: " + "; ".join(plan["blocked"])
+    waits = {n for n in plan["needs"] if n not in present}
+    for g in plan["formulas"]:
+        waits |= set(deferred.get(g, []))
+    if waits:
+        names = sorted({cat.tables.get(cat.table_of(n), n) for n in waits}, key=str.lower)
+        return "defer", "held back: it reads fields that come from %s, which %s not in Planning yet. Run %s first, then run this table again." % (
+            ", ".join(names), "is" if len(names) == 1 else "are", "that table" if len(names) == 1 else "those tables"), sorted(waits)
+    by_id = {r["field_id"]: r for r in rows}
+
+    def resolve(kind, key):
+        r = by_id.get(key if kind == "id" else cat.id_by_name(f["table_id"], key))
+        return r["final_name"] if r and r["outcome"] == "clean" and r["final_type"] != "multi-select" and r["final_name"] else None
+
+    tr = pf.translate(f.get("formula_text"), resolve)
+    if tr.expression is None:
+        why = []
+        for m in tr.missing:
+            r = by_id.get(m) or by_id.get(cat.id_by_name(f["table_id"], m) or "")
+            what = (cat.f.get(m) or {}).get("field_name") or m
+            why.append("%s (%s)" % (what, ("was loaded as the text field %s" % r["final_name"]) if r and r["outcome"] == "pre-converted" else (r["reason"] if r and r["reason"] else "it is not in Planning")))
+        return "pre", "this formula cannot be built as a Planning formula: " + ("it reads " + "; ".join(why) if why else tr.reason.rstrip("."))
+    if built >= pf.MAX_FORMULAS:
+        return "pre", "the record type already has %d formula fields, the most Planning allows" % pf.MAX_FORMULAS
+    return "send", {"expression": tr.expression, "return_type": pf.return_type(f.get("result_type")), "warnings": tr.warnings}
 
 
 PK_NAME = "AirtableRecordId"
@@ -416,11 +482,14 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         except Exception as e:
             notes.append("The fields already in the record type could not be listed (%s); the long-text count may be low." % lr.scrub(e))
     long_count = sum(1 for r in existing.values() if r.get("type") == "long-text")
+    formulas_built = sum(1 for r in existing.values() if r.get("type") == "formula")
+    cat = formula_catalog(conn, base_id)
+    deferred = {}                                       # formula field ID -> what it waits for (another table's fields)
 
     # ---- 2. the fields
     calls.phase = "fields"
     loadable = [{"field_id": "(record id)", "planning_id": pk_id, "kind": "text", "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True, "record_id": True}]
-    for n, f in enumerate(schema["fields"], 1):
+    for n, f in enumerate(formula_order(schema["fields"], cat), 1):
         if stop():
             result["cancelled"] = True
             break
@@ -502,7 +571,8 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
             pt_opts = {str(o.get("displayName")): str(o.get("name") if o.get("name") not in (None, "") else o.get("displayName")) for o in (e.get("options") or []) if isinstance(o, dict)}
             if f.get("lookup_snapshot") and not is_pre:
                 pt_opts = snapshot_options(pt.check_options(f["choices"], increment=True), pt_opts)
-            loadable.append({"field_id": fid, "planning_id": planned, "kind": tm.kind(etype) or etype, "options": pt_opts, "linked_table_id": None, "single": False, "pass": "records", "raw": is_pre})
+            if etype != "formula":                                                    # Planning computes a formula: no value is ever sent to it
+                loadable.append({"field_id": fid, "planning_id": planned, "kind": tm.kind(etype) or etype, "options": pt_opts, "linked_table_id": None, "single": False, "pass": "records", "raw": is_pre})
             continue
         if planned and not existing:                                                      # recorded as created, listing unavailable: trust the name
             row.update(final_name=send_name, planning_field_id=planned, outcome="clean", reason="already created by an earlier run (its type could not be read back)")
@@ -517,6 +587,33 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
 
         row.update(attempted_type=atype, attempted_from=src)
         add_note = lambda text: row.update(note=(row["note"] + "; " if row["note"] else "") + text)
+        if atype == "formula" and f["data_type"] == "formula":
+            verdict = formula_decision(f, cat, result["fields"], deferred, cat.present_from_map(conn, env.name, ctx.ws), formulas_built)
+            if verdict[0] == "defer":
+                deferred[fid] = verdict[2]
+                row.update(attempt1="not attempted", outcome="skipped", reason=verdict[1], waiting_for=sorted({cat.tables.get(cat.table_of(x), x) for x in verdict[2]}, key=str.lower))
+                continue
+            if verdict[0] == "pre":
+                row.update(attempt1="not attempted")
+                ok2, wid, ptype = make_pre(verdict[1])
+                if ok2:
+                    loadable.append({"field_id": fid, "planning_id": wid, "kind": ptype, "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True})
+                continue
+            item_spec["formula"] = verdict[1]
+            it = _item(temp, "field", send_name, rt_item["temp_id"], table_id, fid, "formula", item_spec)
+            ok1, wid, err1, _how = _try(state, env, tr, it)
+            row.update(attempt1="created" if ok1 else "refused", attempt1_error=err1 or "", attempt1_error_code=_error_code(err1))
+            if ok1:
+                formulas_built += 1
+                add_note("formula sent as: %s (returns %s)" % (verdict[1]["expression"], verdict[1]["return_type"]))
+                for w in verdict[1]["warnings"]:
+                    add_note("provisional: " + w)
+                row.update(final_name=send_name, final_type="formula", planning_field_id=wid, outcome="clean", reason="")
+                continue
+            ok2, wid, ptype = make_pre("Planning refused the formula field")
+            if ok2:
+                loadable.append({"field_id": fid, "planning_id": wid, "kind": ptype, "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True})
+            continue
         chk = None
         if atype in tm.SELECT_KINDS:
             # The duplicate check comes first, from the schema: a select field is only created with options that are all distinct (single and multiple alike).
@@ -567,6 +664,18 @@ def run_table(conn, base_id, table_id, ctx, tr, extract_dir, calls, fetch_doc=No
         if ok2:
             loadable.append({"field_id": fid, "planning_id": wid, "kind": ptype, "options": {}, "linked_table_id": None, "single": False, "pass": "records", "raw": True})
     calls.field_id = None
+    rank = {f["field_id"]: i for i, f in enumerate(schema["fields"])}
+    result["fields"].sort(key=lambda r: rank.get(r["field_id"], 0))               # formulas were made last; the result lists the fields as the schema does
+    held = [r for r in result["fields"] if r["field_id"] in deferred]
+    result["formulas"] = {"built": sum(1 for r in result["fields"] if r["final_type"] == "formula"), "held_back": len(held),
+                          "as_text": sum(1 for r in result["fields"] if r["outcome"] == "pre-converted" and r["airtable_type"] == "formula")}
+    if held:
+        by_table = {}
+        for r in held:
+            for t in r["waiting_for"]:
+                by_table[t] = by_table.get(t, 0) + 1
+        notes.append("%d calculated field(s) were held back (not created, not stored as text) because they read fields from other tables that are not in Planning yet: %s. Run those tables first, "
+                     "then run this table again; nothing is created twice." % (len(held), ", ".join("%s (%d)" % (t, by_table[t]) for t in sorted(by_table, key=str.lower))))
     for row in result["fields"]:
         row["log_span"] = calls.span(row["field_id"])
         mine = [e for e in calls.entries if e["field_id"] == row["field_id"]]
@@ -624,7 +733,7 @@ def summary_counts(result):
         if f["outcome"] in c:
             c[f["outcome"]] += 1
     r = result["records"]
-    c.update(records_loaded=r["loaded"], records_already_loaded=r["already_loaded"], records_failed=r["failed"], values_not_converted=r["values_not_converted"],
+    c.update(formulas_built=(result.get("formulas") or {}).get("built", 0), formulas_held_back=(result.get("formulas") or {}).get("held_back", 0), records_loaded=r["loaded"], records_already_loaded=r["already_loaded"], records_failed=r["failed"], values_not_converted=r["values_not_converted"],
              fields_total=len(result["fields"]))
     return c
 

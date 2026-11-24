@@ -6017,6 +6017,20 @@ def api_emergency_start(body):
     return {"started": True, "job_id": job.id}
 
 
+def api_emergency_formulas(q):
+    """The calculated-field pre-check for one table: what a Go run would build, hold back or store as text, which other tables to run first and in what order. Nothing is sent."""
+    base = _names_base(q)
+    table = (q.get("table_id") or [""])[0].strip()
+    if not ID_SAFE_RE.match(table):
+        raise AppError("Choose a table first.")
+    ctx = _em_context(False)
+    with db() as conn:
+        try:
+            return _lt_out(emergency.formula_precheck(conn, base, table, ctx.env.name, ctx.ws))
+        except emergency.EmergencyError as e:
+            raise AppError(e.message, e.status)
+
+
 def api_emergency_status(_q=None):
     job = EMJOB["current"]
     if not job:
@@ -6717,7 +6731,7 @@ GET_ROUTES = {"/api/status": api_status, "/api/db/counts": api_db_counts, "/api/
               "/api/corefields/setup": api_corefields_setup, "/api/corefields/state": api_corefields_state, "/api/corefields/template.csv": api_corefields_template,
               "/api/corefields/crosswalk.csv": api_corefields_crosswalk, "/api/corefields/report": api_corefields_report,
               "/api/calcfields/setup": api_calcfields_setup, "/api/calcfields/forms/template.csv": api_calcfields_forms_template, "/api/calcfields/push/status": api_calcfields_push_status, "/api/calcfields/runs": api_calcfields_runs, "/api/calcfields/report": api_calcfields_report, "/api/calcfields/report.csv": api_calcfields_report_csv,
-              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/report": api_emergency_report}
+              "/api/emergency/setup": api_emergency_setup, "/api/emergency/status": api_emergency_status, "/api/emergency/formulas": api_emergency_formulas, "/api/emergency/report": api_emergency_report}
 POST_ROUTES = {"/api/db/connect": api_db_connect, "/api/db/create": api_db_create,
                "/api/schema/ingest": api_schema_ingest, "/api/schema/discard": api_schema_discard, "/api/depgraph/recompute": api_depgraph_recompute, "/api/links/directions/sync": api_link_directions_sync, "/api/records/register": api_records_register, "/api/core/object-type": api_core_object_type, "/api/core/parent": api_core_parent, "/api/field-writers/decide": api_field_writers_decide, "/api/field-writers/validate": api_field_writers_validate, "/api/links/directions/decide": api_link_directions_decide,
                "/api/extract/delete": api_extract_delete, "/api/profile/start": api_profile_start, "/api/profile/cancel": api_profile_cancel,

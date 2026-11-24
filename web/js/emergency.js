@@ -29,7 +29,27 @@ async function loadSetup() {
   d.tables.forEach((t) => sel.appendChild(el("option", { value: t.table_id, text: t.airtable_name + " (" + t.table_id + ")" })));
   sel.value = d.tables.some((t) => t.table_id === keep) ? keep : "";
   applyGo();
+  await loadFormulas().catch(() => { $("formulaCard").hidden = true; });
   await follow();
+}
+
+/* ---------- the calculated-field pre-check: which other tables to run first, and in what order ---------- */
+async function loadFormulas() {
+  const card = $("formulaCard");
+  if (!baseNow() || !tableNow()) { card.hidden = true; return; }
+  const d = await api("GET", "/api/emergency/formulas?base_id=" + encodeURIComponent(baseNow()) + "&table_id=" + encodeURIComponent(tableNow()));
+  const c = d.counts;
+  card.hidden = c.total === 0;
+  if (!c.total) return;
+  setMsg("formulaMsg", fmt(c.total) + " calculated field(s): " + fmt(c.ready) + " can be built now, " + fmt(c.waiting) + " wait for another table, " + fmt(c.blocked) + " cannot be built as formulas, "
+    + fmt(c.created) + " already built, " + fmt(c.stored_as_text) + " already stored as text.", c.waiting || c.blocked ? "warn" : "ok");
+  const adv = $("formulaAdvice");
+  clear(adv);
+  (d.advice || []).forEach((t) => adv.appendChild(el("div", { class: "hint", text: t })));
+  const fill = (id, rows, cells) => { const tb = $(id).querySelector("tbody"); clear(tb); rows.forEach((r, i) => tb.appendChild(el("tr", null, cells(r, i)))); $(id.replace("Grid", "Win")).hidden = rows.length === 0; };
+  fill("formulaWaitGrid", d.waiting_on || [], (w) => [td(w.table_name + " (" + w.table_id + ")"), td(w.formulas, "num"), td(w.loaded ? "yes" : "no"), td((w.fields || []).join(", "))]);
+  fill("formulaOrderGrid", d.order || [], (o, i) => [td(i + 1, "num"), td(o.table_name + " (" + o.table_id + ")"), td(o.creates, "num"), td(o.unlocks, "num")]);
+  fill("formulaBlockGrid", d.blocked || [], (b) => [td(b.name + " (" + b.field_id + ")"), td((b.reasons || []).join("; "))]);
 }
 
 function fileLink(name, label) { return el("a", { href: "/api/emergency/report?file=" + encodeURIComponent(name), text: label }); }
@@ -45,7 +65,7 @@ function renderResult(j) {
     : head + "Table " + r.table_name + " went into Workspace " + r.workspace_id + " (record type " + rt.outcome + ").", rt.outcome === "failed" || c.failed || c.records_failed ? "warn" : "ok");
   const body = $("countGrid").querySelector("tbody");
   clear(body);
-  [["Fields pushed clean", c.clean], ["Fields converted to PRE- text", c["pre-converted"]], ["Fields skipped", c.skipped], ["Fields failed (both attempts refused)", c.failed],
+  [["Fields pushed clean", c.clean], ["Fields converted to PRE- text", c["pre-converted"]], ["Fields skipped", c.skipped], ["Calculated fields built as real formulas", c.formulas_built], ["Calculated fields held back (run another table first)", c.formulas_held_back], ["Fields failed (both attempts refused)", c.failed],
    ["Records loaded", c.records_loaded], ["Records already loaded by an earlier run", c.records_already_loaded], ["Records failed", c.records_failed],
    ["Values that could not be sent as the field's type", c.values_not_converted]].forEach((p) => body.appendChild(el("tr", null, [td(p[0]), td(fmt(p[1]), "num")])));
   const f = r.files, p = $("files");
@@ -153,7 +173,7 @@ startPage("emergency", { afterConnect }, () => {
   initBaseCombo();
   watchSort("fieldGrid");
   $("baseId").addEventListener("input", guarded(loadSetup));
-  $("tableSel").addEventListener("change", () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; applyGo(); });
+  $("tableSel").addEventListener("change", () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; applyGo(); loadFormulas().catch((e) => { $("formulaCard").hidden = true; showGlobalError(e.message); }); });
   $("btnGo").addEventListener("click", guarded(go));
   $("btnReset").addEventListener("click", guarded(resetTable));
   $("btnForget").addEventListener("click", guarded(forgetTable));
