@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Emergency mode ("triage"): get ONE table's data into Workfront Planning today, whatever works. Standard library only.
 
-A Go run does, for one table of one base, in the DEV Workspace of config.json:
+A Go run does, for one table of one base, in the Workspace of the Planning stage the person picks (dev, test or prod in config.json):
     1  create the Planning record type (or reuse the one the database already maps to the table)
     2  for each field, in sorted order: skip links and attachments, and hold back every field whose value comes through a link (a lookup, a rollup, a count, a formula that reads a link: see linkdeps.py; it is never loaded as text, and a person creates the lookup in Planning once the links are set); send arrays as raw JSON text in a PRE- field (a multiple select with distinct options is a real multi-select; so is a lookup of a select field, as a snapshot of its values); otherwise try the real Planning type, and when Planning
        refuses it create a text field named PRE-<field name> (long text when the longest value is over 255 characters, up to 20 long-text fields per record type)
@@ -36,7 +36,7 @@ import recordload as rl
 import recordmap as rm
 import typemap as tm
 
-STAGE = "dev"
+STAGE = "dev"                  # the stage a request uses when it names none; the page offers every stage defined in config.json
 PRE = "PRE-"
 TEXT_MAX = 255                 # a value of this many characters or fewer fits a text field; longer needs long text
 LONG_TEXT_CAP = 20             # Planning allows 20 long-text fields per record type

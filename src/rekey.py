@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Re-key the record types of the DEV Planning Workspace: make the Airtable primary field the record type's primary field. Standard library only.
+"""Re-key the record types of the chosen Planning stage's Workspace: make the Airtable primary field the record type's primary field. Standard library only.
 
 Git-R-Done makes AirtableRecordId the primary field of every record type (its preparatory step needs a primary field other than Planning's defaults before it can delete them). A link
 shows the target record by its primary field, so after a load every link would show an Airtable record ID. Once the data is validated, this step makes the field that was the primary

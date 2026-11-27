@@ -23,9 +23,11 @@
 <main>
 <section class="card context" id="ctxCard">
   <h2>Re-key record types</h2>
-  <p class="hint"><strong>Do this last, after you have validated the data.</strong> Git-R-Done makes <code>AirtableRecordId</code> the primary field of every record type, so a link shows the other record as an Airtable ID. This step makes the field that was the <strong>primary field in Airtable</strong> the primary field of its record type, so links show names. <code>AirtableRecordId</code> stays as an ordinary field and keeps its values. Only a real <strong>text</strong> field is re-keyed (other types are not proven as a primary field); every other record type is listed with the reason and left alone. Nothing is deleted. The step changes the <strong>dev</strong> Workspace of config.json only, and only what you choose below.</p>
+  <p class="hint"><strong>Do this last, after you have validated the data.</strong> Git-R-Done makes <code>AirtableRecordId</code> the primary field of every record type, so a link shows the other record as an Airtable ID. This step makes the field that was the <strong>primary field in Airtable</strong> the primary field of its record type, so links show names. <code>AirtableRecordId</code> stays as an ordinary field and keeps its values. Only a real <strong>text</strong> field is re-keyed (other types are not proven as a primary field); every other record type is listed with the reason and left alone. Nothing is deleted. The step changes only the Workspace of the <strong>Planning stage</strong> you pick (from <code>workfront.planning</code> in config.json), and only what you choose below. The production stage also asks you to type <code>CREATE IN PRODUCTION</code>.</p>
   <div class="formgrid">
-    <label for="wsId">Workspace ID (dev, from config.json)</label>
+    <label for="stageSel">Planning stage</label>
+    <div class="cell"><select id="stageSel"><option value="">(none defined)</option></select></div>
+    <label for="wsId">Workspace ID (from config.json)</label>
     <div class="cell"><output id="wsId" class="wsid" aria-live="polite">(not read yet)</output></div>
     <label for="baseId">Base ID</label>
     <div class="combo" id="baseCombo">

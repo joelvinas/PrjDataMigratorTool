@@ -80,11 +80,7 @@ async function loadSetup() {
   const d = await api("GET", "/api/loadtable/setup?base_id=" + encodeURIComponent(baseNow()));
   lt.setup = d;
   showGlobalError("");
-  const sel0 = $("stageSel"), keepStage = sel0.value;
-  clear(sel0);
-  if (!d.stages.length) sel0.appendChild(el("option", { value: "", text: "(none defined)" }));
-  d.stages.forEach((s) => sel0.appendChild(el("option", { value: s, text: s })));
-  sel0.value = d.stages.includes(keepStage) ? keepStage : (d.stages[0] || "");
+  fillStageSelect($("stageSel"), d, $("stageSel").value);
   $("wsId").textContent = wsNow() || "(not configured)";
   setMsg("pageMessage", d.configured ? (d.tables_problem || "") : d.problem + " Add the Planning settings to config.json (see config.example.json), then reload this page.", d.configured && !d.tables_problem ? "" : d.configured ? "warn" : "err");
   const sel = $("tableSel"), keep = sel.value;

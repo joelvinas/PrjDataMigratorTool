@@ -57,6 +57,29 @@ async function api(method, path, body) {
 }
 
 /* ---------- shared: formatting ---------- */
+/* The Planning stage picker (Git-R-Done, Re-key, Load a table): the stages config.json defines, each shown by the name config.json uses for it ("test" is stored as uat,
+   "prod" as production). `chosen` is the stage to select when it is still on offer. */
+function fillStageSelect(sel, setup, chosen) {
+  const stages = (setup && setup.stages) || [], info = (setup && setup.stage_info) || {};
+  clear(sel);
+  if (!stages.length) sel.appendChild(el("option", { value: "", text: "(none defined)" }));
+  stages.forEach((s) => sel.appendChild(el("option", { value: s, text: stageLabelOf(setup, s) })));
+  sel.value = stages.includes(chosen) ? chosen : (stages[0] || "");
+}
+function stageLabelOf(setup, stage) {
+  const lab = (((setup && setup.stage_info) || {})[stage] || {}).label || stage;
+  return lab === stage ? stage : lab + " (" + stage + ")";
+}
+/* A real send to the production stage needs a typed phrase on top of the confirmation. Returns undefined for any other stage, null when the person cancels or types it
+   wrong (the server checks it again). */
+function productionPhrase(stage, want, what) {
+  if (stage !== "production") return undefined;
+  const typed = window.prompt("This " + what + " goes to the PRODUCTION Workspace. Type " + want + " exactly to go on.", "");
+  if (typed === null) return null;
+  if (typed.trim() !== want) { window.alert("The phrase did not match. Nothing was sent."); return null; }
+  return typed.trim();
+}
+
 const fmtBytes = (n) => (n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B");
 
 /* ---------- base picker: dropdown from config.json, typing still allowed ---------- */

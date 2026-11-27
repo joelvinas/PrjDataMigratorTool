@@ -56,8 +56,10 @@ def planning_context(config_path, stage, send, confirm=None):
         data = lc.read_config(config_path)
     except lc.ConfigError as e:
         raise LoadError(str(e))
-    stage = str(stage or "").strip().lower()
+    stage = lc.planning_stage(stage)                  # "test" and "prod" in config.json are stored as uat and production
     defined = list(lc.planning_blocks(data))
+    if stage in dict(lc._planning_keys(data)) and stage not in defined:
+        raise LoadError(" ".join(p for p in lc.planning_problems(data) if " %s twice " % stage in p))
     if defined and stage not in defined:
         raise LoadError("The stage %s is not defined in %s (section workfront.planning). Defined stages: %s." % (stage or "(none)", config_path, ", ".join(defined)))
     creds = lc.credentials(data, "planning", stage)

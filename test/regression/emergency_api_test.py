@@ -34,7 +34,7 @@ def poll(secs=30):
 def conf(t, ws="wsDev"): return {"table_id": t, "workspace_id": ws}
 
 s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
-check("with no Workfront settings the page is told so plainly", s == 200 and r["configured"] is False and "dev stage is not configured" in r["problem"] and r["stage"] == "dev", r)
+check("with no Workfront settings the page is told so plainly", s == 200 and r["configured"] is False and "No Planning stage is configured" in r["problem"] and r["stage"] == "dev" and r["stages"] == [], r)
 s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "confirm": conf("tC")})
 check("a Go with no settings is refused with the reason and no job exists", s == 400 and call("GET", "/api/emergency/status")[1] == {"job": None}, (s, r))
 
@@ -43,6 +43,36 @@ try:
     s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
     check("setup says configured and shows only the dev Workspace ID (no token), with the in-scope tables", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["stage"] == "dev" and TOKEN not in json.dumps(r)
           and "tD" not in [t["table_id"] for t in r["tables"]] and "tC" in [t["table_id"] for t in r["tables"]], r)
+    # ---- the Planning stage picker: every stage defined in config.json, dev by default, each with its own Workspace; a real send to production needs the typed phrase
+    check("setup offers every stage defined in config.json, in order, with its Workspace ID and the production phrases, and picks dev by default",
+          r["stages"] == ["dev", "uat", "production"] and r["stage_info"]["production"]["workspace_id"] == "wsProd" and r["production_phrase"] == "CREATE IN PRODUCTION"
+          and r["reset_phrase"] == "DELETE RECORDS IN PRODUCTION", r)
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE + "&stage=production")
+    check("choosing the production stage shows its own Workspace ID", s == 200 and r["configured"] and r["stage"] == "production" and r["workspace_id"] == "wsProd" and TOKEN not in json.dumps(r), r)
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE + "&stage=PROD")
+    check("prod is another name for production (the name the database stores)", s == 200 and r["stage"] == "production" and r["workspace_id"] == "wsProd", r)
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE + "&stage=test")
+    check("test is another name for uat", s == 200 and r["stage"] == "uat" and r["workspace_id"] == "wsMissing", r)
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE + "&stage=qa")
+    check("a stage config.json does not define is not configured, and the page is told which are", s == 200 and not r["configured"] and "qa" in r["problem"] and "dev, uat, production" in r["problem"], r)
+    s, r = call("GET", "/api/emergency/formulas?base_id=" + BASE + "&table_id=tC&stage=production")
+    check("the pre-check works in the chosen stage's Workspace", s == 200 and r["workspace_id"] == "wsProd", (s, r))
+    n0 = len(fake.reqs)
+    s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "stage": "production", "confirm": conf("tC", "wsProd")})
+    check("a Go to production without the typed phrase is refused and sends nothing", s == 400 and "CREATE IN PRODUCTION" in r["error"] and len(fake.reqs) == n0 and call("GET", "/api/emergency/status")[1] == {"job": None}, (s, r))
+    s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "stage": "production", "production_phrase": "create in production", "confirm": conf("tC", "wsProd")})
+    check("the phrase must be exact", s == 400 and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "stage": "production", "production_phrase": "CREATE IN PRODUCTION", "confirm": conf("tC")})
+    check("a production Go confirmed with the dev Workspace ID is refused (the confirmation must name the chosen stage's Workspace)", s == 400 and "Confirm" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/links", {"base_id": BASE, "table_id": "tC", "stage": "production", "send": True, "confirm": conf("tC", "wsProd")})
+    check("a links pass to production without the phrase is refused", s == 400 and "CREATE IN PRODUCTION" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/reset", {"base_id": BASE, "table_id": "tC", "stage": "production", "send": True, "production_phrase": "CREATE IN PRODUCTION", "confirm": conf("tC", "wsProd")})
+    check("a reset in production needs its own phrase, DELETE RECORDS IN PRODUCTION", s == 400 and "DELETE RECORDS IN PRODUCTION" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = post("/api/emergency/forget", {"base_id": BASE, "table_id": "tC", "stage": "production", "confirm": conf("tC", "wsProd")})
+    check("so does forgetting a table's IDs in production", s == 400 and "DELETE RECORDS IN PRODUCTION" in r["error"], (s, r))
+    s, r = post("/api/emergency/reset", {"base_id": BASE, "table_id": "tC", "stage": "production", "send": False})
+    check("a reset dry run in production needs no phrase, sends nothing and looks only at the production stage", s == 409 and "PRODUCTION stage" in r["error"] and len(fake.reqs) == n0, (s, r))
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE)
     # ---- the table list: load order and "already loaded" (rows written straight into the fabricated database, removed again below)
     import sqlite3
     def lm(tid, ws, status, wfid, base=BASE, kind="record_type", env="dev"):
@@ -166,6 +196,14 @@ try:
     s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "confirm": conf("tC")})
     j4 = poll()
     check("and Go works again straight after (create, reset, try again)", j4["status"] == "done" and len(fake.posts("/record-types")) == rts + 1 and j4["result"]["counts"]["records_loaded"] == 2, (j4["status"], j4.get("error")))
+
+    # ---- a Go in another stage goes to that stage's Workspace and is recorded under it
+    s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "stage": "prod", "production_phrase": "CREATE IN PRODUCTION", "confirm": conf("tC", "wsProd")})
+    jp = poll()
+    check("a Go to production with the phrase runs in the production Workspace", s == 200 and jp and jp["status"] == "done" and jp["stage"] == "production" and jp["workspace_id"] == "wsProd"
+          and fake.posts("/v2/workspaces/wsProd/record-types"), (s, jp and (jp["status"], jp.get("error"))))
+    s, r = call("GET", "/api/emergency/setup?base_id=" + BASE + "&stage=production")
+    check("the table shows as loaded in the production stage", {t["table_id"]: t["loaded"] for t in r["tables"]}.get("tC") is True, r["tables"])
 
     text = "\n".join(seen) + "".join(open(os.path.join(folder, f), encoding="utf-8", errors="replace").read() for f in os.listdir(folder))
     check("the Workfront token is in no response and no report", TOKEN not in text and fake.bad_auth == 0)

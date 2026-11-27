@@ -38,6 +38,11 @@ try:
     s, r = call("GET", "/api/rekey/setup?base_id=" + BASE)
     check("setup shows the dev Workspace ID and the phrase to type, no token, and no record type before anything was loaded", s == 200 and r["configured"] and r["workspace_id"] == "wsDev" and r["phrase"] == "REKEY RECORD TYPES"
           and r["rows"] == [] and TOKEN not in json.dumps(r), r)
+    s, r = call("GET", "/api/rekey/setup?base_id=" + BASE + "&stage=prod")
+    check("the re-key page offers every stage too; prod is production with its own Workspace ID", s == 200 and r["stages"] == ["dev", "uat", "production"] and r["stage"] == "production" and r["workspace_id"] == "wsProd", r)
+    n0 = len(fake.reqs)
+    s, r = post("/api/rekey/run", {"base_id": BASE, "stage": "production", "table_ids": ["tC"], "actor": "JV", "reason": "data validated", "phrase": "REKEY RECORD TYPES", "workspace_id": "wsProd"})
+    check("a re-key in production also needs CREATE IN PRODUCTION, and sends nothing without it", s == 400 and "CREATE IN PRODUCTION" in r["error"] and len(fake.reqs) == n0 and call("GET", "/api/rekey/status")[1] == {"job": None}, (s, r))
     # load one table with Git-R-Done so a record type and a field exist, and tell the database which field is the primary field in Airtable
     s, r = post("/api/emergency/start", {"base_id": BASE, "table_id": "tC", "confirm": {"table_id": "tC", "workspace_id": "wsDev"}})
     j = poll("/api/emergency/status")
