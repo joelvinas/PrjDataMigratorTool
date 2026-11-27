@@ -1,9 +1,11 @@
 "use strict";
-/* Re-key record types: a separate page, used after the data is validated. The page only asks the server to read or change the record types of the dev Workspace and shows the answer:
+/* Re-key record types: a separate page, used after the data is validated. The page only asks the server to read or change the record types of the chosen stage's Workspace and shows the answer:
    table and field names, IDs, statuses and short reasons. No record value and no token is ever in a reply. */
 const rk = { setup: null, job: null, timer: null, rows: [] };
 const baseNow = () => $("baseId").value.trim();
 const wsNow = () => (rk.setup && rk.setup.workspace_id) || "";
+const stageNow = () => $("stageSel").value;
+const stageLabel = () => stageLabelOf(rk.setup, stageNow());
 const td = (text, cls) => el("td", { class: cls || null, text: text === null || text === undefined ? "" : String(text) });
 const STATUS = { eligible: "can be re-keyed", already: "already done", ineligible: "left alone", no_field: "left alone", no_primary: "left alone", unchecked: "not checked yet" };
 const STATUS_ROW = { eligible: "out-ok", ineligible: "out-hold", no_field: "out-hold", no_primary: "out-hold" };
@@ -12,7 +14,8 @@ const chosen = () => Array.from(document.querySelectorAll("#rowGrid input.pick:c
 const busy = () => !!(rk.job && rk.job.status === "running");
 
 function applyState() {
-  const ready = !!(rk.setup && rk.setup.configured && baseNow()) && !busy();
+  const ready = !!(rk.setup && rk.setup.configured && baseNow() && stageNow()) && !busy();
+  $("stageSel").disabled = busy();
   $("btnCheck").disabled = !ready;
   $("btnCancel").hidden = !busy();
   const phraseOk = $("phrase").value.trim() === (rk.setup ? rk.setup.phrase : "");
@@ -39,12 +42,13 @@ function renderRows(rows) {
 }
 
 async function loadSetup() {
-  const d = await api("GET", "/api/rekey/setup?base_id=" + encodeURIComponent(baseNow()));
+  const d = await api("GET", "/api/rekey/setup?base_id=" + encodeURIComponent(baseNow()) + "&stage=" + encodeURIComponent($("stageSel").value));
   rk.setup = d;
+  fillStageSelect($("stageSel"), d, d.stage);
   showGlobalError("");
   $("wsId").textContent = d.workspace_id || "(not configured)";
   $("phraseText").textContent = d.phrase;
-  setMsg("pageMessage", d.configured ? (baseNow() && d.counts ? fmt(d.counts.record_types) + " record type(s) of this base are recorded in the dev Workspace. Press Check to read them from Planning." : "") : d.problem, d.configured ? "" : "err");
+  setMsg("pageMessage", d.configured ? (baseNow() && d.counts ? fmt(d.counts.record_types) + " record type(s) of this base are recorded in the " + stageLabel() + " Workspace. Press Check to read them from Planning." : "") : d.problem, d.configured ? "" : "err");
   renderRows(d.rows || []);
   await follow();
 }
@@ -94,16 +98,18 @@ function watch() { if (!rk.timer && rk.job && rk.job.status === "running") rk.ti
 
 async function check() {
   showGlobalError(""); $("resultCard").hidden = true; setMsg("rekeyMsg", "", "");
-  await api("POST", "/api/rekey/check", { base_id: baseNow() });
+  await api("POST", "/api/rekey/check", { base_id: baseNow(), stage: stageNow() });
   await follow(); watch();
 }
 
 async function rekey() {
   const ids = chosen();
-  if (!window.confirm("Re-key " + ids.length + " record type(s) in the dev Workspace " + wsNow() + "?\n\nFor each one, the field that was the primary field in Airtable becomes the primary field in Planning. AirtableRecordId stays as an ordinary field. Your initials (" + $("actor").value.trim() + ") and your reason are recorded in the report.")) return;
+  if (!window.confirm("Re-key " + ids.length + " record type(s) in the " + stageLabel() + " Workspace " + wsNow() + "?\n\nFor each one, the field that was the primary field in Airtable becomes the primary field in Planning. AirtableRecordId stays as an ordinary field. Your initials (" + $("actor").value.trim() + ") and your reason are recorded in the report.")) return;
+  const prod = productionPhrase(stageNow(), rk.setup.production_phrase, "re-key");
+  if (prod === null) return;
   showGlobalError("");
   $("resultCard").hidden = true;
-  await api("POST", "/api/rekey/run", { base_id: baseNow(), table_ids: ids, actor: $("actor").value, reason: $("reason").value, phrase: $("phrase").value, workspace_id: wsNow() });
+  await api("POST", "/api/rekey/run", { base_id: baseNow(), stage: stageNow(), table_ids: ids, actor: $("actor").value, reason: $("reason").value, phrase: $("phrase").value, production_phrase: prod, workspace_id: wsNow() });
   await follow(); watch();
 }
 
@@ -114,6 +120,7 @@ startPage("rekey", { afterConnect }, () => {
   initBaseCombo();
   watchSort("rowGrid");
   $("baseId").addEventListener("input", guarded(loadSetup));
+  $("stageSel").addEventListener("change", guarded(async () => { $("resultCard").hidden = true; setMsg("rekeyMsg", "", ""); await loadSetup(); }));
   ["actor", "reason", "phrase"].forEach((id) => $(id).addEventListener("input", applyState));
   $("btnCheck").addEventListener("click", guarded(check));
   $("btnRekey").addEventListener("click", guarded(rekey));

@@ -54,7 +54,8 @@ orig = fx.set_config()
 try:
     s, r = call("GET", "/api/loadtable/setup?base_id=" + BASE)
     check("setup shows the stages the user defined in config.json (lower case) with their Workspace IDs and the typed phrases, and says configured; no token", s == 200 and r["configured"] and r["stages"] == ["dev", "uat", "production"]
-          and r["stage_info"] == {"dev": {"workspace_id": "wsDev"}, "uat": {"workspace_id": "wsMissing"}, "production": {"workspace_id": "wsProd"}} and r["phrases"]["production"] == "DELETE RECORDS IN PRODUCTION"
+          and r["stage_info"] == {"dev": {"workspace_id": "wsDev", "label": "dev"}, "uat": {"workspace_id": "wsMissing", "label": "uat"}, "production": {"workspace_id": "wsProd", "label": "production"}}
+          and r["stage_problems"] == [] and r["phrases"]["production"] == "DELETE RECORDS IN PRODUCTION"
           and r["production_phrase"] == "CREATE IN PRODUCTION" and TOKEN not in json.dumps(r), r)
     check("the picker rows carry scope, target and name approval, in-scope tables only (Hidden is absent)", all(t["scope"] == "in" and t["target"] == "planning_only" and t["name_approved"] for t in r["tables"]) and "tD" not in [t["table_id"] for t in r["tables"]])
     s, r = call("GET", "/api/loadtable/setup?base_id=appNoSuchBase1")

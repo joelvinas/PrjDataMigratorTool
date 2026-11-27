@@ -53,4 +53,31 @@ check("each stage has its own address, token and Workspace ID", lc.credentials(S
 check("a stage that is not defined has no credentials", lc.credentials(ST, "planning", "qa") is None and lc.credentials({"workfront": {"planning": {"DEV": ST["workfront"]["planning"]["DEV"]}}}, "planning", "uat") is None)
 check("a placeholder Workspace ID counts as not set for that stage only", lc.credentials(ST, "planning", "production").workspace_id is None and lc.status(ST)["planning_stages"] == {"dev": True, "uat": True, "production": False})
 check("every stage's token is a secret to redact", {PLAN_TOK, "otherTOKEN0123456789", "prodTOKEN0123456789"} <= lc.secret_values(ST))
+# ---- dev, test and prod: test is stored as uat and prod as production (the names the database allows)
+one = lambda ws, tok: {"base_url": "https://a.example.com", "bearer_token": tok, "workspace_id": ws}
+TP = {"workfront": {"planning": {"dev": one("wsD", "devTOKEN0123456789"), "Test": one("wsT", "testTOKEN0123456789"), "prod": one("wsP", "prodTOKEN0123456789")}}}
+check("test and prod are the uat and production stages", list(lc.planning_blocks(TP)) == ["dev", "uat", "production"] and lc.planning_problems(TP) == [])
+check("each is found by either name", lc.credentials(TP, "planning", "test").workspace_id == "wsT" and lc.credentials(TP, "planning", "uat").workspace_id == "wsT"
+      and lc.credentials(TP, "planning", "PROD").workspace_id == "wsP" and lc.credentials(TP, "planning", "production").environment == "production")
+check("the picker shows the name config.json uses", lc.planning_labels(TP) == {"dev": "dev", "uat": "test", "production": "prod"})
+check("planning_stage maps the other names and leaves the rest alone", [lc.planning_stage(x) for x in ("Test", " PROD ", "dev", "uat", "qa", None)] == ["uat", "production", "dev", "uat", "qa", ""])
+AMB = {"workfront": {"planning": {"dev": one("wsD", "devTOKEN0123456789"), "uat": one("wsU", "uatTOKEN0123456789"), "test": one("wsT", "testTOKEN0123456789")}}}
+check("a stage named twice (uat and test) is left out, never guessed", list(lc.planning_blocks(AMB)) == ["dev"] and lc.credentials(AMB, "planning", "uat") is None and lc.credentials(AMB, "planning", "test") is None)
+check("and the problem says which names clash, with no value from the blocks", len(lc.planning_problems(AMB)) == 1 and "uat" in lc.planning_problems(AMB)[0] and "test" in lc.planning_problems(AMB)[0]
+      and "TOKEN" not in lc.planning_problems(AMB)[0] and "wsU" not in lc.planning_problems(AMB)[0], lc.planning_problems(AMB))
+check("the tokens of a stage left out are still secrets to redact", {"uatTOKEN0123456789", "testTOKEN0123456789"} <= lc.secret_values(AMB))
+import tableload
+cf = os.path.join(d, "tp.json"); json.dump(TP, open(cf, "w"))
+check("a run named prod uses the production block and is stored as production", tableload.planning_context(cf, "prod", False).stage == "production" and tableload.planning_context(cf, "prod", False).ws == "wsP")
+try:
+    tableload.planning_context(cf, "prod", True); m = None
+except tableload.LoadError as e:
+    m = e.message
+check("a real send to prod still needs the production phrase", m is not None and "CREATE IN PRODUCTION" in m, m)
+ca = os.path.join(d, "amb.json"); json.dump(AMB, open(ca, "w"))
+try:
+    tableload.planning_context(ca, "test", False); m = None
+except tableload.LoadError as e:
+    m = e.message
+check("a run in a stage named twice is refused with the reason", m is not None and "twice" in m and "TOKEN" not in m, m)
 sys.exit(0 if ok else 1)

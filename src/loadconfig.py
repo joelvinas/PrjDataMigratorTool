@@ -6,8 +6,13 @@ not per environment:
     "workfront": {
       "core": {"sandbox1":   {"base_url": "https://yourcompany.sb01.workfront.com", "api_key": "PASTE_CORE_SANDBOX_KEY_HERE"},
                "production": {"base_url": "https://...",                          "api_key": "..."}},
-      "planning": {"base_url": "https://...", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE"}
+      "planning": {"dev":  {"base_url": "https://...", "bearer_token": "PASTE_PLANNING_BEARER_TOKEN_HERE", "workspace_id": "PASTE_DEV_WORKSPACE_ID_HERE"},
+                   "test": {...}, "prod": {...}}
     }
+
+Planning has one block per STAGE (a Workspace). The stage names are dev, uat (also written test) and production (also written prod); test and prod are stored as uat and
+production, the names the database allows. Defining both names of one stage (uat and test, or production and prod) is ambiguous: that stage is left out and
+planning_problems() says why.
 
 A system takes a bearer_token or an api_key (use whichever Workfront gave you). Planning uses a Bearer token. The values are secrets: they are never written to the
 database, a log, an error message, a report or the browser. server.py ignores this section (it reads only the keys it knows), so nothing here can reach the page.
@@ -26,6 +31,7 @@ import json, os
 SYSTEMS = ("core", "planning")
 ENVIRONMENTS = ("sandbox1", "sandbox2", "preview", "production")   # Core only (SB01, SB02, Preview, my); Planning uses Workspaces
 PLANNING_STAGES = ("dev", "uat", "production")   # the stage names Planning rows can be stored under (the database allows these); config.json decides which exist
+PLANNING_STAGE_ALIASES = {"test": "uat", "prod": "production"}   # other names config.json may use for a stage; rows are stored under the stage name
 SECRET_KEYS = ("bearer_token", "api_key")
 PLACEHOLDERS = ("PASTE", "REPLACE", "XXXX", "YOURCOMPANY")
 PLANNING_DEFAULT_API_PATH = "/maestro/api"      # the documented base pattern https://{customer-domain}/maestro/api
@@ -76,20 +82,47 @@ def read_config(path):
     return data
 
 
+def planning_stage(name):
+    """The stage name a Planning stage is stored under: "Test" -> "uat", "PROD" -> "production", "dev" -> "dev". Any other name comes back lower case and unchanged (callers
+    check it against the defined stages)."""
+    n = str(name or "").strip().lower()
+    return PLANNING_STAGE_ALIASES.get(n, n)
+
+
+def _planning_keys(data):
+    """{stage: [config keys that name it, as written]} for the planning blocks that are objects and name a known stage. Keys sorted, so the result is the same every time."""
+    p = (data.get("workfront") or {}).get("planning")
+    out = {}
+    if isinstance(p, dict) and "base_url" not in p:
+        for k in sorted(p, key=str):
+            if isinstance(p[k], dict) and planning_stage(k) in PLANNING_STAGES:
+                out.setdefault(planning_stage(k), []).append(str(k))
+    return out
+
+
 def planning_blocks(data):
     """{stage: settings block} for Workfront Planning, stages in the order dev, uat, production. The user defines them in config.json under workfront.planning, one block per
-    stage ("DEV", "dev" and "Dev" are the same), each with its own base_url, bearer_token and workspace_id. An older config whose planning block holds base_url directly is one
-    block that serves dev and uat."""
+    stage ("DEV", "dev" and "Dev" are the same; "test" is uat and "prod" is production), each with its own base_url, bearer_token and workspace_id. A stage named twice (uat and
+    test) is left out (see planning_problems). An older config whose planning block holds base_url directly is one block that serves dev and uat."""
     p = (data.get("workfront") or {}).get("planning")
     if not isinstance(p, dict):
         return {}
     if "base_url" in p:
         return {"dev": p, "uat": p}
-    out = {}
-    for k, v in p.items():
-        if isinstance(v, dict) and str(k).strip().lower() in PLANNING_STAGES:
-            out[str(k).strip().lower()] = v
-    return {s: out[s] for s in PLANNING_STAGES if s in out}
+    keys = _planning_keys(data)
+    return {s: p[keys[s][0]] for s in PLANNING_STAGES if len(keys.get(s, ())) == 1}
+
+
+def planning_labels(data):
+    """{stage: the name config.json uses for it}, for the stage picker ("uat" may be written "test"). Only the usable stages of planning_blocks."""
+    keys = _planning_keys(data)
+    return {s: (keys[s][0].strip().lower() if s in keys else s) for s in planning_blocks(data)}
+
+
+def planning_problems(data):
+    """Plain messages about the planning section that leave a stage out (a stage named twice). Never contains a value from the blocks."""
+    return ["config.json names the Planning stage %s twice (workfront.planning: %s). Keep one of them; until then the %s stage cannot be used." % (s, " and ".join(ks), s)
+            for s, ks in sorted(_planning_keys(data).items(), key=lambda kv: PLANNING_STAGES.index(kv[0])) if len(ks) > 1]
 
 
 def credentials(data, system, environment=None):
@@ -101,7 +134,7 @@ def credentials(data, system, environment=None):
     wf = data.get("workfront") or {}
     if system == "planning":
         blocks = planning_blocks(data)
-        stage = str(environment).strip().lower() if environment else (next(iter(blocks), None))
+        stage = planning_stage(environment) if environment else (next(iter(blocks), None))
         block = blocks.get(stage)
         environment = stage
     else:
@@ -126,10 +159,10 @@ def planning_sharing(data, stage):
     """The sharing settings of a Planning stage: {"share_with": [{"subjectId", "subjectType", "role"}, ...], "section_name": "..."}, or None when the stage block has neither key
     (nothing is configured). Raises ConfigError with a plain message when only one of them is given, or either is malformed or still a placeholder. Never repeats a value that
     could be a secret (IDs and role names are not secrets, but the bearer token is never read here)."""
-    block = planning_blocks(data).get(str(stage or "").strip().lower())
+    block = planning_blocks(data).get(planning_stage(stage))
     if not isinstance(block, dict) or ("share_with" not in block and "section_name" not in block):
         return None
-    where = "workfront.planning.%s" % str(stage).strip().lower()
+    where = "workfront.planning.%s" % planning_labels(data).get(planning_stage(stage), planning_stage(stage))
     if "share_with" not in block or "section_name" not in block:
         raise ConfigError("config.json (%s) needs both share_with and section_name, or neither: %s is missing." % (where, "share_with" if "share_with" not in block else "section_name"))
     sec = block.get("section_name")
@@ -168,6 +201,11 @@ def secret_values(data):
     for c in [credentials(data, "core", e) for e in ENVIRONMENTS] + [credentials(data, "planning", s) for s in planning_blocks(data)]:
         if c:
             out.add(c.secret())
+    p = (data.get("workfront") or {}).get("planning")        # a stage left out as ambiguous still has a token to keep out of messages
+    for b in ([p] if isinstance(p, dict) and "base_url" in p else list(p.values()) if isinstance(p, dict) else []):
+        for k in SECRET_KEYS:
+            if isinstance(b, dict) and _real(b.get(k)):
+                out.add(str(b[k]).strip())
     return out
 
 

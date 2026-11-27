@@ -5750,24 +5750,37 @@ def _lt_args(body):
     table = str(body.get("table_id") or "").strip()
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table first.")
-    stage = str(body.get("stage") or "dev").strip().lower()
+    stage = loadconfig.planning_stage(body.get("stage") or "dev")
     return base, table, stage
+
+
+def _planning_stage_menu(out, data):
+    """Fill out["stages"] (the stages defined in config.json with a usable token and Workspace ID, in the order dev, uat, production), out["stage_info"] ({stage: {workspace_id,
+    label}}, label = the name config.json uses, e.g. "test" for uat) and out["stage_problems"]. Only Workspace IDs and names: never a token."""
+    labels = loadconfig.planning_labels(data)
+    for st in loadconfig.planning_blocks(data):
+        c = loadconfig.credentials(data, "planning", st)
+        if c is not None and c.workspace_id:
+            out["stages"].append(st)
+            out["stage_info"][st] = {"workspace_id": c.workspace_id, "label": labels.get(st, st)}
+    out["stage_problems"] = loadconfig.planning_problems(data)
+    return out
+
+
+NO_STAGE = ("No Planning stage is configured in config.json (section workfront.planning: one block each for dev, test (or uat) and prod (or production), with base_url, "
+            "bearer_token and workspace_id).")
 
 
 def api_loadtable_setup(q):
     """What the page needs before a table is chosen: whether Planning is configured (yes or no, never a secret), the Workspace ID to show, the stages, the typed reset phrases and
     the in-scope tables for the base."""
-    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
+    out = {"configured": False, "problem": None, "stages": [], "stage_info": {}, "stage_problems": [], "phrases": {s: loadreset.phrase(s) for s in loadrun.PLANNING_STAGES}, "production_phrase": loadrun.PRODUCTION_PHRASE, "tables": []}
     try:                                      # the stages are the ones the user defined in config.json (workfront.planning); only their Workspace IDs are shown, never a token
         data = loadconfig.read_config(CONFIG_PATH)
-        for st in loadconfig.planning_blocks(data):
-            c = loadconfig.credentials(data, "planning", st)
-            if c is not None and c.workspace_id:
-                out["stages"].append(st)
-                out["stage_info"][st] = {"workspace_id": c.workspace_id}
+        _planning_stage_menu(out, data)
         out["configured"] = bool(out["stages"])
         if not out["configured"]:
-            out["problem"] = "No Planning stage is configured in config.json (section workfront.planning: one block each for dev, uat or production, with base_url, bearer_token and workspace_id)."
+            out["problem"] = " ".join(out["stage_problems"] + [NO_STAGE])
     except loadconfig.ConfigError as e:
         out["problem"] = str(e)
     base = (q.get("base_id") or [""])[0]
@@ -5790,7 +5803,7 @@ def api_loadtable_check(body):
 
 def api_loadtable_workspace(body):
     """Prove the chosen stage's token and Workspace ID with one read of the Workspace, and return its name. A failure says which value in config.json to change."""
-    stage = str(body.get("stage") or "dev").strip().lower()
+    stage = loadconfig.planning_stage(body.get("stage") or "dev")
     ctx = _lt_call(tableload.planning_context, CONFIG_PATH, stage, False)
     tr = _lt_call(tableload.transport, ctx)
     return _lt_out(tableload.workspace_status(ctx, tr))
@@ -5910,7 +5923,7 @@ def api_loadtable_cancel(_body=None):
 
 
 # --------------------------------------------------------------------------
-# Emergency mode: ONE table into the DEV Workspace of config.json in one click (src/emergency.py does the work; this is the HTTP and job layer). The Workspace comes from
+# Emergency mode: ONE table into the Workspace of the chosen Planning stage of config.json in one click (src/emergency.py does the work; this is the HTTP and job layer). The Workspace comes from
 # config.json only. A result holds field names, IDs, counts and short scrubbed reasons: never a record value and never a token. Two MHTML reports and a CSV are written to
 # out/emergency/ and served back by name only.
 # --------------------------------------------------------------------------
@@ -5921,25 +5934,54 @@ def emergency_out_dir():
     return os.path.join(BASE_DIR, "out", "emergency")
 
 
-def _em_context(send):
-    """The DEV settings (Git-R-Done never uses another stage). Raises AppError with a plain message and no secret."""
+def _em_stage(src):
+    """The Planning stage a Git-R-Done or Re-key request names (field "stage" of a body or a query), as stored ("prod" -> "production"); dev when none is given."""
+    v = src.get("stage")
+    if isinstance(v, list):
+        v = v[0] if v else ""
+    return loadconfig.planning_stage(v or emergency.STAGE)
+
+
+def _em_context(send, stage=emergency.STAGE, production_phrase=None, delete=False):
+    """The settings of the chosen Planning stage. A real send to the production stage needs a typed phrase on top of the table and Workspace confirmation:
+    CREATE IN PRODUCTION, or DELETE RECORDS IN PRODUCTION for a reset or forget (`delete`). Raises AppError with a plain message and no secret."""
+    confirm = None
+    if send and stage == "production":
+        want = loadreset.phrase(stage) if delete else loadrun.PRODUCTION_PHRASE
+        if production_phrase != want:
+            raise AppError("Sending to the production stage needs the exact phrase: %s" % want)
+        confirm = loadrun.PRODUCTION_PHRASE
     try:
-        return tableload.planning_context(CONFIG_PATH, emergency.STAGE, send)
+        return tableload.planning_context(CONFIG_PATH, stage, send, confirm)
     except tableload.LoadError as e:
         raise AppError(loadconfig.redact(e.message, _lt_secrets()), e.status)
 
 
-def api_emergency_setup(q):
-    out = {"configured": False, "problem": None, "stage": emergency.STAGE, "workspace_id": "", "tables": []}
+def _em_stage_setup(out, q):
+    """The stage menu and the chosen stage (the one the query names, else dev, else the first defined) with its Workspace ID. Never a token."""
+    out.update(configured=False, problem=None, stages=[], stage_info={}, stage_problems=[], stage=emergency.STAGE, workspace_id="", production_phrase=loadrun.PRODUCTION_PHRASE,
+               reset_phrase=loadreset.phrase("production"))
     try:
-        data = loadconfig.read_config(CONFIG_PATH)
-        c = loadconfig.credentials(data, "planning", emergency.STAGE) if emergency.STAGE in loadconfig.planning_blocks(data) else None
-        if c is not None and c.workspace_id:
-            out.update(configured=True, workspace_id=c.workspace_id)
-        else:
-            out["problem"] = "The dev stage is not configured in config.json (section workfront.planning, block dev, with base_url, bearer_token and workspace_id). Emergency mode loads into the dev Workspace only."
+        _planning_stage_menu(out, loadconfig.read_config(CONFIG_PATH))
     except loadconfig.ConfigError as e:
         out["problem"] = str(e)
+        return out
+    asked = (q.get("stage") or [""])[0]
+    stage = loadconfig.planning_stage(asked) if asked else (emergency.STAGE if emergency.STAGE in out["stages"] else (out["stages"] or [emergency.STAGE])[0])
+    out["stage"] = stage
+    if stage in out["stage_info"]:
+        out.update(configured=True, workspace_id=out["stage_info"][stage]["workspace_id"])
+    elif not out["stages"]:
+        out["problem"] = " ".join(out["stage_problems"] + [NO_STAGE])
+    else:
+        out["problem"] = " ".join(out["stage_problems"] + ["The Planning stage %s is not configured in config.json (section workfront.planning, with base_url, bearer_token and "
+                                                           "workspace_id). Configured: %s." % (stage, ", ".join(out["stages"]))])
+    return out
+
+
+def api_emergency_setup(q):
+    out = _em_stage_setup({"tables": []}, q)
+    stage = out["stage"]
     if (q.get("base_id") or [""])[0]:
         try:
             with db() as conn:
@@ -5949,7 +5991,7 @@ def api_emergency_setup(q):
                 if out["workspace_id"]:
                     loaded = {r["table_id"] for r in conn.execute(
                         "SELECT table_id FROM load_id_map WHERE system='planning' AND kind='record_type' AND status='created' AND workfront_id IS NOT NULL "
-                        "AND environment=? AND workspace_key=? AND base_id=?", (emergency.STAGE, out["workspace_id"], _names_base(q)))}
+                        "AND environment=? AND workspace_key=? AND base_id=?", (stage, out["workspace_id"], _names_base(q)))}
                 for t in tables:
                     t["load_order"] = order.get(t["table_id"])
                     t["loaded"] = t["table_id"] in loaded
@@ -5961,7 +6003,7 @@ def api_emergency_setup(q):
                 for n, t in enumerate(tables, 1):
                     t.update(state="new", state_reasons=[], waits_on=[], original_position=n)
                 if out["workspace_id"]:
-                    states = emergency_links.table_states(conn, _names_base(q), emergency.STAGE, out["workspace_id"], ids)
+                    states = emergency_links.table_states(conn, _names_base(q), stage, out["workspace_id"], ids)
                     by = {t["table_id"]: t for t in tables}
                     for tid, st in states.items():
                         by[tid].update(state=st["state"], state_reasons=st["reasons"], waits_on=[by[x]["airtable_name"] for x in st["waits_on"]])
@@ -5977,9 +6019,10 @@ def api_emergency_setup(q):
 
 class EmergencyJob:
     """One background job of the Git-R-Done page: kind "run" is the table load, kind "links" is the links pass (send False = a dry run that sends nothing)."""
-    def __init__(self, base, table_id, ws, db_path, kind="run", send=True):
+    def __init__(self, base, table_id, ws, db_path, kind="run", send=True, stage=emergency.STAGE, production_phrase=None):
         self.id = str(int(time.time() * 1000))
         self.base, self.table_id, self.ws, self.db_path, self.kind, self.send = base, table_id, ws, db_path, kind, send
+        self.stage, self.production_phrase = stage, production_phrase          # the phrase is the typed confirmation, not a secret
         self.status, self.error, self.result, self.progress, self.files = "running", None, None, {}, None
         self.started_at, self.finished_at = utc_now(), None
         self.cancel = threading.Event()
@@ -6032,7 +6075,7 @@ def _run_links_job(job, ctx, tr, secrets):
 def _run_emergency_job(job):
     secrets = _lt_secrets()
     try:
-        ctx = _em_context(job.send)
+        ctx = _em_context(job.send, job.stage, job.production_phrase)
         tr = tableload.transport(ctx)
         if job.kind == "links":
             _run_links_job(job, ctx, tr, secrets)
@@ -6073,7 +6116,8 @@ def api_emergency_start(body):
     table = str(body.get("table_id") or "").strip()
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table first.")
-    ctx = _em_context(True)
+    stage, phrase = _em_stage(body), body.get("production_phrase")
+    ctx = _em_context(True, stage, phrase)
     conf = body.get("confirm")
     if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
         raise AppError("Confirm the table and the Workspace ID exactly as shown before anything is sent.")
@@ -6086,7 +6130,7 @@ def api_emergency_start(body):
             raise AppError("A Git-R-Done run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
         if RKJOB["current"] and RKJOB["current"].status == "running":
             raise AppError("A re-key step is going. Wait for it or cancel it first.", 409)
-        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"])
+        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"], stage=ctx.stage, production_phrase=phrase)
         EMJOB["current"] = job
     threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
     return {"started": True, "job_id": job.id}
@@ -6100,7 +6144,8 @@ def api_emergency_links(body):
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table first.")
     send = body.get("send") is True
-    ctx = _em_context(send)
+    stage, phrase = _em_stage(body), body.get("production_phrase")
+    ctx = _em_context(send, stage, phrase)
     if send:
         conf = body.get("confirm")
         if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
@@ -6109,15 +6154,15 @@ def api_emergency_links(body):
         if table not in {t["table_id"] for t in _lt_call(tableload.table_choices, conn, base)}:
             raise AppError("That table is not in this base or is out of scope.", 404)
         if not conn.execute("SELECT 1 FROM load_id_map WHERE system='planning' AND kind='record_type' AND status='created' AND workfront_id IS NOT NULL AND environment=? AND workspace_key=? AND table_id=?",
-                            (emergency.STAGE, ctx.ws, table)).fetchone():
-            raise AppError("This table is not in Planning yet (dev Workspace %s). Run it with Go first." % ctx.ws, 409)
+                            (ctx.stage, ctx.ws, table)).fetchone():
+            raise AppError("This table is not in Planning yet (%s Workspace %s). Run it with Go first." % (ctx.stage, ctx.ws), 409)
     with _emjob_lock:
         cur = EMJOB["current"]
         if cur and cur.status == "running":
             raise AppError("A Git-R-Done run is already going (table %s). Wait for it or cancel it." % cur.table_id, 409)
         if send and RKJOB["current"] and RKJOB["current"].status == "running":
             raise AppError("A re-key step is going. Wait for it or cancel it first.", 409)
-        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"], kind="links", send=send)
+        job = EmergencyJob(base, table, ctx.ws, STATE["db_path"], kind="links", send=send, stage=ctx.stage, production_phrase=phrase)
         EMJOB["current"] = job
     threading.Thread(target=_run_emergency_job, args=(job,), daemon=True).start()
     return {"started": True, "job_id": job.id, "dry_run": not send}
@@ -6129,7 +6174,7 @@ def api_emergency_revisit(q):
     table = (q.get("table_id") or [""])[0].strip()
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table first.")
-    ctx = _em_context(False)
+    ctx = _em_context(False, _em_stage(q))
     with db() as conn:
         try:
             return _lt_out(emergency_links.revisit(conn, base, table, ctx.env.name, ctx.ws))
@@ -6143,7 +6188,7 @@ def api_emergency_formulas(q):
     table = (q.get("table_id") or [""])[0].strip()
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table first.")
-    ctx = _em_context(False)
+    ctx = _em_context(False, _em_stage(q))
     with db() as conn:
         try:
             return _lt_out(emergency.formula_precheck(conn, base, table, ctx.env.name, ctx.ws))
@@ -6155,7 +6200,7 @@ def api_emergency_status(_q=None):
     job = EMJOB["current"]
     if not job:
         return {"job": None}
-    return _lt_out({"job": {"id": job.id, "kind": job.kind, "dry_run": not job.send, "base_id": job.base, "table_id": job.table_id, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
+    return _lt_out({"job": {"id": job.id, "kind": job.kind, "dry_run": not job.send, "base_id": job.base, "table_id": job.table_id, "stage": job.stage, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at,
                             "finished_at": job.finished_at, "progress": job.progress, "result": job.result}})
 
 
@@ -6174,7 +6219,7 @@ def _em_reset_common(body, send):
     table = str(body.get("table_id") or "").strip()
     if not ID_SAFE_RE.match(table):
         raise AppError("Choose a table first.")
-    ctx = _em_context(send)
+    ctx = _em_context(send, _em_stage(body), body.get("production_phrase"), delete=True)
     if send:
         conf = body.get("confirm")
         if not (isinstance(conf, dict) and conf.get("table_id") == table and str(conf.get("workspace_id")) == ctx.ws):
@@ -6186,24 +6231,24 @@ def _em_reset_common(body, send):
 
 
 def api_emergency_reset(body):
-    """Reset one table in the DEV Workspace so Git-R-Done can build it again: with send false, this tool's own counts only (nothing is sent, nothing is written); with send true, try
+    """Reset one table in the chosen stage's Workspace so Git-R-Done can build it again: with send false, this tool's own counts only (nothing is sent, nothing is written); with send true, try
     to delete the table's record type in Workfront and, only when it is gone, forget the IDs held for the table. A refusal from Workfront is an ordinary answer (attempt.deleted false,
     nothing forgotten). Not gated by the Load a table steps: it needs only a table that this tool holds something for. See tablereset.py."""
     send = body.get("send") is True
     base, table, ctx = _em_reset_common(body, send)
     with db() as conn:
         tr = _lt_call(tableload.transport, ctx) if send else None
-        res = _lt_call(tablereset.reset, conn, base, table, emergency.STAGE, ctx.ws, tr, send)
-    res.update(dry_run=not send, workspace_id=ctx.ws, stage=emergency.STAGE)
+        res = _lt_call(tablereset.reset, conn, base, table, ctx.stage, ctx.ws, tr, send)
+    res.update(dry_run=not send, workspace_id=ctx.ws, stage=ctx.stage)
     return _lt_out(res)
 
 
 def api_emergency_forget(body):
-    """After a refused delete, and only when the person chooses: forget the IDs held for the table in the dev Workspace without calling Workfront."""
+    """After a refused delete, and only when the person chooses: forget the IDs held for the table in the chosen stage's Workspace without calling Workfront."""
     base, table, ctx = _em_reset_common(body, True)
     with db() as conn:
-        res = _lt_call(tablereset.forget_only, conn, base, table, emergency.STAGE, ctx.ws)
-    res.update(workspace_id=ctx.ws, stage=emergency.STAGE)
+        res = _lt_call(tablereset.forget_only, conn, base, table, ctx.stage, ctx.ws)
+    res.update(workspace_id=ctx.ws, stage=ctx.stage)
     return _lt_out(res)
 
 
@@ -6222,7 +6267,7 @@ def api_emergency_report(q):
 
 
 # --------------------------------------------------------------------------
-# Re-key record types: a SEPARATE page (/rekey), run only after the data is validated. It makes the Airtable primary field the primary field of each record type in the dev Workspace
+# Re-key record types: a SEPARATE page (/rekey), run only after the data is validated. It makes the Airtable primary field the primary field of each record type in the chosen stage's Workspace
 # (src/rekey.py). Checking only reads Planning; re-keying needs the person's initials, a reason, the typed phrase and the Workspace ID. A report with who, when and why is written to
 # out/rekey/ and served back by name only.
 # --------------------------------------------------------------------------
@@ -6234,8 +6279,9 @@ def rekey_out_dir():
 
 
 class RekeyJob:
-    def __init__(self, kind, base, ws, db_path, actor="", reason="", table_ids=()):
+    def __init__(self, kind, base, ws, db_path, actor="", reason="", table_ids=(), stage=emergency.STAGE, production_phrase=None):
         self.id = str(int(time.time() * 1000))
+        self.stage, self.production_phrase = stage, production_phrase
         self.kind, self.base, self.ws, self.db_path, self.actor, self.reason, self.table_ids = kind, base, ws, db_path, actor, reason, list(table_ids)
         self.status, self.error, self.result, self.progress, self.file = "running", None, None, {}, None
         self.started_at, self.finished_at = utc_now(), None
@@ -6252,7 +6298,7 @@ _rkjob_lock = threading.Lock()
 def _run_rekey_job(job):
     secrets = _lt_secrets()
     try:
-        ctx = _em_context(job.kind == "run")
+        ctx = _em_context(job.kind == "run", job.stage, job.production_phrase)
         tr = tableload.transport(ctx)
         with db(job.db_path) as conn:
             rows = rekey.candidates(conn, job.base, ctx.env.name, ctx.ws)
@@ -6281,44 +6327,36 @@ def _run_rekey_job(job):
 
 def _rekey_start(kind, body, actor="", reason="", table_ids=()):
     base = _names_base(body)
-    ctx = _em_context(kind == "run")
+    phrase = body.get("production_phrase")
+    ctx = _em_context(kind == "run", _em_stage(body), phrase)
     with _rkjob_lock:
         for cur, what in ((RKJOB["current"], "A re-key step"), (EMJOB["current"], "A Git-R-Done run"), (LOADJOB["current"], "A Load a table step")):
             if cur and cur.status == "running":
                 raise AppError("%s is going. Wait for it or cancel it first." % what, 409)
-        job = RekeyJob(kind, base, ctx.ws, STATE["db_path"], actor, reason, table_ids)
+        job = RekeyJob(kind, base, ctx.ws, STATE["db_path"], actor, reason, table_ids, stage=ctx.stage, production_phrase=phrase)
         RKJOB["current"] = job
     threading.Thread(target=_run_rekey_job, args=(job,), daemon=True).start()
     return {"started": True, "job_id": job.id}
 
 
 def api_rekey_setup(q):
-    out = {"configured": False, "problem": None, "stage": emergency.STAGE, "workspace_id": "", "phrase": rekey.PHRASE, "rows": [], "counts": None}
-    try:
-        data = loadconfig.read_config(CONFIG_PATH)
-        c = loadconfig.credentials(data, "planning", emergency.STAGE) if emergency.STAGE in loadconfig.planning_blocks(data) else None
-        if c is not None and c.workspace_id:
-            out.update(configured=True, workspace_id=c.workspace_id)
-        else:
-            out["problem"] = "The dev stage is not configured in config.json (section workfront.planning, block dev, with base_url, bearer_token and workspace_id)."
-    except loadconfig.ConfigError as e:
-        out["problem"] = str(e)
+    out = _em_stage_setup({"phrase": rekey.PHRASE, "rows": [], "counts": None}, q)
     if out["configured"] and (q.get("base_id") or [""])[0]:
         with db() as conn:
-            ctx = _em_context(False)
+            ctx = _em_context(False, out["stage"])
             out["rows"] = rekey.candidates(conn, _names_base(q), ctx.env.name, ctx.ws)
             out["counts"] = rekey.counts(out["rows"])
     return _lt_out(out)
 
 
 def api_rekey_check(body):
-    """Read the record types of the dev Workspace from Planning (reads only) and say which can be re-keyed. Nothing is changed."""
+    """Read the record types of the chosen stage's Workspace from Planning (reads only) and say which can be re-keyed. Nothing is changed."""
     return _rekey_start("check", body)
 
 
 def api_rekey_run(body):
     """Re-key the chosen record types. Needs the person's initials, a reason, the exact phrase and the Workspace ID as shown; the record types are read again first, and only those still eligible are changed."""
-    ctx = _em_context(True)
+    ctx = _em_context(True, _em_stage(body), body.get("production_phrase"))
     try:
         actor, reason = rekey.validate_decision(body.get("actor"), body.get("reason"), body.get("phrase"))
     except rekey.RekeyError as e:
@@ -6335,7 +6373,7 @@ def api_rekey_status(_q=None):
     job = RKJOB["current"]
     if not job:
         return {"job": None}
-    return _lt_out({"job": {"id": job.id, "kind": job.kind, "base_id": job.base, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at, "finished_at": job.finished_at,
+    return _lt_out({"job": {"id": job.id, "kind": job.kind, "base_id": job.base, "stage": job.stage, "workspace_id": job.ws, "status": job.status, "error": job.error, "started_at": job.started_at, "finished_at": job.finished_at,
                             "progress": job.progress, "result": job.result}})
 
 

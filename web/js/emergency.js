@@ -1,17 +1,21 @@
 "use strict";
-/* Emergency mode: one table into the dev Workspace in one click. The page only asks the server to run it and shows the answer: field names, IDs, counts, outcomes and short
+/* Emergency mode: one table into the Workspace of the chosen Planning stage in one click. The page only asks the server to run it and shows the answer: field names, IDs, counts, outcomes and short
    scrubbed reasons. No record value and no token is ever in a reply. */
 const em = { setup: null, job: null, timer: null, revisit: null };
 const baseNow = () => $("baseId").value.trim();
 const tableNow = () => $("tableSel").value;
 const wsNow = () => (em.setup && em.setup.workspace_id) || "";
+const stageNow = () => $("stageSel").value;
+const stageLabel = () => stageLabelOf(em.setup, stageNow());
+const q = () => "base_id=" + encodeURIComponent(baseNow()) + "&stage=" + encodeURIComponent(stageNow());
 
 const td = (text, cls, sort) => el("td", { class: cls || null, text: text === null || text === undefined ? "" : String(text), "data-sort": sort === undefined ? null : String(sort) });
 const OUT_ROW = { clean: "out-ok", "pre-converted": "out-hold", failed: "out-fail" };
 
 function applyGo() {
   const busy = !!(em.job && em.job.status === "running");
-  $("btnGo").disabled = !(em.setup && em.setup.configured && baseNow() && tableNow()) || busy;
+  $("btnGo").disabled = !(em.setup && em.setup.configured && baseNow() && tableNow() && stageNow()) || busy;
+  $("stageSel").disabled = busy;
   $("btnReset").disabled = $("btnGo").disabled;
   $("btnForget").disabled = busy;
   $("btnLinksCheck").disabled = $("btnGo").disabled;
@@ -42,15 +46,16 @@ function fillTables(d) {
 
 async function refreshPicker() {
   if (!baseNow()) return;
-  const d = await api("GET", "/api/emergency/setup?base_id=" + encodeURIComponent(baseNow()));
+  const d = await api("GET", "/api/emergency/setup?" + q());
   em.setup = d;
   fillTables(d);
   applyGo();
 }
 
 async function loadSetup() {
-  const d = await api("GET", "/api/emergency/setup?base_id=" + encodeURIComponent(baseNow()));
+  const d = await api("GET", "/api/emergency/setup?" + q());
   em.setup = d;
+  fillStageSelect($("stageSel"), d, d.stage);
   showGlobalError("");
   $("wsId").textContent = d.workspace_id || "(not configured)";
   setMsg("pageMessage", d.configured ? (d.tables_problem || "") : d.problem, d.configured && !d.tables_problem ? "" : d.configured ? "warn" : "err");
@@ -65,7 +70,7 @@ async function loadSetup() {
 async function loadFormulas() {
   const card = $("formulaCard");
   if (!baseNow() || !tableNow()) { card.hidden = true; return; }
-  const d = await api("GET", "/api/emergency/formulas?base_id=" + encodeURIComponent(baseNow()) + "&table_id=" + encodeURIComponent(tableNow()));
+  const d = await api("GET", "/api/emergency/formulas?" + q() + "&table_id=" + encodeURIComponent(tableNow()));
   const c = d.counts;
   card.hidden = c.total === 0;
   if (!c.total) return;
@@ -85,13 +90,13 @@ async function loadLinks() {
   const card = $("linksCard");
   em.revisit = null;
   if (!baseNow() || !tableNow()) { card.hidden = true; applyGo(); return; }
-  const d = await api("GET", "/api/emergency/revisit?base_id=" + encodeURIComponent(baseNow()) + "&table_id=" + encodeURIComponent(tableNow()));
+  const d = await api("GET", "/api/emergency/revisit?" + q() + "&table_id=" + encodeURIComponent(tableNow()));
   em.revisit = d;
   card.hidden = !(d.link_fields.length || d.held_back.length);
   const rec = d.records || {};
   setMsg("linksMsg", d.in_planning
     ? fmt(d.link_fields.length) + " link field(s). Records loaded in Planning: " + fmt(rec.loaded) + " of " + fmt(rec.registered) + "; records with links still to set: " + fmt(d.links_pending === null ? 0 : d.links_pending) + ". " + (d.needs_visit ? "This table needs a visit." : "Nothing to do for now.")
-    : "This table is not in Planning yet (dev Workspace). Run it with Go first.", d.needs_visit ? "warn" : "ok");
+    : "This table is not in Planning yet (" + stageLabel() + " Workspace). Run it with Go first.", d.needs_visit ? "warn" : "ok");
   const adv = $("linksAdvice");
   clear(adv);
   (d.advice || []).forEach((t) => adv.appendChild(el("div", { class: "hint", text: t })));
@@ -204,28 +209,32 @@ async function follow() {
 async function go() {
   const t = (em.setup.tables || []).find((x) => x.table_id === tableNow());
   const name = t ? t.airtable_name : tableNow();
-  if (!window.confirm("Send the table \"" + name + "\" (" + tableNow() + ") to the dev Workspace " + wsNow() + "?\n\nThis creates a record type and fields and loads records in Workfront Planning.")) return;
+  if (!window.confirm("Send the table \"" + name + "\" (" + tableNow() + ") to the " + stageLabel() + " Workspace " + wsNow() + "?\n\nThis creates a record type and fields and loads records in Workfront Planning.")) return;
+  const phrase = productionPhrase(stageNow(), em.setup.production_phrase, "run");
+  if (phrase === null) return;
   showGlobalError("");
   setMsg("resetMsg", "", ""); $("forgetRow").hidden = true;
   $("resultCard").hidden = true; $("linksResultCard").hidden = true;
-  await api("POST", "/api/emergency/start", { base_id: baseNow(), table_id: tableNow(), confirm: { table_id: tableNow(), workspace_id: wsNow() } });
+  await api("POST", "/api/emergency/start", { base_id: baseNow(), table_id: tableNow(), stage: stageNow(), production_phrase: phrase, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
   await follow();
   if (!em.timer && em.job && em.job.status === "running") em.timer = setInterval(() => poll().catch((e) => { stopTimer(); showGlobalError(e.message); }), 1500);
 }
 
 /* ---------- the links pass: a check that sends nothing, then the real run ---------- */
 async function runLinks(send) {
-  if (send && !window.confirm("Set the links of the table \"" + tableLabel() + "\" in the dev Workspace " + wsNow() + "?\n\nThis creates reference fields and updates records in Workfront Planning. It creates no record. A link whose other record is not in Planning yet waits.")) return;
+  if (send && !window.confirm("Set the links of the table \"" + tableLabel() + "\" in the " + stageLabel() + " Workspace " + wsNow() + "?\n\nThis creates reference fields and updates records in Workfront Planning. It creates no record. A link whose other record is not in Planning yet waits.")) return;
+  const phrase = send ? productionPhrase(stageNow(), em.setup.production_phrase, "links pass") : undefined;
+  if (phrase === null) return;
   showGlobalError("");
   $("resultCard").hidden = true; $("linksResultCard").hidden = true;
-  await api("POST", "/api/emergency/links", { base_id: baseNow(), table_id: tableNow(), send, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
+  await api("POST", "/api/emergency/links", { base_id: baseNow(), table_id: tableNow(), stage: stageNow(), send, production_phrase: phrase, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
   await follow();
   if (!em.timer && em.job && em.job.status === "running") em.timer = setInterval(() => poll().catch((e) => { stopTimer(); showGlobalError(e.message); }), 1500);
 }
 
 /* ---------- reset: delete the record type, then forget the IDs (a refusal is an answer, not an error) ---------- */
 const forgotten = (c) => fmt(c.load_id_map) + " recorded item(s), " + fmt(c.mappings) + " record ID(s), " + fmt(c.markers) + " marker(s), " + fmt(c.option_ids) + " option ID(s)";
-const resetBody = (send) => ({ base_id: baseNow(), table_id: tableNow(), send, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
+const resetBody = (send, phrase) => ({ base_id: baseNow(), table_id: tableNow(), stage: stageNow(), send, production_phrase: phrase, confirm: { table_id: tableNow(), workspace_id: wsNow() } });
 const tableLabel = () => { const t = (em.setup.tables || []).find((x) => x.table_id === tableNow()); return (t ? t.airtable_name : tableNow()) + " (" + tableNow() + ")"; };
 const linkWarn = (r) => (r.inbound || []).length ? "\n\nLink fields of other tables point at this one (" + r.inbound.map((x) => x.name + " x " + fmt(x.fields)).join(", ") + "); Workfront may refuse the delete because of them." : "";
 
@@ -247,14 +256,18 @@ async function resetTable() {
   showGlobalError(""); setMsg("resetMsg", "", ""); $("forgetRow").hidden = true;
   const peek = await api("POST", "/api/emergency/reset", resetBody(false));        // this tool's own counts: nothing is sent
   const b = peek.before;
-  if (!window.confirm("Reset the table \"" + tableLabel() + "\" in the dev Workspace " + wsNow() + "?\n\nThis tool holds " + fmt(b.map_total) + " recorded item(s), " + fmt(b.mapped_records) + " record ID(s), " + fmt(b.markers) + " marker(s) and " + fmt(b.option_ids) + " option ID(s) for it. "
+  if (!window.confirm("Reset the table \"" + tableLabel() + "\" in the " + stageLabel() + " Workspace " + wsNow() + "?\n\nThis tool holds " + fmt(b.map_total) + " recorded item(s), " + fmt(b.mapped_records) + " record ID(s), " + fmt(b.markers) + " marker(s) and " + fmt(b.option_ids) + " option ID(s) for it. "
     + (b.record_type ? "It will try to DELETE record type " + b.record_type + " in Workfront Planning, with its fields and records, then forget these. This cannot be undone." : "No record type ID is recorded, so nothing will be deleted in Workfront; these will be forgotten.") + linkWarn(peek))) return;
-  showReset(await api("POST", "/api/emergency/reset", resetBody(true)));
+  const phrase = productionPhrase(stageNow(), em.setup.reset_phrase, "reset");
+  if (phrase === null) return;
+  showReset(await api("POST", "/api/emergency/reset", resetBody(true, phrase)));
 }
 
 async function forgetTable() {
-  if (!window.confirm("Forget every ID this tool holds for \"" + tableLabel() + "\" in the dev Workspace " + wsNow() + "?\n\nNothing is sent to Workfront. A record type still there will cause a name clash on the next Go.")) return;
-  const r = await api("POST", "/api/emergency/forget", resetBody(true));
+  if (!window.confirm("Forget every ID this tool holds for \"" + tableLabel() + "\" in the " + stageLabel() + " Workspace " + wsNow() + "?\n\nNothing is sent to Workfront. A record type still there will cause a name clash on the next Go.")) return;
+  const phrase = productionPhrase(stageNow(), em.setup.reset_phrase, "forget");
+  if (phrase === null) return;
+  const r = await api("POST", "/api/emergency/forget", resetBody(true, phrase));
   $("forgetRow").hidden = true;
   $("resultCard").hidden = true;
   refreshPicker().catch(() => {});
@@ -268,6 +281,7 @@ startPage("emergency", { afterConnect }, () => {
   initBaseCombo();
   watchSort("fieldGrid");
   $("baseId").addEventListener("input", guarded(loadSetup));
+  $("stageSel").addEventListener("change", guarded(async () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; $("resultCard").hidden = true; $("linksResultCard").hidden = true; await loadSetup(); }));
   $("tableSel").addEventListener("change", () => { setMsg("resetMsg", "", ""); $("forgetRow").hidden = true; applyGo(); loadFormulas().catch((e) => { $("formulaCard").hidden = true; showGlobalError(e.message); }); loadLinks().catch((e) => { $("linksCard").hidden = true; showGlobalError(e.message); }); });
   $("btnGo").addEventListener("click", guarded(go));
   $("btnLinksCheck").addEventListener("click", guarded(() => runLinks(false)));

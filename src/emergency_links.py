@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The links pass of Git-R-Done: set ONE table's link fields in the DEV Planning Workspace, after the tables they point to are loaded. Standard library only.
+"""The links pass of Git-R-Done: set ONE table's link fields in the Workspace of the chosen Planning stage, after the tables they point to are loaded. Standard library only.
 
 Git-R-Done skips link fields when it loads a table (a link needs the Planning record IDs of the other table, which do not exist yet), and holds back every field whose value comes
 through a link (linkdeps.py). This module is the second visit to the table. It never loads records again (a records reload would create each record twice): the records are already
